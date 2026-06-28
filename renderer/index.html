@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Meeting Recorder</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <h1>🎙 Meeting Recorder</h1>
+    <span class="tag">локально · MLX Whisper · pyannote · LM Studio</span>
+    <button id="settingsOpen" class="settings-btn" title="Настройки и готовность">⚙</button>
+  </header>
+
+  <nav class="topnav">
+    <button class="topbtn active" data-view="record">🎙 Запись</button>
+    <button class="topbtn" data-view="history">📚 История</button>
+    <button class="topbtn" data-view="para">🗂 PARA</button>
+  </nav>
+
+  <main>
+    <div id="view-record">
+    <!-- SOURCE -->
+    <section class="card">
+      <h2>1 · Источник аудио</h2>
+      <div class="tabs">
+        <button class="tab active" data-tab="record">Запись</button>
+        <button class="tab" data-tab="import">Загрузить файл</button>
+      </div>
+
+      <div class="tabpane" id="pane-record">
+        <p class="hint">Пишем <b>микрофон + системный звук</b> автоматически — настраивать источник не нужно.</p>
+        <label>Микрофон
+          <select id="micDevice"></select>
+        </label>
+        <div id="sysStatus" class="sys-status">🔊 Системный звук: статус появится при записи</div>
+        <div class="vu"><span class="vu-label">🎤</span><div class="vu-track"><div id="vuMic" class="vu-fill"></div></div></div>
+        <div class="vu"><span class="vu-label">🔊</span><div class="vu-track"><div id="vuSys" class="vu-fill"></div></div></div>
+        <div class="rec-row">
+          <button id="recBtn" class="btn primary">● Начать запись</button>
+          <span id="timer" class="timer">00:00</span>
+        </div>
+      </div>
+
+      <div class="tabpane hidden" id="pane-import">
+        <button id="pickBtn" class="btn">📂 Выбрать аудиофайл</button>
+        <span id="pickedFile" class="filepath">не выбран</span>
+      </div>
+    </section>
+
+    <!-- PROMPT -->
+    <section class="card">
+      <h2>2 · Промпт для сводки</h2>
+      <div class="preset-row">
+        <select id="presetSelect"></select>
+        <button id="newPreset" class="btn small">＋ Новый</button>
+        <button id="delPreset" class="btn small ghost">🗑</button>
+      </div>
+      <input type="text" id="presetName" placeholder="Название пресета" />
+      <textarea id="prompt" rows="7" spellcheck="false"></textarea>
+      <p class="hint">Изменения названия и текста сохраняются в выбранный пресет автоматически.</p>
+      <div class="opts-row">
+        <label>Язык
+          <select id="language">
+            <option value="ru">Русский</option>
+            <option value="en">English</option>
+            <option value="auto">Авто</option>
+          </select>
+        </label>
+      </div>
+      <label class="check">
+        <input type="checkbox" id="diarize" checked /> Определять спикеров (диаризация, медленнее)
+      </label>
+      <label class="check">
+        <input type="checkbox" id="noSummary" /> Только транскрипт (без сводки LLM)
+      </label>
+      <label style="margin-top:12px">HF-токен (для диаризации, хранится локально)
+        <input type="password" id="hfToken" placeholder="hf_…  — пусто: спикеров определит LLM" />
+      </label>
+      <p id="tokenWarn" class="warn-text" style="display:none">⚠️ Системный keychain недоступен — токен хранится в обратимом виде (base64), не зашифрован.</p>
+    </section>
+
+    <!-- OUTPUT -->
+    <section class="card">
+      <h2>3 · Куда сохранять</h2>
+      <div class="out-row">
+        <input type="text" id="outDir" readonly />
+        <button id="pickOut" class="btn small">Изменить</button>
+      </div>
+    </section>
+
+    <div class="run-row">
+      <button id="runBtn" class="btn primary big" disabled>▶ Обработать</button>
+      <button id="stopBtn" class="btn big" style="display:none">■ Остановить</button>
+      <span id="procSpinner" class="spinner" style="display:none"></span>
+      <button id="retryBtn" class="btn" style="display:none" title="Повтор с сохранённого прогресса — транскрипция/диаризация из кеша">↻ Повторить</button>
+      <button id="freshBtn" class="btn ghost" style="display:none" title="Сбросить кеш и пересчитать все этапы">Заново</button>
+    </div>
+
+    <!-- PROGRESS -->
+    <section class="card" id="progressCard" style="display:none">
+      <h2>Прогресс</h2>
+      <div class="stages" id="stages"></div>
+      <p class="hint">Кликни по этапу — увидишь его логи. 🟢 ок · 🔴 ошибка · ⚪ пропущен</p>
+      <pre id="logs"></pre>
+    </section>
+
+    <!-- RESULTS -->
+    <section class="card" id="resultCard" style="display:none">
+      <h2>Результат</h2>
+      <div class="result-actions">
+        <button id="openNote" class="btn small">📄 Открыть заметку</button>
+        <button id="openAudio" class="btn small">🎵 Показать аудио</button>
+      </div>
+      <div id="speakerMap" class="speaker-map" style="display:none">
+        <div class="speaker-title">Переименовать спикеров</div>
+        <div id="speakerInputs"></div>
+        <button id="applySpeakers" class="btn small">Применить</button>
+      </div>
+      <div class="result-tabs">
+        <button class="rtab active" data-r="summary">Сводка</button>
+        <button class="rtab" data-r="transcript">Транскрипт</button>
+      </div>
+      <pre id="resSummary" class="result-pane"></pre>
+      <pre id="resTranscript" class="result-pane hidden"></pre>
+    </section>
+
+    </div><!-- /view-record -->
+
+    <!-- HISTORY VIEW -->
+    <div id="view-history" class="hidden">
+      <div class="history-layout">
+        <aside class="history-rail">
+          <div class="rail-head">
+            <span>Заметки</span>
+            <button id="historyRefresh" class="btn small">⟳</button>
+          </div>
+          <div class="rail-filters">
+            <input id="historySearch" type="text" placeholder="🔍 Поиск по теме" />
+            <select id="historyLang">
+              <option value="">Все языки</option>
+              <option value="ru">ru</option>
+              <option value="en">en</option>
+              <option value="auto">auto</option>
+            </select>
+            <select id="historyTemplate"><option value="">Все шаблоны</option></select>
+            <div class="rail-dates">
+              <input id="historyFrom" type="date" title="С даты" />
+              <input id="historyTo" type="date" title="По дату" />
+            </div>
+          </div>
+          <div id="historyList"></div>
+        </aside>
+        <section class="note-view" id="noteView">
+          <p class="hint">Выбери заметку слева.</p>
+        </section>
+      </div>
+    </div>
+
+    <!-- PARA VIEW -->
+    <div id="view-para" class="hidden">
+      <div class="para-layout">
+        <aside class="para-subnav">
+          <button class="subbtn active" data-sub="inbox">📥 Разбор</button>
+          <button class="subbtn" data-sub="search" disabled title="скоро">🔍 Поиск</button>
+          <button class="subbtn" data-sub="tree">🗂 Хранилище</button>
+        </aside>
+        <div class="para-main">
+        <div id="para-pane-inbox">
+      <section class="card" id="paraSetup" style="display:none">
+        <h2>PARA-vault</h2>
+        <p class="hint">Выбери папку — создам структуру PARA и буду раскладывать заметки туда.</p>
+        <div class="out-row">
+          <input id="paraRoot" type="text" readonly placeholder="папка не выбрана" />
+          <button id="paraPick" class="btn small">Выбрать папку</button>
+        </div>
+        <div class="para-names">
+          <label>Projects <input id="paraFprojects" value="Projects" /></label>
+          <label>Areas <input id="paraFareas" value="Areas" /></label>
+          <label>Resources <input id="paraFresources" value="Resources" /></label>
+          <label>Archives <input id="paraFarchives" value="Archives" /></label>
+        </div>
+        <button id="paraCreate" class="btn primary">Создать vault</button>
+      </section>
+
+      <section class="card" id="paraWork" style="display:none">
+        <h2>Разбор заметок <button id="paraChangeVault" class="btn small ghost">Изменить vault</button></h2>
+        <div class="note-meta" id="paraVaultPath"></div>
+        <div class="run-row">
+          <button id="paraClassifyAll" class="btn primary">🗂 Разобрать все (LLM)</button>
+          <button id="paraClassifyCancel" class="btn small ghost hidden">⛔ Стоп</button>
+        </div>
+        <pre id="paraClassifyLog" class="hidden"></pre>
+        <div id="paraInbox" class="para-inbox"></div>
+      </section>
+        </div><!-- /para-pane-inbox -->
+        <div id="para-pane-tree" class="hidden">
+          <section class="card">
+            <h2>Хранилище <button id="paraTreeRefresh" class="btn small">⟳</button></h2>
+            <div class="para-tree-split">
+              <div id="paraTree" class="para-tree"></div>
+              <div id="paraTreeView" class="para-treeview">
+                <p class="hint">Выбери заметку слева — покажу содержимое (только чтение).</p>
+              </div>
+            </div>
+          </section>
+        </div>
+        </div><!-- /para-main -->
+      </div><!-- /para-layout -->
+    </div>
+  </main>
+
+  <!-- SETTINGS / READINESS MODAL -->
+  <div id="settingsOverlay" class="overlay hidden">
+    <div class="modal" role="dialog" aria-modal="true">
+      <div class="modal-head">
+        <h2>Настройки и готовность</h2>
+        <button id="settingsClose" class="settings-btn" title="Закрыть">✕</button>
+      </div>
+
+      <section class="modal-sec">
+        <h3>Перед началом работы</h3>
+        <ol class="setup-steps">
+          <li><b>Запусти LM Studio</b> и загрузи модель — нужна для сводок, заголовков и PARA-разбора (сервер на <code>:1234</code>).</li>
+          <li><b>Подними лимит токенов</b> в LM Studio: Context Length ≥ ~20k и output ≥ 16000 — иначе PARA-разбор обрывается на размышлениях.</li>
+          <li><b>Дай доступ к микрофону</b> и <b>записи экрана</b> (для системного звука) в Системных настройках macOS.</li>
+          <li><b>Установи ffmpeg</b>: <code>brew install ffmpeg</code> — без него не собрать аудио.</li>
+          <li><i>Опционально:</i> HF-токен для диаризации (имена спикеров). Без него — спикеры по таймкодам.</li>
+          <li>Модель Whisper скачается автоматически при первой транскрипции (~1.5 ГБ).</li>
+        </ol>
+      </section>
+
+      <section class="modal-sec">
+        <h3>Готовность <button id="preflightRefresh" class="btn small">⟳ Проверить</button></h3>
+        <div id="preflightVerdict" class="pf-verdict"></div>
+        <div id="preflightList" class="preflight-list"></div>
+      </section>
+    </div>
+  </div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>

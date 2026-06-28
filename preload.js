@@ -1,0 +1,26 @@
+const { contextBridge, ipcRenderer } = require("electron");
+
+contextBridge.exposeInMainWorld("api", {
+  preflight: () => ipcRenderer.invoke("preflight"),
+  listDevices: () => ipcRenderer.invoke("list-devices"),
+  getPresets: () => ipcRenderer.invoke("get-presets"),
+  savePresets: (data) => ipcRenderer.invoke("save-presets", data),
+  pickAudio: () => ipcRenderer.invoke("pick-audio"),
+  pickOutDir: () => ipcRenderer.invoke("pick-out-dir"),
+  startRecording: (opts) => ipcRenderer.invoke("start-recording", opts),
+  stopRecording: () => ipcRenderer.invoke("stop-recording"),
+  processAudio: (opts) => ipcRenderer.invoke("process-audio", opts),
+  cancelProcess: () => ipcRenderer.invoke("cancel-process"),
+  reveal: (p) => ipcRenderer.invoke("reveal", p),
+  renameSpeakers: (notePath, map) => ipcRenderer.invoke("rename-speakers", { notePath, map }),
+  listHistory: (outDir) => ipcRenderer.invoke("list-history", outDir),
+  readNote: (notePath) => ipcRenderer.invoke("read-note", notePath),
+  paraCreateVault: (cfg) => ipcRenderer.invoke("para-create-vault", cfg),
+  paraTree: (root) => ipcRenderer.invoke("para-tree", root),
+  paraClassify: (arg) => ipcRenderer.invoke("para-classify", arg),
+  paraExtract: (notePath) => ipcRenderer.invoke("para-extract", notePath),
+  paraFile: (args) => ipcRenderer.invoke("para-file", args),
+
+  onRecordEvent: (cb) => ipcRenderer.on("record-event", (_e, ev) => cb(ev)),
+  onProcessEvent: (cb) => ipcRenderer.on("process-event", (_e, ev) => cb(ev)),
+});

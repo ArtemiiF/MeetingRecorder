@@ -1,0 +1,21 @@
+{
+  "name": "meeting-recorder",
+  "version": "1.0.0",
+  "description": "Локальная запись встреч: микрофон + системный звук → транскрипт → сводка по промпту",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test tests/mainutil.test.js tests/renderer.test.js && ../venv/bin/python -m pytest tests/ -q",
+    "test:js": "node --test tests/mainutil.test.js tests/renderer.test.js",
+    "test:py": "../venv/bin/python -m pytest tests/ -q"
+  },
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "jsdom": "^29.1.1"
+  },
+  "dependencies": {
+    "audiotee": "^0.0.7"
+  }
+}
