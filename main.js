@@ -34,6 +34,7 @@ const PROJECT_DIR = path.dirname(APP_DIR); // MeetingRecorder/
 const VENV_PYTHON = path.join(PROJECT_DIR, "venv", "bin", "python");
 const BACKEND = path.join(APP_DIR, "backend.py");
 const PRESETS_FILE = path.join(APP_DIR, "presets.json");
+const PRESETS_EXAMPLE = path.join(APP_DIR, "presets.example.json");
 const DB_PATH = path.join(APP_DIR, "index.db"); // derived SQLite index (gitignored)
 const TMP_DIR = path.join(os.tmpdir(), "meeting-recorder");
 const DEFAULT_OUT = path.join(os.homedir(), "Documents", "Obsidian", "Meetings");
@@ -230,9 +231,15 @@ ipcMain.handle("get-presets", async () => {
   try {
     data = JSON.parse(fs.readFileSync(PRESETS_FILE, "utf-8"));
   } catch {
-    return { presets: [], defaultOutDir: DEFAULT_OUT, hfToken: loadToken(), secretEncrypted: safeStorage.isEncryptionAvailable() };
+    // fresh clone: fall back to the committed template (personal presets.json is gitignored)
+    try {
+      data = JSON.parse(fs.readFileSync(PRESETS_EXAMPLE, "utf-8"));
+    } catch {
+      return { presets: [], defaultOutDir: DEFAULT_OUT, hfToken: loadToken(), secretEncrypted: safeStorage.isEncryptionAvailable() };
+    }
   }
   data.defaultOutDir = expandHome(data.defaultOutDir);
+  if (data.para && data.para.root) data.para.root = expandHome(data.para.root);
   let token = loadToken();
   if (!token && data.hfToken) {        // migrate legacy plaintext token out of presets.json
     token = data.hfToken;

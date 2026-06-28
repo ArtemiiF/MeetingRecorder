@@ -6,8 +6,11 @@
 
 ```bash
 cd app
+npm install
 npm start
 ```
+
+Первый запуск берёт пресеты и пути из `presets.example.json`; личный `presets.json` (в git не попадает) пишется при первом сохранении настроек. Можно сразу скопировать и отредактировать: `cp presets.example.json presets.json`.
 
 Нужно для полного цикла:
 - **LM Studio** запущен на `localhost:1234` (для сводки).
