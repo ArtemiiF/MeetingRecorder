@@ -18,6 +18,7 @@
     }
   ],
   "defaultOutDir": "~/Documents/Obsidian/Meetings",
+  "authorName": "Автор",
   "language": "ru",
   "para": {
     "root": "~/Documents/Obsidian",

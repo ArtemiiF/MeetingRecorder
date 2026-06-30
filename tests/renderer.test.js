@@ -463,3 +463,63 @@ test("view switching toggles record/history panels", async () => {
   assert.ok(!$("view-record").classList.contains("hidden"));
   assert.ok($("view-history").classList.contains("hidden"));
 });
+
+// ── authorName setting ────────────────────────────────────────────────────────
+
+test("authorName loads from presets into state and the settings input", async () => {
+  const { $, window } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru", authorName: "Кирилл",
+    }),
+  });
+  await tick(window);
+  assert.equal($("authorName").value, "Кирилл");
+});
+
+test("authorName defaults to 'Автор' when absent from presets", async () => {
+  const { $, window } = await boot({
+    getPresets: async () => ({ presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru" }),
+  });
+  await tick(window);
+  assert.equal($("authorName").value, "Автор");
+});
+
+test("changing authorName input persists with authorName in savePresets payload", async () => {
+  let saved = null;
+  const { $, window } = await boot({ savePresets: async (data) => { saved = data; return true; } });
+  await tick(window);
+  $("authorName").value = "Наталья";
+  $("authorName").dispatchEvent(new window.Event("change"));
+  await tick(window);
+  assert.ok(saved, "savePresets was not called");
+  assert.equal(saved.authorName, "Наталья");
+});
+
+test("'это я' button fills speaker row input with authorName; Apply sends it through rename API", async () => {
+  let renamed = null;
+  const { window, $, handlers } = await boot({
+    getPresets: async () => ({
+      presets: [{ name: "P", prompt: "x" }], defaultOutDir: "/tmp", hfToken: "", language: "ru", authorName: "Алёна",
+    }),
+    renameSpeakers: async (notePath, map) => { renamed = { notePath, map }; return { ok: true }; },
+  });
+  await tick(window);
+  handlers.record({ event: "recorded", file: "/tmp/mixed.wav", mic: "/tmp/m.wav", system: null, tracks: 1 });
+  $("runBtn").click(); await tick(window);
+  handlers.process({
+    event: "done", note: "/o/meeting.md", audio: "/o/a.wav",
+    transcript: "**[Спикер 1]**: привет\n\n**[Спикер 2]**: пока", summary: "s",
+  });
+  await tick(window);
+  // click "это я" on the first speaker row
+  const meBtn = $("speakerInputs").querySelector(".speaker-me");
+  assert.ok(meBtn, "'это я' button not found in speaker row");
+  meBtn.click();
+  // the first row's input should now contain the author name
+  const firstInput = $("speakerInputs").querySelectorAll("input")[0];
+  assert.equal(firstInput.value, "Алёна");
+  // Apply should send it through rename API
+  $("applySpeakers").click(); await tick(window);
+  assert.ok(renamed, "renameSpeakers was not called");
+  assert.equal(renamed.map["Спикер 1"], "Алёна");
+});

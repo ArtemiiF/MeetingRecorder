@@ -14,6 +14,7 @@ const state = {
   outDir: "",
   hfToken: "",
   language: "ru",
+  authorName: "Автор",
   para: null, // { root, folders: {projects, areas, resources, archives} }
 };
 
@@ -105,11 +106,13 @@ async function init() {
   state.outDir = data.defaultOutDir || "";
   state.hfToken = data.hfToken || "";
   state.language = data.language || "ru";
+  state.authorName = data.authorName || "Автор";
   state.para = data.para || null;
   state.secretEncrypted = data.secretEncrypted !== false;
   $("outDir").value = state.outDir;
   $("hfToken").value = state.hfToken;
   $("language").value = state.language;
+  $("authorName").value = state.authorName;
   updateTokenWarn();
   renderPresets();
   if (state.presets.length) selectPreset(0);
@@ -172,6 +175,7 @@ async function persistPresets() {
     defaultOutDir: state.outDir,
     hfToken: state.hfToken,
     language: state.language,
+    authorName: state.authorName,
     para: state.para,
   });
 }
@@ -185,6 +189,11 @@ $("hfToken").addEventListener("change", (e) => {
   state.hfToken = e.target.value;
   persistPresets();
   updateTokenWarn();
+});
+
+$("authorName").addEventListener("change", (e) => {
+  state.authorName = e.target.value || "Автор";
+  persistPresets();
 });
 
 function updateTokenWarn() {
@@ -616,8 +625,15 @@ function buildSpeakerMap(transcript, prefill = {}) {
     inp.dataset.old = l;
     inp.placeholder = "имя";
     if (prefill[l]) inp.value = prefill[l];   // name inferred from context
+    const meBtn = document.createElement("button");
+    meBtn.type = "button";
+    meBtn.className = "btn small speaker-me";
+    meBtn.textContent = "это я";
+    meBtn.title = "Вставить моё имя (" + state.authorName + ")";
+    meBtn.addEventListener("click", () => { inp.value = state.authorName; });
     row.appendChild(old);
     row.appendChild(inp);
+    row.appendChild(meBtn);
     box.appendChild(row);
   });
 }
