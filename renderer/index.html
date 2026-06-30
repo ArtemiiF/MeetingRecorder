@@ -163,7 +163,7 @@
       <div class="para-layout">
         <aside class="para-subnav">
           <button class="subbtn active" data-sub="inbox">📥 Разбор</button>
-          <button class="subbtn" data-sub="search" disabled title="скоро">🔍 Поиск</button>
+          <button class="subbtn" data-sub="search">🔍 Поиск</button>
           <button class="subbtn" data-sub="tree">🗂 Хранилище</button>
         </aside>
         <div class="para-main">
@@ -195,6 +195,22 @@
         <div id="paraInbox" class="para-inbox"></div>
       </section>
         </div><!-- /para-pane-inbox -->
+        <div id="para-pane-search" class="hidden">
+          <section class="card">
+            <h2>Поиск по заметкам (AI)</h2>
+            <div class="run-row">
+              <button id="paraReindexBtn" class="btn small">⟳ Переиндексировать</button>
+              <button id="paraChatNewBtn" class="btn small ghost">✕ Новый чат</button>
+              <span id="paraReindexStatus" class="hint"></span>
+            </div>
+            <pre id="paraReindexLog" class="hidden"></pre>
+            <div id="paraChatLog" class="para-chat-log"></div>
+            <div class="search-row">
+              <input id="paraSearchQuery" type="text" placeholder="Задай вопрос по заметкам…" />
+              <button id="paraSearchBtn" class="btn primary">🔍 Спросить</button>
+            </div>
+          </section>
+        </div>
         <div id="para-pane-tree" class="hidden">
           <section class="card">
             <h2>Хранилище <button id="paraTreeRefresh" class="btn small">⟳</button></h2>

@@ -20,7 +20,10 @@ contextBridge.exposeInMainWorld("api", {
   paraClassify: (arg) => ipcRenderer.invoke("para-classify", arg),
   paraExtract: (notePath) => ipcRenderer.invoke("para-extract", notePath),
   paraFile: (args) => ipcRenderer.invoke("para-file", args),
+  paraReindex: (root) => ipcRenderer.invoke("para-reindex", { root }),
+  paraSearch: (root, messages) => ipcRenderer.invoke("para-search", { root, messages }),
 
   onRecordEvent: (cb) => ipcRenderer.on("record-event", (_e, ev) => cb(ev)),
   onProcessEvent: (cb) => ipcRenderer.on("process-event", (_e, ev) => cb(ev)),
+  onParaReindexEvent: (cb) => ipcRenderer.on("para-reindex-event", (_e, ev) => cb(ev)),
 });

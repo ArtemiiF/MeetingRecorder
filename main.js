@@ -7,6 +7,7 @@ const readline = require("readline");
 const {
   WavWriter, rmsLevel, cacheKey, pairHistory,
   encodeTokenBlob, decodeTokenBlob, isStale,
+  rewriteNoteSpeakers,
 } = require("./lib/mainutil");
 
 // audiotee is ESM-only — load it lazily via dynamic import() from this CommonJS module.
@@ -93,6 +94,7 @@ function runBackend(args, onEvent, onClose, extraEnv = {}) {
   let stderr = "";
   proc.stderr.on("data", (d) => (stderr += d.toString()));
   proc.on("close", (code) => onClose(code, stderr));
+  proc.on("error", (e) => onClose(-1, String(e)));
   return proc;
 }
 
@@ -165,12 +167,20 @@ app.on("activate", () => {
 // ── IPC ────────────────────────────────────────────────────────────────────
 ipcMain.handle("preflight", async () => {
   let lmStudio = false;
+  let embedModel = false;
   try {
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), 2000);
     const r = await fetch("http://localhost:1234/v1/models", { signal: ctrl.signal });
     clearTimeout(t);
     lmStudio = r.ok;
+    if (r.ok) {
+      try {
+        const data = await r.json();
+        const models = (data && data.data) || [];
+        embedModel = models.some((m) => m.id && m.id.toLowerCase().includes("embed"));
+      } catch {}
+    }
   } catch {}
   let mic = "unknown", screen = "unknown";
   try { mic = systemPreferences.getMediaAccessStatus("microphone"); } catch {}
@@ -182,7 +192,7 @@ ipcMain.handle("preflight", async () => {
       () => resolve(out), token ? { HF_TOKEN: token } : {});
   });
   return {
-    lmStudio, mic, screen,
+    lmStudio, mic, screen, embedModel,
     ffmpeg: !!be.ffmpeg, whisperCached: !!be.whisper_cached, hfToken: !!be.hf_token,
   };
 });
@@ -476,16 +486,14 @@ ipcMain.handle("list-history", async (_e, outDir) => {
   }));
 });
 
-// Rewrite speaker labels in a saved note (**[old]** → **[new]**), atomically.
+// Rewrite speaker labels in a saved note (**[old]** → **[new]**) and the
+// frontmatter speakers key, atomically.
 ipcMain.handle("rename-speakers", async (_e, { notePath, map }) => {
   try {
-    let text = fs.readFileSync(notePath, "utf-8");
-    for (const [oldL, newL] of Object.entries(map || {})) {
-      if (!newL || newL === oldL) continue;
-      text = text.split(`**[${oldL}]**`).join(`**[${newL}]**`);
-    }
+    const text = fs.readFileSync(notePath, "utf-8");
+    const rewritten = rewriteNoteSpeakers(text, map || {});
     const tmp = notePath + ".tmp";
-    fs.writeFileSync(tmp, text, "utf-8");
+    fs.writeFileSync(tmp, rewritten, "utf-8");
     fs.renameSync(tmp, notePath);
     return { ok: true };
   } catch (e) {
@@ -618,4 +626,42 @@ ipcMain.handle("para-file", async (_e, { note, audio, category, project, extract
 ipcMain.handle("reveal", async (_e, p) => {
   const { shell } = require("electron");
   shell.showItemInFolder(p);
+});
+
+ipcMain.handle("para-reindex", async (_e, { root }) => {
+  return new Promise((resolve) => {
+    let summary = null;
+    runBackend(["index", "--root", root, "--db", DB_PATH],
+      (ev) => {
+        if (ev.event === "indexed") summary = { indexed: ev.indexed, skipped: ev.skipped, removed: ev.removed };
+        else if (ev.event === "log" || ev.event === "error") send("para-reindex-event", ev);
+      },
+      (_code, stderr) => {
+        if (!summary) summary = { error: stderr || "нет ответа от backend" };
+        resolve(summary);
+      });
+  });
+});
+
+ipcMain.handle("para-search", async (_e, { root, messages, query }) => {
+  // Accept either {root, messages} (multi-turn) or {root, query} (legacy single-shot).
+  // Normalise to --messages form so backend always gets a proper conversation array.
+  let msgArray = messages;
+  if (!msgArray) {
+    // back-compat: legacy {root, query} call → wrap as single-message array
+    msgArray = [{ role: "user", content: query || "" }];
+  }
+  const messagesJson = JSON.stringify(msgArray);
+  return new Promise((resolve, reject) => {
+    let result = null;
+    runBackend(["search", "--root", root, "--db", DB_PATH, "--messages", messagesJson],
+      (ev) => {
+        if (ev.event === "search_result") result = { found: ev.found, answer: ev.answer, citations: ev.citations };
+        else if (ev.event === "error") result = { found: false, error: ev.msg };
+      },
+      (_code, stderr) => {
+        if (result) resolve(result);
+        else reject(new Error(stderr || "нет ответа от backend"));
+      });
+  });
 });

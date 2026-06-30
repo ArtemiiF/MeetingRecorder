@@ -7,6 +7,7 @@ const path = require("path");
 const {
   buildWavHeader, WavWriter, rmsLevel, cacheKey,
   pairHistory, encodeTokenBlob, decodeTokenBlob, isStale,
+  rewriteNoteSpeakers,
 } = require("../lib/mainutil");
 
 // ── WAV header ──────────────────────────────────────────────────────────────
@@ -121,4 +122,48 @@ test("isStale: older than maxAge is stale, newer is not", () => {
   const now = 1_000_000;
   assert.equal(isStale(now - 10, now, 100), false);
   assert.equal(isStale(now - 200, now, 100), true);
+});
+
+// ── rewriteNoteSpeakers ───────────────────────────────────────────────────────
+test("rewriteNoteSpeakers: rewrites body mentions", () => {
+  const text = "---\ntype: meeting\n---\n\n**[Спикер 1]**: привет\n**[Спикер 2]**: пока";
+  const out = rewriteNoteSpeakers(text, { "Спикер 1": "Алексей" });
+  assert.ok(out.includes("**[Алексей]**: привет"));
+  assert.ok(out.includes("**[Спикер 2]**: пока")); // unchanged
+});
+
+test("rewriteNoteSpeakers: rewrites frontmatter speakers key", () => {
+  const text = '---\ntype: meeting\nspeakers: "Спикер 1, Спикер 2"\n---\n\nbody';
+  const out = rewriteNoteSpeakers(text, { "Спикер 1": "Алексей" });
+  assert.ok(out.includes('speakers: "Алексей, Спикер 2"'));
+});
+
+test("rewriteNoteSpeakers: rewrites both body and frontmatter in one call", () => {
+  const text =
+    '---\ntype: meeting\nspeakers: "Спикер 1, Спикер 2"\n---\n\n' +
+    "**[Спикер 1]**: hi\n**[Спикер 2]**: bye";
+  const out = rewriteNoteSpeakers(text, { "Спикер 1": "Алексей", "Спикер 2": "Мария" });
+  assert.ok(out.includes('speakers: "Алексей, Мария"'));
+  assert.ok(out.includes("**[Алексей]**: hi"));
+  assert.ok(out.includes("**[Мария]**: bye"));
+});
+
+test("rewriteNoteSpeakers: skips empty or same-name mappings", () => {
+  const text = '---\nspeakers: "Спикер 1"\n---\n\n**[Спикер 1]**: hi';
+  const out = rewriteNoteSpeakers(text, { "Спикер 1": "" });
+  // no rename: body and frontmatter unchanged
+  assert.ok(out.includes('speakers: "Спикер 1"'));
+  assert.ok(out.includes("**[Спикер 1]**: hi"));
+});
+
+test("rewriteNoteSpeakers: empty map returns text unchanged", () => {
+  const text = "---\nspeakers: \"A\"\n---\n\nbody";
+  assert.equal(rewriteNoteSpeakers(text, {}), text);
+});
+
+test("rewriteNoteSpeakers: no frontmatter speakers key leaves body-only rewrite intact", () => {
+  const text = "---\ntype: meeting\n---\n\n**[Спикер 1]**: hi";
+  const out = rewriteNoteSpeakers(text, { "Спикер 1": "Алексей" });
+  assert.ok(out.includes("**[Алексей]**: hi"));
+  assert.ok(!out.includes("speakers:")); // no key was added
 });

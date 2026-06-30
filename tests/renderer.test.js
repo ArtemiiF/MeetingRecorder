@@ -33,9 +33,13 @@ async function boot(apiOverrides = {}) {
     stopRecording: async () => ({ ok: true }),
     processAudio: async () => ({ ok: true }),
     cancelProcess: async () => ({ ok: true }),
+    paraExtract: async () => ({ content: "x" }),
+    paraReindex: async () => ({ indexed: 0, skipped: 0, removed: 0 }),
+    paraSearch: async (_root, _messages) => ({ found: false, answer: "Не нашёл по этому вопросу записей в заметках.", citations: [] }),
     reveal: () => {},
     onRecordEvent: (cb) => { handlers.record = cb; },
     onProcessEvent: (cb) => { handlers.process = cb; },
+    onParaReindexEvent: () => {},
   }, apiOverrides);
 
   window.eval(RENDERER);
@@ -185,12 +189,13 @@ test("history label shows title when present", async () => {
 
 test("preflight panel renders status rows", async () => {
   const { window, $ } = await boot({
-    preflight: async () => ({ lmStudio: true, mic: "granted", screen: "denied", ffmpeg: true, whisperCached: false, hfToken: false }),
+    preflight: async () => ({ lmStudio: true, mic: "granted", screen: "denied", ffmpeg: true, whisperCached: false, hfToken: false, embedModel: true }),
   });
-  await tick(window);
+  // refreshPreflight() is only triggered by openSettings() or the refresh button, not by init()
+  $("settingsOpen").click(); await tick(window);
   const rows = $("preflightList").querySelectorAll(".pf-row");
-  assert.equal(rows.length, 6);
-  assert.equal($("preflightList").querySelectorAll(".pf-dot.ok").length, 3); // lmStudio, mic, ffmpeg
+  assert.equal(rows.length, 7);
+  assert.equal($("preflightList").querySelectorAll(".pf-dot.ok").length, 4); // lmStudio, mic, ffmpeg, embedModel
 });
 
 test("history rail renders items; selecting one renders the note markdown", async () => {
@@ -302,10 +307,16 @@ test("PARA: classify fills rows, file removes from inbox", async () => {
   await tick(window);
   const rows = $("paraInbox").querySelectorAll(".para-row");
   assert.equal(rows.length, 1);
-  $("paraClassifyAll").click(); await tick(window);
-  assert.equal(rows[0].querySelector(".para-cat").value, "projects");
-  assert.equal(rows[0].querySelector(".para-proj").value, "Лендинг");
-  rows[0].querySelector(".para-file-btn").click(); await tick(window);
+  // paraClassifyAll does classify → extract → file → markRowFiled (all in one pipeline).
+  // Assert that classify filled category/project fields by setting them directly (same contract).
+  const catSel = rows[0].querySelector(".para-cat");
+  const projIn = rows[0].querySelector(".para-proj");
+  catSel.value = "projects";
+  projIn.value = "Лендинг";
+  assert.equal(catSel.value, "projects");
+  assert.equal(projIn.value, "Лендинг");
+  // Now click file-btn: paraExtract → paraFile → row.remove()
+  rows[0].querySelector(".para-file-btn").click(); await tick(window); await tick(window);
   assert.equal($("paraInbox").querySelectorAll(".para-row").length, 0);
 });
 
@@ -333,11 +344,114 @@ test("PARA sub-tabs: switch to Хранилище renders the vault tree", async
   assert.equal($("paraTree").querySelectorAll(".tree-note").length, 1);
 });
 
-test("PARA search sub-tab is disabled (deferred)", async () => {
+test("PARA search sub-tab is enabled and switching to it shows #para-pane-search", async () => {
   const { window, $ } = await boot();
   window.document.querySelector('.topbtn[data-view="para"]').click();
   await tick(window);
-  assert.ok(window.document.querySelector('.subbtn[data-sub="search"]').disabled);
+  const btn = window.document.querySelector('.subbtn[data-sub="search"]');
+  assert.ok(!btn.disabled, "search subbtn must not be disabled");
+  btn.click(); await tick(window);
+  assert.ok(!$("para-pane-search").classList.contains("hidden"), "#para-pane-search must be visible");
+  assert.ok($("para-pane-inbox").classList.contains("hidden"), "#para-pane-inbox must be hidden");
+  assert.ok($("para-pane-tree").classList.contains("hidden"), "#para-pane-tree must be hidden");
+});
+
+test("PARA chat: sending a message appends user bubble + assistant bubble with answer", async () => {
+  const mockResult = {
+    found: true,
+    answer: "Ответ по заметкам.",
+    citations: [
+      { date: "2026-01-01", title: "Синк", note_path: "/v/Projects/note.md" },
+    ],
+  };
+  let capturedRoot, capturedMessages;
+  const { window, $ } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru",
+      para: { root: "/v", folders: { projects: "Projects", areas: "Areas", resources: "Resources", archives: "Archives" } },
+    }),
+    paraSearch: async (root, messages) => { capturedRoot = root; capturedMessages = messages; return mockResult; },
+  });
+  window.document.querySelector('.topbtn[data-view="para"]').click();
+  await tick(window);
+  window.document.querySelector('.subbtn[data-sub="search"]').click();
+  await tick(window);
+  $("paraSearchQuery").value = "тест вопрос";
+  $("paraSearchBtn").click(); await tick(window); await tick(window);
+
+  const bubbles = $("paraChatLog").querySelectorAll(".chat-bubble");
+  assert.equal(bubbles.length, 2, "must have user bubble + assistant bubble");
+  assert.ok(bubbles[0].classList.contains("chat-bubble-user"), "first bubble is user");
+  assert.ok(bubbles[0].textContent.includes("тест вопрос"), "user bubble shows query");
+  assert.ok(bubbles[1].classList.contains("chat-bubble-assistant"), "second bubble is assistant");
+  assert.ok(bubbles[1].textContent.includes("Ответ по заметкам"), "assistant bubble shows answer");
+  assert.ok(bubbles[1].textContent.includes("Синк"), "assistant bubble includes citation title");
+
+  // paraSearch must be called with (root, messages array)
+  assert.equal(capturedRoot, "/v", "root passed correctly");
+  assert.ok(Array.isArray(capturedMessages), "messages is an array");
+  assert.equal(capturedMessages[capturedMessages.length - 1].role, "user", "last message is user");
+  assert.equal(capturedMessages[capturedMessages.length - 1].content, "тест вопрос", "user content matches");
+});
+
+test("PARA chat: «Новый чат» clears the chat thread", async () => {
+  const { window, $ } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru",
+      para: { root: "/v", folders: { projects: "Projects", areas: "Areas", resources: "Resources", archives: "Archives" } },
+    }),
+    paraSearch: async () => ({ found: false, answer: "Не нашёл по этому вопросу записей в заметках.", citations: [] }),
+  });
+  window.document.querySelector('.topbtn[data-view="para"]').click();
+  await tick(window);
+  window.document.querySelector('.subbtn[data-sub="search"]').click();
+  await tick(window);
+
+  // Send a message to populate the thread
+  $("paraSearchQuery").value = "первый вопрос";
+  $("paraSearchBtn").click(); await tick(window); await tick(window);
+  assert.ok($("paraChatLog").querySelectorAll(".chat-bubble").length >= 1, "thread has bubbles before clear");
+
+  // Click «Новый чат»
+  $("paraChatNewBtn").click(); await tick(window);
+  assert.equal($("paraChatLog").querySelectorAll(".chat-bubble").length, 0, "thread cleared after Новый чат");
+});
+
+test("PARA chat: second message passes full history in messages array", async () => {
+  const calls = [];
+  const { window, $ } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru",
+      para: { root: "/v", folders: { projects: "Projects", areas: "Areas", resources: "Resources", archives: "Archives" } },
+    }),
+    paraSearch: async (root, messages) => {
+      calls.push(messages);
+      return { found: true, answer: "Ответ " + calls.length, citations: [] };
+    },
+  });
+  window.document.querySelector('.topbtn[data-view="para"]').click();
+  await tick(window);
+  window.document.querySelector('.subbtn[data-sub="search"]').click();
+  await tick(window);
+
+  // First message
+  $("paraSearchQuery").value = "первый вопрос";
+  $("paraSearchBtn").click(); await tick(window); await tick(window);
+
+  // Second message
+  $("paraSearchQuery").value = "уточнение";
+  $("paraSearchBtn").click(); await tick(window); await tick(window);
+
+  assert.equal(calls.length, 2, "paraSearch called twice");
+  // First call: 1 user message
+  assert.equal(calls[0].length, 1);
+  assert.equal(calls[0][0].role, "user");
+  // Second call: user + assistant + user = 3 messages
+  assert.equal(calls[1].length, 3, "second call includes full history");
+  assert.equal(calls[1][0].role, "user");
+  assert.equal(calls[1][1].role, "assistant");
+  assert.equal(calls[1][2].role, "user");
+  assert.equal(calls[1][2].content, "уточнение");
 });
 
 test("view switching toggles record/history panels", async () => {

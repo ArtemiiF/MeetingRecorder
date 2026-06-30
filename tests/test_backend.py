@@ -200,10 +200,12 @@ def test_summarize_success_returns_content(monkeypatch, pipe):
     assert "транскрипт" in user_msg
 
 
-def test_summarize_falls_back_to_reasoning_content(monkeypatch, pipe):
+def test_summarize_empty_content_returns_none_not_reasoning(monkeypatch, pipe):
+    # reasoning_content is NEVER used as the summary body (per backend.py:507-508 comment).
+    # When only reasoning_content is present (content absent/empty), summarize must return None.
     payload = {"choices": [{"message": {"reasoning_content": "РАЗМЫШЛЕНИЕ"}}]}
     install_fake_requests(monkeypatch, payload=payload)
-    assert pipe.summarize("t", "p") == "РАЗМЫШЛЕНИЕ"
+    assert pipe.summarize("t", "p") is None
 
 
 def test_summarize_non_200_returns_none(monkeypatch, pipe):
@@ -332,12 +334,14 @@ def test_cmd_classify_valid_category(monkeypatch, tmp_path):
     assert ev["category"] == "projects" and ev["project"] == "Лендинг"
 
 
-def test_cmd_classify_normalizes_bad_category(monkeypatch, tmp_path):
+def test_cmd_classify_rejects_bad_category(monkeypatch, tmp_path):
+    # Design decision: invalid LLM category must emit "error", NOT be normalized to a default.
+    # backend.py:1004-1014: invalid cc → continue (skip) → cat stays empty → emit("error", ...)
     note = tmp_path / "n.md"; note.write_text("x", encoding="utf-8")
     install_fake_requests(monkeypatch, payload={"choices": [{"message": {
         "content": '{"category":"WEIRD","project":"P"}'}}]})
-    ev = [e for e in capture(backend.cmd_classify, str(note)) if e["event"] == "classified"][0]
-    assert ev["category"] == "resources"  # invalid → safe default
+    events = capture(backend.cmd_classify, str(note))
+    assert any(e["event"] == "error" for e in events), f"expected error event, got: {events}"
 
 
 def test_cmd_preflight_emits_checks():
@@ -664,3 +668,582 @@ def test_process_survives_failed_transcription(monkeypatch, tmp_path):
     ends = {e["stage"]: e["status"] for e in events if e["event"] == "stage_end"}
     assert ends["transcribe"] == "fail"     # no segments → red
     assert ends["llm"] == "fail"
+
+
+# ── RAG helpers ─────────────────────────────────────────────────────────────
+
+def install_fake_requests_rag(monkeypatch, *, get_payload=None, post_payload=None,
+                               embed_payload=None, post_raise=None, get_raise=None):
+    """More capable fake that handles both GET and POST for RAG tests.
+
+    get_payload   : returned for every GET (e.g. /v1/models response)
+    embed_payload : returned for POST /v1/embeddings  (takes priority over post_payload)
+    post_payload  : returned for all other POST calls (e.g. /v1/chat/completions)
+    post_raise    : raise this exception on chat POST
+    get_raise     : raise this exception on GET
+    """
+    import struct
+    fake = types.ModuleType("requests")
+    calls = {"post_urls": [], "get_urls": [], "post_jsons": []}
+
+    class Resp:
+        def __init__(self, status, payload):
+            self.status_code = status
+            self._payload = payload
+        def json(self):
+            return self._payload
+
+    def get(url, timeout=None):
+        calls["get_urls"].append(url)
+        if get_raise:
+            raise get_raise
+        return Resp(200, get_payload or {})
+
+    def post(url, json=None, timeout=None):
+        calls["post_urls"].append(url)
+        calls["post_jsons"].append(json)
+        if post_raise:
+            raise post_raise
+        if embed_payload is not None and "embeddings" in url:
+            return Resp(200, embed_payload)
+        return Resp(200, post_payload or {})
+
+    fake.get = get
+    fake.post = post
+    monkeypatch.setitem(sys.modules, "requests", fake)
+    return calls
+
+
+def _make_embed_payload(n_vecs=1, dim=4):
+    """Build a fake /v1/embeddings response with unit-vector embeddings."""
+    import struct, math
+    # create a simple unit vector [1,0,0,0]
+    data = []
+    for i in range(n_vecs):
+        vec = [0.0] * dim
+        vec[i % dim] = 1.0
+        data.append({"embedding": vec, "index": i})
+    return {"data": data}
+
+
+def _make_fake_vault(tmp_path, notes):
+    """Write .md files into tmp_path/vault and return the vault path.
+    notes: list of (filename, content) tuples."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    for name, content in notes:
+        (vault / name).write_text(content, encoding="utf-8")
+    return vault
+
+
+def test_rag_chunk_text_basic():
+    text = "a" * 5000
+    chunks = backend._rag_chunk_text(text, chunk_chars=2000, overlap_chars=200)
+    assert len(chunks) >= 2
+    for idx, c in chunks:
+        assert len(c) <= 2000
+    # overlap: second chunk starts before first ends
+    assert chunks[1][1][:100] == text[1800:1900]  # overlap of 200 chars
+
+
+def test_rag_chunk_text_short_note():
+    chunks = backend._rag_chunk_text("short note", chunk_chars=2000, overlap_chars=200)
+    assert len(chunks) == 1
+    assert chunks[0] == (0, "short note")
+
+
+def test_rag_chunk_text_empty():
+    assert backend._rag_chunk_text("") == []
+    assert backend._rag_chunk_text("   ") == []
+
+
+def test_rag_cosine_identical():
+    import struct
+    v = struct.pack("4f", 1.0, 0.0, 0.0, 0.0)
+    assert abs(backend._rag_cosine(v, v) - 1.0) < 1e-6
+
+
+def test_rag_cosine_orthogonal():
+    import struct
+    a = struct.pack("4f", 1.0, 0.0, 0.0, 0.0)
+    b = struct.pack("4f", 0.0, 1.0, 0.0, 0.0)
+    assert abs(backend._rag_cosine(a, b)) < 1e-6
+
+
+def test_rag_cosine_zero_vector():
+    import struct
+    z = struct.pack("4f", 0.0, 0.0, 0.0, 0.0)
+    v = struct.pack("4f", 1.0, 0.0, 0.0, 0.0)
+    assert backend._rag_cosine(z, v) == 0.0
+
+
+def test_rag_db_ensure_creates_tables(tmp_path):
+    import sqlite3
+    db = str(tmp_path / "r.db")
+    conn = backend._db_connect(db)
+    backend._rag_db_ensure(conn)
+    tables = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' OR type='shadow'").fetchall()}
+    assert "chunks" in tables
+    conn.close()
+
+
+def test_cmd_index_writes_chunks_and_skips_unchanged(monkeypatch, tmp_path):
+    """First index run writes chunks; second run with same mtime skips the note."""
+    vault = _make_fake_vault(tmp_path, [
+        ("note1.md",
+         '---\ntitle: "Встреча"\ndate: "2026-01-01"\n---\n\nОбсудили релиз и дорожную карту.\n'),
+    ])
+    db = str(tmp_path / "rag.db")
+
+    models_payload = {"data": [{"id": "text-embedding-all-minilm-v2"}]}
+    embed_payload = _make_embed_payload(n_vecs=1, dim=4)
+    chat_payload = {"choices": [{"message": {"content": "Ответ"}}]}
+
+    calls = install_fake_requests_rag(
+        monkeypatch,
+        get_payload=models_payload,
+        embed_payload=embed_payload,
+        post_payload=chat_payload,
+    )
+
+    events = capture(backend.cmd_index, str(vault), db)
+    indexed_ev = [e for e in events if e["event"] == "indexed"][0]
+    assert indexed_ev["indexed"] == 1
+    assert indexed_ev["skipped"] == 0
+
+    # Verify chunks were written
+    import sqlite3
+    conn = sqlite3.connect(db)
+    rows = conn.execute("SELECT note_path, idx FROM chunks").fetchall()
+    conn.close()
+    assert len(rows) >= 1
+    assert rows[0][0].endswith("note1.md")
+
+    # Second run — mtime unchanged → skipped
+    events2 = capture(backend.cmd_index, str(vault), db)
+    indexed_ev2 = [e for e in events2 if e["event"] == "indexed"][0]
+    assert indexed_ev2["indexed"] == 0
+    assert indexed_ev2["skipped"] == 1
+
+
+def test_cmd_index_removes_deleted_note(monkeypatch, tmp_path):
+    """After a note is deleted from disk, re-indexing removes its chunks."""
+    vault = _make_fake_vault(tmp_path, [
+        ("note_del.md", '---\ntitle: "Удалённая"\ndate: "2026-01-02"\n---\n\nТекст который потом удалим.\n'),
+    ])
+    db = str(tmp_path / "rag.db")
+
+    models_payload = {"data": [{"id": "text-embedding-all-minilm-v2"}]}
+    embed_payload = _make_embed_payload(n_vecs=1, dim=4)
+
+    install_fake_requests_rag(monkeypatch, get_payload=models_payload, embed_payload=embed_payload)
+    capture(backend.cmd_index, str(vault), db)
+
+    # Confirm indexed
+    import sqlite3
+    conn = sqlite3.connect(db)
+    assert conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0] >= 1
+    conn.close()
+
+    # Delete the note and re-index
+    (vault / "note_del.md").unlink()
+    install_fake_requests_rag(monkeypatch, get_payload=models_payload, embed_payload=embed_payload)
+    events = capture(backend.cmd_index, str(vault), db)
+    removed_ev = [e for e in events if e["event"] == "indexed"][0]
+    assert removed_ev["removed"] == 1
+
+    conn = sqlite3.connect(db)
+    assert conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0] == 0
+    conn.close()
+
+
+def test_cmd_search_short_circuit_no_matches(monkeypatch, tmp_path):
+    """No FTS hits + best cosine < threshold → found=False, LLM NOT called."""
+    vault = _make_fake_vault(tmp_path, [])
+    db = str(tmp_path / "rag.db")
+
+    # Index is empty; we still need embed model discovery + query embedding
+    models_payload = {"data": [{"id": "text-embedding-all-minilm-v2"}]}
+    embed_payload = _make_embed_payload(n_vecs=1, dim=4)
+    chat_payload = {"choices": [{"message": {"content": "ЭТО НЕ ДОЛЖНО ВЫЗВАТЬСЯ"}}]}
+
+    calls = install_fake_requests_rag(
+        monkeypatch,
+        get_payload=models_payload,
+        embed_payload=embed_payload,
+        post_payload=chat_payload,
+    )
+
+    # Pre-create the DB so _rag_db_ensure doesn't fail
+    conn = backend._db_connect(db)
+    backend._rag_db_ensure(conn)
+    conn.close()
+
+    events = capture(backend.cmd_search, str(vault), db, "нерелевантный запрос xyz")
+    result = [e for e in events if e["event"] == "search_result"][0]
+
+    assert result["found"] is False
+    assert result["answer"] == backend._RAG_NOT_FOUND
+    assert result["citations"] == []
+
+    # LLM (chat completions) must NOT have been called
+    chat_calls = [u for u in calls["post_urls"] if "chat" in u]
+    assert chat_calls == [], f"LLM was called unexpectedly: {chat_calls}"
+
+
+def test_cmd_search_happy_path(monkeypatch, tmp_path):
+    """Relevant chunk present → LLM called → found=True, citations populated."""
+    import struct
+
+    vault = _make_fake_vault(tmp_path, [
+        ("meeting-2026-06-01.md",
+         '---\ntitle: "Планирование спринта"\ndate: "2026-06-01"\n---\n\n'
+         'Обсудили задачи на следующий спринт. Решили добавить RAG-поиск.\n'),
+    ])
+    db = str(tmp_path / "rag.db")
+    models_payload = {"data": [{"id": "text-embedding-all-minilm-v2"}]}
+
+    # Use a 4-dim space. Index note with vec [1,0,0,0], query also [1,0,0,0] → cosine=1.0
+    note_emb = _make_embed_payload(n_vecs=1, dim=4)   # [1,0,0,0]
+    query_emb = _make_embed_payload(n_vecs=1, dim=4)  # same → cosine=1.0
+    answer_text = "RAG-поиск запланирован на следующий спринт [2026-06-01 · Планирование спринта]."
+
+    # Index the note first (uses embed_payload for note chunks)
+    install_fake_requests_rag(monkeypatch, get_payload=models_payload, embed_payload=note_emb)
+    capture(backend.cmd_index, str(vault), db)
+
+    # Now search — embed_payload returns same unit vec as query → cosine=1.0 > threshold
+    install_fake_requests_rag(
+        monkeypatch,
+        get_payload=models_payload,
+        embed_payload=query_emb,
+        post_payload={"choices": [{"message": {"content": answer_text}}]},
+    )
+    events = capture(backend.cmd_search, str(vault), db, "что решили про RAG")
+    result = [e for e in events if e["event"] == "search_result"][0]
+
+    assert result["found"] is True
+    assert result["answer"] == answer_text
+    assert len(result["citations"]) >= 1
+    assert result["citations"][0]["date"] == "2026-06-01"
+    assert result["citations"][0]["title"] == "Планирование спринта"
+
+
+def test_cmd_search_via_messages_single_turn(monkeypatch, tmp_path):
+    """--messages with a single user turn is identical to --query (no rewrite LLM call)."""
+    import struct
+
+    vault = _make_fake_vault(tmp_path, [
+        ("meeting-2026-06-10.md",
+         '---\ntitle: "Синк по релизу"\ndate: "2026-06-10"\n---\n\nРешили выпустить v2 в июле.\n'),
+    ])
+    db = str(tmp_path / "rag.db")
+    models_payload = {"data": [{"id": "text-embedding-all-minilm-v2"}]}
+    embed_payload = _make_embed_payload(n_vecs=1, dim=4)
+    answer_text = "v2 запланирован на июль [2026-06-10 · Синк по релизу]."
+
+    # Index the vault
+    install_fake_requests_rag(monkeypatch, get_payload=models_payload, embed_payload=embed_payload)
+    capture(backend.cmd_index, str(vault), db)
+
+    calls = install_fake_requests_rag(
+        monkeypatch,
+        get_payload=models_payload,
+        embed_payload=embed_payload,
+        post_payload={"choices": [{"message": {"content": answer_text}}]},
+    )
+    messages = [{"role": "user", "content": "когда выходит v2"}]
+    events = capture(backend.cmd_search, str(vault), db, messages=messages)
+    result = [e for e in events if e["event"] == "search_result"][0]
+
+    assert result["found"] is True
+    assert result["answer"] == answer_text
+    # Single turn → NO rewrite call (only embed GET + query embed POST + answer POST)
+    chat_calls = [u for u in calls["post_urls"] if "chat" in u]
+    assert len(chat_calls) == 1, f"single-turn must make exactly 1 chat call (answer), got: {chat_calls}"
+
+
+def test_cmd_search_multi_turn_fires_rewrite(monkeypatch, tmp_path):
+    """Multi-turn conversation triggers the query-rewrite LLM call before retrieval."""
+    import struct
+
+    vault = _make_fake_vault(tmp_path, [
+        ("meeting-2026-07-01.md",
+         '---\ntitle: "1-1 с Петей"\ndate: "2026-07-01"\n---\n\nОбсудили задачи на спринт.\n'),
+    ])
+    db = str(tmp_path / "rag.db")
+    models_payload = {"data": [{"id": "text-embedding-all-minilm-v2"}]}
+    embed_payload = _make_embed_payload(n_vecs=1, dim=4)
+    rewrite_text = "задачи спринта с Петей"
+    answer_text = "Задачи спринта обсуждались [2026-07-01 · 1-1 с Петей]."
+
+    # Index the vault
+    install_fake_requests_rag(monkeypatch, get_payload=models_payload, embed_payload=embed_payload)
+    capture(backend.cmd_index, str(vault), db)
+
+    # For multi-turn: first chat POST = rewrite, second chat POST = answer
+    post_responses = iter([
+        {"choices": [{"message": {"content": rewrite_text}}]},     # rewrite call
+        {"choices": [{"message": {"content": answer_text}}]},       # answer call
+    ])
+
+    import types as _types
+    fake = _types.ModuleType("requests")
+    calls = {"post_urls": [], "get_urls": [], "post_jsons": []}
+
+    class Resp:
+        def __init__(self, status, payload):
+            self.status_code = status
+            self._payload = payload
+        def json(self):
+            return self._payload
+
+    def _get(url, timeout=None):
+        calls["get_urls"].append(url)
+        return Resp(200, models_payload)
+
+    def _post(url, json=None, timeout=None):
+        calls["post_urls"].append(url)
+        calls["post_jsons"].append(json)
+        if "embeddings" in url:
+            return Resp(200, embed_payload)
+        return Resp(200, next(post_responses))
+
+    fake.get = _get
+    fake.post = _post
+    monkeypatch.setitem(__import__("sys").modules, "requests", fake)
+
+    messages = [
+        {"role": "user", "content": "что обсуждали с Петей?"},
+        {"role": "assistant", "content": "Обсуждали задачи на спринт."},
+        {"role": "user", "content": "а конкретнее"},
+    ]
+    events = capture(backend.cmd_search, str(vault), db, messages=messages)
+    result = [e for e in events if e["event"] == "search_result"][0]
+
+    assert result["found"] is True
+    assert result["answer"] == answer_text
+    # Must have made exactly 2 chat calls: rewrite + answer
+    chat_calls = [u for u in calls["post_urls"] if "chat" in u]
+    assert len(chat_calls) == 2, f"multi-turn must make 2 chat calls (rewrite + answer), got: {chat_calls}"
+    # Verify the first chat call (rewrite) contained the conversation history
+    rewrite_body = calls["post_jsons"][[i for i, u in enumerate(calls["post_urls"]) if "chat" in u][0]]
+    rewrite_msgs = rewrite_body.get("messages", [])
+    user_content = " ".join(m.get("content", "") for m in rewrite_msgs)
+    assert "что обсуждали с Петей" in user_content or "а конкретнее" in user_content
+
+
+def test_cmd_search_multi_turn_short_circuit_no_answer_call(monkeypatch, tmp_path):
+    """Multi-turn: rewrite may fire but empty retrieval short-circuits before answer call."""
+    vault = _make_fake_vault(tmp_path, [])
+    db = str(tmp_path / "rag.db")
+    models_payload = {"data": [{"id": "text-embedding-all-minilm-v2"}]}
+    embed_payload = _make_embed_payload(n_vecs=1, dim=4)
+    rewrite_text = "какой-то переформулированный запрос"
+
+    conn = backend._db_connect(db)
+    backend._rag_db_ensure(conn)
+    conn.close()
+
+    post_call_count = {"n": 0}
+
+    import types as _types
+    fake = _types.ModuleType("requests")
+
+    class Resp:
+        def __init__(self, p):
+            self.status_code = 200
+            self._p = p
+        def json(self):
+            return self._p
+
+    def _get(url, timeout=None):
+        return Resp(models_payload)
+
+    def _post(url, json=None, timeout=None):
+        post_call_count["n"] += 1
+        if "embeddings" in url:
+            return Resp(embed_payload)
+        # Only the rewrite call should reach here (answer call must be short-circuited)
+        return Resp({"choices": [{"message": {"content": rewrite_text}}]})
+
+    fake.get = _get
+    fake.post = _post
+    monkeypatch.setitem(__import__("sys").modules, "requests", fake)
+
+    messages = [
+        {"role": "user", "content": "первый вопрос"},
+        {"role": "assistant", "content": "Первый ответ."},
+        {"role": "user", "content": "второй вопрос xyz_notexist"},
+    ]
+    events = capture(backend.cmd_search, str(vault), db, messages=messages)
+    result = [e for e in events if e["event"] == "search_result"][0]
+
+    # Short-circuit after empty retrieval → found=False
+    assert result["found"] is False
+    assert result["answer"] == backend._RAG_NOT_FOUND
+    assert result["citations"] == []
+    # Rewrite fires (1 chat POST) but answer does NOT (total chat posts = 1)
+    assert post_call_count["n"] <= 2, \
+        f"at most 2 POSTs expected (1 rewrite + 1 embed), got {post_call_count['n']}"
+
+
+def test_cmd_search_embeddings_unavailable_no_crash(monkeypatch, tmp_path):
+    """When no embedding model is available, cmd_search must not crash and must return
+    a search_result event.  It may short-circuit (found=False) if neither FTS nor vector
+    finds anything — that is acceptable degraded behaviour.  The important invariant is:
+    (a) no unhandled exception, (b) exactly one search_result event emitted,
+    (c) LLM is NOT called when there are no candidates (short-circuit fires).
+    """
+    vault = _make_fake_vault(tmp_path, [
+        ("note_fts.md",
+         '---\ntitle: "FTS тест"\ndate: "2026-05-01"\n---\n\nОбсудили дорожную карту.\n'),
+    ])
+    db = str(tmp_path / "rag.db")
+
+    # Pre-create an empty RAG db so cmd_search doesn't fail on missing tables
+    conn = backend._db_connect(db)
+    backend._rag_db_ensure(conn)
+    conn.close()
+
+    # Search with no embedding model and empty db → must short-circuit cleanly
+    install_fake_requests_rag(
+        monkeypatch,
+        get_payload={"data": []},          # no embed model → query_emb=None
+        embed_payload={"data": []},
+        post_payload={"choices": [{"message": {"content": "SHOULD NOT BE CALLED"}}]},
+    )
+    calls = install_fake_requests_rag(
+        monkeypatch,
+        get_payload={"data": []},
+        embed_payload={"data": []},
+        post_payload={"choices": [{"message": {"content": "SHOULD NOT BE CALLED"}}]},
+    )
+    events = capture(backend.cmd_search, str(vault), db, "дорожная карта")
+    results = [e for e in events if e["event"] == "search_result"]
+    assert len(results) == 1, f"expected 1 search_result event, got: {events}"
+    result = results[0]
+    # Short-circuit: no matches → found=False, no LLM call
+    assert result["found"] is False
+    assert result["answer"] == backend._RAG_NOT_FOUND
+    assert result["citations"] == []
+    chat_calls = [u for u in calls["post_urls"] if "chat" in u]
+    assert chat_calls == [], f"LLM must not be called on empty result set: {chat_calls}"
+
+
+def test_fts_query_with_quote_in_token_does_not_break_retrieval(monkeypatch, tmp_path):
+    """A query token containing a literal double-quote must not produce a malformed FTS5
+    phrase.  Before the fix the f'"{w}"' builder left the inner quote bare → MATCH raised
+    → fts_keys silently emptied.  After the fix (w.replace('"', '""')) the quote is
+    escaped and FTS still returns the chunk matched by the valid adjacent token."""
+    vault = _make_fake_vault(tmp_path, [
+        ("meeting-fts-quote.md",
+         '---\ntitle: "Тест кавычки"\ndate: "2026-06-01"\n---\n\nОбсудили релиз дорожная.\n'),
+    ])
+    db = str(tmp_path / "rag.db")
+
+    models_payload = {"data": [{"id": "text-embedding-all-minilm-v2"}]}
+    embed_payload = _make_embed_payload(n_vecs=1, dim=4)
+
+    # Index the vault (without embedding model — we only care about FTS here)
+    install_fake_requests_rag(monkeypatch, get_payload=models_payload, embed_payload=embed_payload)
+    capture(backend.cmd_index, str(vault), db)
+
+    # Search with a query that contains a token with a literal double-quote.
+    # "дорожная" is a real word in the note; 'bad"token' contains the hazardous quote.
+    # With the fix both tokens are safely escaped; FTS matches "дорожная" and returns
+    # the chunk — fts_keys is non-empty, _rag_retrieve does NOT short-circuit.
+    conn = backend._db_connect(db)
+    backend._rag_db_ensure(conn)
+
+    # Disable embeddings so the result depends solely on the FTS path.
+    install_fake_requests_rag(
+        monkeypatch,
+        get_payload={"data": []},   # no embed model → query_emb=None
+        embed_payload={"data": []},
+    )
+
+    candidates, short_circuit = backend._rag_retrieve(conn, 'bad"token дорожная', None)
+    conn.close()
+
+    # FTS matched "дорожная" → at least one candidate, NOT short-circuited
+    assert not short_circuit, "FTS retrieval short-circuited unexpectedly (quote escaping broken?)"
+    assert len(candidates) >= 1, "expected at least one FTS candidate for 'дорожная'"
+
+
+# ── speakers frontmatter write + RAG citation ────────────────────────────────
+
+def _mock_pipe_diarized(monkeypatch, out_dir, formatted_transcript, inferred_speakers):
+    """Like _mock_pipe but with diarization enabled and controllable speaker data."""
+    pipe = backend.Pipeline(out_dir=out_dir, diarize=True)
+    monkeypatch.setattr(pipe, "convert_to_mono", lambda f: f)
+    monkeypatch.setattr(pipe, "remove_silence_vad", lambda f: f)
+    monkeypatch.setattr(pipe, "transcribe",
+                        lambda f: {"segments": [seg("hi", 0, 2)], "text": "hi"})
+    monkeypatch.setattr(pipe, "diarize", lambda f: [{"start": 0, "end": 2, "speaker": "SPEAKER_00"}])
+    monkeypatch.setattr(pipe, "combine", lambda segs, tl: formatted_transcript)
+    monkeypatch.setattr(pipe, "summarize", lambda t, p: "# Сводка\n\n" + "итог " * 30)
+    monkeypatch.setattr(pipe, "generate_title", lambda t: "Тестовая встреча")
+    monkeypatch.setattr(pipe, "infer_speaker_names", lambda t: inferred_speakers)
+    return pipe
+
+
+def test_process_writes_inferred_speaker_names_to_frontmatter(monkeypatch, tmp_path):
+    """process() with inferred speaker names writes a non-empty speakers frontmatter key."""
+    formatted = "**[Спикер 1]**: привет\n\n**[Спикер 2]**: пока"
+    inferred = {"Спикер 1": "Алексей", "Спикер 2": "Мария"}
+    pipe = _mock_pipe_diarized(monkeypatch, str(tmp_path / "v"), formatted, inferred)
+    src = tmp_path / "in.wav"; src.write_bytes(b"x")
+    capture(pipe.process, str(src), "prompt")
+    note_text = list((tmp_path / "v").glob("*.md"))[0].read_text(encoding="utf-8")
+    # Both inferred names must appear in the speakers frontmatter key
+    assert 'speakers: "Алексей, Мария"' in note_text or 'speakers: "Мария, Алексей"' in note_text
+
+
+def test_process_writes_raw_labels_when_no_names_inferred(monkeypatch, tmp_path):
+    """process() with diarization but no inferred names writes raw speaker labels."""
+    formatted = "**[Спикер 1]**: привет\n\n**[Спикер 2]**: пока"
+    pipe = _mock_pipe_diarized(monkeypatch, str(tmp_path / "v"), formatted, {})
+    src = tmp_path / "in.wav"; src.write_bytes(b"x")
+    capture(pipe.process, str(src), "prompt")
+    note_text = list((tmp_path / "v").glob("*.md"))[0].read_text(encoding="utf-8")
+    # Raw labels must be present in the speakers frontmatter key
+    assert 'speakers: "' in note_text
+    assert "Спикер 1" in note_text or "Спикер 2" in note_text
+
+
+def test_process_no_diarization_omits_speakers_key(monkeypatch, tmp_path):
+    """process() without diarization must not write a speakers frontmatter key."""
+    src = tmp_path / "in.wav"; src.write_bytes(b"x")
+    pipe = _mock_pipe(monkeypatch, str(tmp_path / "v"),
+                      {"segments": [seg("hi", 0, 2)], "text": "hi"}, None)
+    capture(pipe.process, str(src), "prompt")
+    note_text = list((tmp_path / "v").glob("*.md"))[0].read_text(encoding="utf-8")
+    assert "speakers:" not in note_text
+
+
+def test_cmd_search_citation_includes_speakers(monkeypatch, tmp_path):
+    """After indexing a note with speakers frontmatter, _rag_retrieve returns non-empty speakers."""
+    vault = _make_fake_vault(tmp_path, [
+        ("meeting-2026-06-15.md",
+         '---\ntitle: "Синк команды"\ndate: "2026-06-15"\nspeakers: "Алексей, Мария"\n---\n\n'
+         'Обсудили дорожную карту продукта на квартал.\n'),
+    ])
+    db = str(tmp_path / "rag.db")
+    models_payload = {"data": [{"id": "text-embedding-all-minilm-v2"}]}
+    embed_payload = _make_embed_payload(n_vecs=1, dim=4)
+
+    install_fake_requests_rag(monkeypatch, get_payload=models_payload, embed_payload=embed_payload)
+    capture(backend.cmd_index, str(vault), db)
+
+    conn = backend._db_connect(db)
+    backend._rag_db_ensure(conn)
+    # same unit vec for query → cosine=1.0 → top result
+    install_fake_requests_rag(monkeypatch, get_payload=models_payload, embed_payload=embed_payload)
+    candidates, short_circuit = backend._rag_retrieve(conn, "дорожная карта", None)
+    conn.close()
+
+    assert not short_circuit
+    assert len(candidates) >= 1
+    assert candidates[0]["speakers"] == "Алексей, Мария"

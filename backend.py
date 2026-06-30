@@ -746,9 +746,22 @@ class Pipeline:
             stage_end("meta", "ok", title or f"{len(speakers)} имён")
         else:
             stage_end("meta", "skip", "нужен LLM")
+        # Build speakers display string for frontmatter:
+        # - if LLM inferred names: use the inferred display names (dict values)
+        # - if diarization ran but no names inferred: use the raw speaker labels
+        # - if no diarization: empty (set_frontmatter skips empty values)
+        import re as _re
+        if speakers:
+            speakers_str = ", ".join(speakers.values())
+        elif formatted:
+            _labels = sorted(set(_re.findall(r"\*\*\[([^\]]+)\]\*\*", formatted)))
+            speakers_str = ", ".join(_labels)
+        else:
+            speakers_str = ""
         # record title + which template (preset) was used + language in frontmatter
         note = self.set_frontmatter(note, {
-            "title": title, "template": self.TEMPLATE, "language": self.LANGUAGE})
+            "title": title, "template": self.TEMPLATE, "language": self.LANGUAGE,
+            "speakers": speakers_str})
 
         note = self.add_audio_link(note, audio_basename)
         note = self.add_transcript(note, transcript_for_llm)
@@ -1072,6 +1085,507 @@ def cmd_extract(note_path):
         emit("error", msg=f"Извлечение не удалось: {e}")
 
 
+# ──────────────────────────────────────────────────────────────────────────
+# RAG helpers: index + search commands (local hybrid PARA/Obsidian search)
+# ──────────────────────────────────────────────────────────────────────────
+
+_RAG_BASE_URL     = "http://localhost:1234"
+_RAG_CHUNK_CHARS  = 2000   # ~500 tokens (4 chars/token heuristic)
+_RAG_OVERLAP_CHARS = 200   # ~50 tokens overlap between windows
+_RAG_RRF_K        = 60     # Reciprocal Rank Fusion k constant
+_RAG_COSINE_THRESH = 0.25  # min cosine to proceed to LLM
+_RAG_TOP_N        = 10     # how many vector candidates to retrieve
+_RAG_CONTEXT_BUDGET = 24000  # ~6000 tokens of context chars for the LLM prompt
+_RAG_NOT_FOUND    = "Не нашёл по этому вопросу записей в заметках."
+
+
+def _rag_db_ensure(conn):
+    """Create (if absent) the chunks table and its FTS5 mirror on the given connection."""
+    conn.execute("""CREATE TABLE IF NOT EXISTS chunks(
+        note_path TEXT NOT NULL,
+        idx       INTEGER NOT NULL,
+        text      TEXT,
+        date      TEXT,
+        title     TEXT,
+        speakers  TEXT,
+        mtime     REAL,
+        embedding BLOB,
+        PRIMARY KEY(note_path, idx))""")
+    # Standalone FTS5 table — stores note_path+idx (UNINDEXED) as lookup keys
+    # plus the chunk text for full-text search.  Standalone (no content=) avoids
+    # external-content-table issues with sqlite's default isolation_level.
+    try:
+        conn.execute("""CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts
+            USING fts5(note_path UNINDEXED, idx UNINDEXED, text)""")
+    except Exception:
+        # FTS5 not compiled into this sqlite build — degrade to FTS-less mode
+        pass
+    conn.commit()
+
+
+def _rag_discover_embed_model(base_url):
+    """GET /v1/models, return first model id containing 'embed', or None."""
+    import requests
+    try:
+        resp = requests.get(f"{base_url}/v1/models", timeout=10)
+        if resp.status_code != 200:
+            return None
+        models = resp.json().get("data") or []
+        for m in models:
+            mid = (m.get("id") or "").lower()
+            if "embed" in mid:
+                return m["id"]
+    except Exception:
+        pass
+    return None
+
+
+def _rag_embed(texts, base_url, model):
+    """Embed a list of strings via LM Studio embeddings endpoint.
+    Returns list of raw float bytes (one per input) or None on failure."""
+    import requests
+    import struct
+    if not texts:
+        return []
+    try:
+        resp = requests.post(
+            f"{base_url}/v1/embeddings",
+            json={"model": model, "input": texts},
+            timeout=120,
+        )
+        if resp.status_code != 200:
+            return None
+        data = resp.json().get("data") or []
+        if len(data) != len(texts):
+            return None
+        result = []
+        for item in data:
+            vec = item.get("embedding") or []
+            result.append(struct.pack(f"{len(vec)}f", *vec))
+        return result
+    except Exception:
+        return None
+
+
+def _rag_cosine(blob_a, blob_b):
+    """Cosine similarity between two float32 byte blobs. Pure Python, no numpy."""
+    import struct
+    n = len(blob_a) // 4
+    if n == 0 or len(blob_b) // 4 != n:
+        return 0.0
+    a = struct.unpack(f"{n}f", blob_a)
+    b = struct.unpack(f"{n}f", blob_b)
+    dot = sum(x * y for x, y in zip(a, b))
+    na  = sum(x * x for x in a) ** 0.5
+    nb  = sum(x * x for x in b) ** 0.5
+    if na == 0 or nb == 0:
+        return 0.0
+    return dot / (na * nb)
+
+
+def _rag_chunk_text(text, chunk_chars=_RAG_CHUNK_CHARS, overlap_chars=_RAG_OVERLAP_CHARS):
+    """Split text into overlapping windows of ~chunk_chars each.
+    Returns list of (idx, chunk_text) tuples."""
+    text = text.strip()
+    if not text:
+        return []
+    chunks = []
+    start = 0
+    idx = 0
+    while start < len(text):
+        end = start + chunk_chars
+        chunk = text[start:end].strip()
+        if chunk:
+            chunks.append((idx, chunk))
+            idx += 1
+        if end >= len(text):
+            break
+        start = end - overlap_chars
+    return chunks
+
+
+def _rag_walk_vault(root):
+    """Yield Path objects for every .md file under root."""
+    root = Path(root)
+    if not root.exists():
+        return
+    for p in root.rglob("*.md"):
+        yield p
+
+
+def _rag_note_body(text):
+    """Return the body of a note with YAML frontmatter stripped."""
+    if text.startswith("---"):
+        end = text.find("\n---", 3)
+        if end >= 0:
+            return text[end + 4:].lstrip()
+    return text
+
+
+def cmd_index(root, db_path, embed_model=None):
+    """Walk vault, chunk notes, embed and upsert into index.db."""
+    import requests
+    conn = _db_connect(db_path)
+    _rag_db_ensure(conn)
+
+    # Discover embedding model if not given
+    model = embed_model or _rag_discover_embed_model(_RAG_BASE_URL)
+    if not model:
+        emit("error", msg="Embedding-модель не найдена в LM Studio. Убедитесь что модель загружена (имя должно содержать 'embed').")
+        conn.close()
+        return
+
+    log(f"Модель эмбеддингов: {model}")
+
+    # Snapshot of currently known note_paths in DB
+    known = {row[0] for row in conn.execute("SELECT DISTINCT note_path FROM chunks").fetchall()}
+
+    indexed = 0
+    skipped = 0
+    removed = 0
+
+    md_paths_on_disk = set()
+    notes = list(_rag_walk_vault(root))
+    total = len(notes)
+    log(f"Найдено {total} заметок в хранилище")
+
+    for i, p in enumerate(notes):
+        note_path = str(p)
+        md_paths_on_disk.add(note_path)
+
+        try:
+            mtime = p.stat().st_mtime
+        except Exception:
+            continue
+
+        # Skip if mtime unchanged (already indexed)
+        cur = conn.execute(
+            "SELECT mtime FROM chunks WHERE note_path=? LIMIT 1", (note_path,)
+        ).fetchone()
+        if cur and abs(cur[0] - mtime) < 0.001:
+            skipped += 1
+            continue
+
+        try:
+            text = p.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            continue
+
+        fm = _parse_frontmatter(text)
+        body = _rag_note_body(text)
+        date = fm.get("date", "")
+        title = fm.get("title", "")
+        speakers = fm.get("speakers", "")
+
+        raw_chunks = _rag_chunk_text(body)
+        if not raw_chunks:
+            skipped += 1
+            continue
+
+        chunk_texts = [c for _, c in raw_chunks]
+        embeddings = _rag_embed(chunk_texts, _RAG_BASE_URL, model)
+        if embeddings is None:
+            emit("error", msg=f"Не удалось получить эмбеддинги для {p.name} — LM Studio недоступен?")
+            conn.close()
+            return
+
+        # Delete old chunks (and FTS rows) for this note before upserting
+        conn.execute("DELETE FROM chunks WHERE note_path=?", (note_path,))
+        try:
+            conn.execute("DELETE FROM chunks_fts WHERE note_path=?", (note_path,))
+        except Exception:
+            pass
+
+        for (idx, chunk_text), emb_blob in zip(raw_chunks, embeddings):
+            conn.execute(
+                """INSERT INTO chunks(note_path, idx, text, date, title, speakers, mtime, embedding)
+                   VALUES(?,?,?,?,?,?,?,?)
+                   ON CONFLICT(note_path, idx) DO UPDATE SET
+                     text=excluded.text, date=excluded.date, title=excluded.title,
+                     speakers=excluded.speakers, mtime=excluded.mtime, embedding=excluded.embedding""",
+                (note_path, idx, chunk_text, date, title, speakers, mtime, emb_blob))
+            try:
+                conn.execute(
+                    "INSERT INTO chunks_fts(note_path, idx, text) VALUES(?,?,?)",
+                    (note_path, idx, chunk_text))
+            except Exception:
+                pass
+
+        conn.commit()
+        indexed += 1
+        if (i + 1) % 10 == 0 or i + 1 == total:
+            log(f"Проиндексировано {indexed}/{total - skipped}")
+
+    # Remove chunks for notes no longer on disk
+    for note_path in known - md_paths_on_disk:
+        conn.execute("DELETE FROM chunks WHERE note_path=?", (note_path,))
+        try:
+            conn.execute("DELETE FROM chunks_fts WHERE note_path=?", (note_path,))
+        except Exception:
+            pass
+        conn.commit()
+        removed += 1
+
+    # Flush FTS5 pending writes into a searchable segment (automerge may leave
+    # new inserts in a write-buffer that answers SELECT * but not MATCH queries
+    # until the segments are merged; optimize forces an immediate merge).
+    try:
+        conn.execute("INSERT INTO chunks_fts(chunks_fts) VALUES('optimize')")
+        conn.commit()
+    except Exception:
+        pass
+
+    conn.close()
+    emit("indexed", indexed=indexed, skipped=skipped, removed=removed)
+
+
+def _rag_retrieve(conn, retrieval_query, embed_model):
+    """Execute hybrid FTS+vector retrieval for retrieval_query.
+    Returns (candidates, short_circuit) where short_circuit=True means no results found.
+    candidates is a list of chunk dicts: {note_path, idx, text, date, title, speakers}.
+    conn is NOT closed here — caller owns lifecycle."""
+    import requests
+
+    # ── 1. Embed retrieval query ──────────────────────────────────────────
+    model = embed_model or _rag_discover_embed_model(_RAG_BASE_URL)
+    query_emb = None
+    if model:
+        embs = _rag_embed([retrieval_query], _RAG_BASE_URL, model)
+        if embs:
+            query_emb = embs[0]
+    else:
+        log("Embedding-модель недоступна — поиск только по ключевым словам")
+
+    # ── 2a. FTS keyword retrieval ─────────────────────────────────────────
+    fts_keys = []
+    try:
+        fts_query = " OR ".join(
+            '"' + w.replace('"', '""') + '"' for w in retrieval_query.split() if len(w) > 1
+        ) or retrieval_query
+        rows = conn.execute(
+            "SELECT note_path, idx FROM chunks_fts WHERE chunks_fts MATCH ? ORDER BY rank LIMIT ?",
+            (fts_query, _RAG_TOP_N * 2),
+        ).fetchall()
+        fts_keys = [(r[0], r[1]) for r in rows]
+    except Exception:
+        fts_keys = []
+
+    # ── 2b. Vector top-N ─────────────────────────────────────────────────
+    vec_keys = []
+    best_cosine = 0.0
+    if query_emb:
+        all_rows = conn.execute(
+            "SELECT note_path, idx, embedding FROM chunks WHERE embedding IS NOT NULL"
+        ).fetchall()
+        scored = []
+        for note_path, idx, emb_blob in all_rows:
+            if emb_blob:
+                score = _rag_cosine(query_emb, emb_blob)
+                scored.append((score, note_path, idx))
+        scored.sort(reverse=True)
+        if scored:
+            best_cosine = scored[0][0]
+        vec_keys = [(np, ix) for _, np, ix in scored[:_RAG_TOP_N]]
+
+    # ── 3. Short-circuit ─────────────────────────────────────────────────
+    if not fts_keys and best_cosine < _RAG_COSINE_THRESH:
+        return [], True
+
+    # ── 4. RRF merge ─────────────────────────────────────────────────────
+    def _rrf_score(rank):
+        return 1.0 / (_RAG_RRF_K + rank + 1)
+
+    rrf = {}
+    for rank, key in enumerate(fts_keys):
+        rrf[key] = rrf.get(key, 0.0) + _rrf_score(rank)
+    for rank, key in enumerate(vec_keys):
+        rrf[key] = rrf.get(key, 0.0) + _rrf_score(rank)
+
+    ranked_keys = sorted(rrf, key=lambda k: rrf[k], reverse=True)
+
+    # Fetch chunk data for ranked (note_path, idx) keys
+    candidates = []
+    for note_path, idx in ranked_keys:
+        row = conn.execute(
+            "SELECT note_path, idx, text, date, title, speakers FROM chunks"
+            " WHERE note_path=? AND idx=?",
+            (note_path, idx),
+        ).fetchone()
+        if row:
+            candidates.append({
+                "note_path": row[0], "idx": row[1], "text": row[2],
+                "date": row[3] or "", "title": row[4] or "", "speakers": row[5] or "",
+            })
+
+    return candidates, False
+
+
+def cmd_search(root, db_path, query=None, embed_model=None, messages=None):
+    """Hybrid RAG search over indexed vault with optional conversation history.
+
+    Input:
+      messages  — list of {"role":"user"|"assistant","content":"..."} in chronological order.
+                  The last item must be a user message (the current question).
+      query     — legacy shorthand; internally normalised to a one-message list.
+
+    If there is prior conversation (> 1 user message OR any assistant turn) a single
+    LLM call condenses the history into a standalone retrieval query.  With a single
+    user message and no prior turns the query is used verbatim — no extra LLM call.
+
+    Returns found/answer/citations JSON event.
+    """
+    import requests
+    import json as _json
+
+    # ── 0. Normalise input to a messages list ─────────────────────────────
+    if messages is None:
+        if query is None:
+            emit("error", msg="cmd_search: either --query or --messages is required")
+            return
+        messages = [{"role": "user", "content": query}]
+    elif isinstance(messages, str):
+        messages = _json.loads(messages)
+
+    # Latest user message drives everything
+    user_messages = [m for m in messages if m.get("role") == "user"]
+    if not user_messages:
+        emit("error", msg="cmd_search: messages must contain at least one user turn")
+        return
+    latest_user_content = user_messages[-1]["content"]
+
+    # Determine whether there is prior conversation context
+    has_prior_context = len(messages) > 1  # any prior turn (user or assistant)
+
+    conn = _db_connect(db_path)
+    _rag_db_ensure(conn)
+
+    # ── 1. History-aware query rewrite (only when there is prior context) ─
+    # Single user message with no prior turns → use it verbatim (save tokens).
+    # With prior context → one LLM call condenses history+latest into a standalone query.
+    if has_prior_context:
+        retrieval_query = latest_user_content  # fallback in case rewrite fails
+        try:
+            # Build a compact history summary for the condensation prompt.
+            history_text = ""
+            for m in messages:
+                role = m.get("role", "user")
+                content = m.get("content", "").strip()
+                history_text += f"[{role}]: {content}\n"
+            resp = requests.post(
+                f"{_RAG_BASE_URL}/v1/chat/completions",
+                json={
+                    "messages": [
+                        {"role": "system", "content":
+                            "Ты помогаешь переформулировать вопрос для поиска. "
+                            "Верни ТОЛЬКО переформулированный поисковый запрос, без пояснений."},
+                        {"role": "user", "content":
+                            "Перефразируй последний вопрос пользователя в самостоятельный "
+                            "поисковый запрос с учётом контекста диалога. "
+                            "Верни ТОЛЬКО запрос, без пояснений.\n\n"
+                            f"ДИАЛОГ:\n{history_text}"},
+                    ],
+                    "temperature": 0.1,
+                    # reasoning models need headroom; k2-lmstudio-reasoning-tokens rule
+                    "max_tokens": 2500,
+                },
+                timeout=60,
+            )
+            if resp.status_code == 200:
+                choices = resp.json().get("choices") or []
+                if choices:
+                    rewritten = (choices[0].get("message", {}).get("content") or "").strip()
+                    # NEVER fall back to reasoning_content — keep it search-query only
+                    if rewritten:
+                        retrieval_query = rewritten
+        except Exception:
+            pass  # rewrite failed → fall back to verbatim latest user content
+    else:
+        retrieval_query = latest_user_content
+
+    # ── 2. Retrieve via existing hybrid FTS+vector+RRF pipeline ──────────
+    candidates, short_circuit = _rag_retrieve(conn, retrieval_query, embed_model)
+    conn.close()
+
+    if short_circuit or not candidates:
+        emit("search_result", found=False, answer=_RAG_NOT_FOUND, citations=[])
+        return
+
+    # ── 3. Build context under token budget ──────────────────────────────
+    context_parts = []
+    context_chars = 0
+    seen_notes = []
+    seen_note_paths = set()
+
+    for chunk in candidates:
+        header = f"[{chunk['date']} · {chunk['title']}]"
+        if chunk["speakers"]:
+            header += f" · {chunk['speakers']}"
+        part = f"{header}\n{chunk['text']}"
+        if context_chars + len(part) > _RAG_CONTEXT_BUDGET:
+            break
+        context_parts.append(part)
+        context_chars += len(part)
+        if chunk["note_path"] not in seen_note_paths:
+            seen_note_paths.add(chunk["note_path"])
+            seen_notes.append({
+                "date": chunk["date"],
+                "title": chunk["title"],
+                "note_path": chunk["note_path"],
+            })
+
+    if not context_parts:
+        emit("search_result", found=False, answer=_RAG_NOT_FOUND, citations=[])
+        return
+
+    # ── 4. Build answer LLM call with full conversation history ──────────
+    sys_msg = (
+        "Ты отвечаешь СТРОГО по предоставленным фрагментам встреч. "
+        "Каждое утверждение сопровождай ссылкой [дата · заголовок]. "
+        "Если в фрагментах нет ответа — ответь ровно: «" + _RAG_NOT_FOUND + "» Не выдумывай."
+    )
+    chunks_block = "Фрагменты встреч:\n" + "\n\n---\n".join(context_parts)
+
+    # Inject retrieved chunks into the last user message so the model sees both
+    # the conversation history AND the grounding context in a single coherent thread.
+    llm_messages = [{"role": "system", "content": sys_msg}]
+    for m in messages[:-1]:
+        llm_messages.append({"role": m["role"], "content": m["content"]})
+    last_content = latest_user_content + "\n\n" + chunks_block
+    llm_messages.append({"role": "user", "content": last_content})
+
+    # ── 5. Call LM Studio chat ────────────────────────────────────────────
+    answer = None
+    try:
+        resp = requests.post(
+            f"{_RAG_BASE_URL}/v1/chat/completions",
+            json={
+                "messages": llm_messages,
+                "temperature": 0.2,
+                "max_tokens": 4096,
+            },
+            timeout=300,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            choices = data.get("choices") or []
+            if choices:
+                msg = choices[0].get("message", {})
+                # Per backend.py:507-512 contract: NEVER fall back to reasoning_content
+                content = (msg.get("content") or "").strip()
+                if content:
+                    answer = content
+    except Exception as e:
+        emit("error", msg=f"RAG LLM ошибка: {e}")
+        return
+
+    if answer is None:
+        emit("error", msg="LLM не вернул ответ на поисковый запрос (LM Studio запущен?)")
+        return
+
+    found = answer.strip() != _RAG_NOT_FOUND
+    emit("search_result", found=found, answer=answer, citations=seen_notes)
+
+
 def cmd_preflight():
     """Readiness checks the GUI shows before recording (cheap, no network from here)."""
     import shutil
@@ -1130,6 +1644,21 @@ def main():
     p_hist.add_argument("--out-dir", dest="out_dir", default=default_obsidian)
     p_hist.add_argument("--db", required=True)
 
+    p_idx = sub.add_parser("index")
+    p_idx.add_argument("--root", required=True)
+    p_idx.add_argument("--db", required=True)
+    p_idx.add_argument("--embed-model", dest="embed_model", default=None)
+
+    p_srch = sub.add_parser("search")
+    p_srch.add_argument("--root", required=True)
+    p_srch.add_argument("--db", required=True)
+    # --query is the legacy single-question shorthand; --messages is the multi-turn form.
+    # Exactly one of them must be supplied (enforced at call time in cmd_search).
+    p_srch.add_argument("--query", default=None)
+    p_srch.add_argument("--messages", default=None,
+                        help="JSON array of {role,content} objects, last item is newest user msg")
+    p_srch.add_argument("--embed-model", dest="embed_model", default=None)
+
     args = parser.parse_args()
 
     if args.cmd == "devices":
@@ -1148,6 +1677,11 @@ def main():
         cmd_mix(args.mic, args.system, args.out, args.mic_delay, args.sys_delay)
     elif args.cmd == "process":
         cmd_process(args)
+    elif args.cmd == "index":
+        cmd_index(args.root, args.db, args.embed_model)
+    elif args.cmd == "search":
+        cmd_search(args.root, args.db, query=args.query,
+                   embed_model=args.embed_model, messages=args.messages)
 
 
 if __name__ == "__main__":

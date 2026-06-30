@@ -54,6 +54,7 @@ async function refreshPreflight() {
     ["ffmpeg", ok(p.ffmpeg), p.ffmpeg ? "есть" : "не найден (brew install ffmpeg)"],
     ["Модель Whisper", p.whisperCached ? "ok" : "warn", p.whisperCached ? "скачана" : "скачается при 1й транскрипции (~1.5GB)"],
     ["HF-токен (диаризация)", p.hfToken ? "ok" : "warn", p.hfToken ? "задан" : "нет — спикеры по таймкодам"],
+    ["Embedding-модель (поиск)", p.embedModel ? "ok" : "warn", p.embedModel ? "загружена" : "Embedding-модель не загружена — поиск будет работать только по ключевым словам"],
   ];
   wrap.innerHTML = "";
   rows.forEach(([label, state, detail]) => {
@@ -647,6 +648,7 @@ function subSwitchPara(sub) {
   paraSub = sub;
   document.querySelectorAll(".subbtn").forEach((b) => b.classList.toggle("active", b.dataset.sub === sub));
   $("para-pane-inbox").classList.toggle("hidden", sub !== "inbox");
+  $("para-pane-search").classList.toggle("hidden", sub !== "search");
   $("para-pane-tree").classList.toggle("hidden", sub !== "tree");
   if (sub === "inbox") renderParaInboxView();
   if (sub === "tree") renderParaTree();
@@ -706,6 +708,135 @@ async function openTreeNote(el) {
   $("ptvOpen").onclick = () => window.api.reveal(path);
 }
 $("paraTreeRefresh").addEventListener("click", renderParaTree);
+
+// ── PARA search pane ─────────────────────────────────────────────────────────
+
+// In-session chat history. Each item: {role: "user"|"assistant", content: string}.
+// Reset only by «Новый чат» button. Kept alive across pane switches.
+let chatMessages = [];
+
+function paraSearchLog(msg) {
+  const box = $("paraReindexLog");
+  const t = new Date().toLocaleTimeString();
+  box.textContent += `[${t}] ${msg}\n`;
+  box.scrollTop = box.scrollHeight;
+}
+
+window.api.onParaReindexEvent((ev) => {
+  if (ev.event === "log") paraSearchLog(ev.msg);
+  else if (ev.event === "error") paraSearchLog("❌ " + ev.msg);
+});
+
+$("paraReindexBtn").addEventListener("click", async () => {
+  if (!state.para || !state.para.root) { alert("Сначала создай vault на вкладке «Разбор»"); return; }
+  const btn = $("paraReindexBtn");
+  const status = $("paraReindexStatus");
+  const logBox = $("paraReindexLog");
+  btn.disabled = true;
+  btn.textContent = "Индексирую…";
+  status.textContent = "";
+  logBox.textContent = "";
+  logBox.classList.remove("hidden");
+  const res = await window.api.paraReindex(state.para.root);
+  btn.disabled = false;
+  btn.textContent = "⟳ Переиндексировать";
+  if (res && res.error) {
+    status.textContent = "❌ " + res.error;
+  } else if (res) {
+    status.textContent = `✅ Готово: ${res.indexed} проиндексировано, ${res.skipped} без изменений, ${res.removed} удалено`;
+  }
+});
+
+$("paraChatNewBtn").addEventListener("click", () => {
+  chatMessages = [];
+  $("paraChatLog").innerHTML = "";
+});
+
+$("paraSearchBtn").addEventListener("click", () => runParaSearch());
+$("paraSearchQuery").addEventListener("keydown", (e) => { if (e.key === "Enter") runParaSearch(); });
+
+// Append a bubble to the chat log.
+// role: "user" | "assistant"
+// content: plain text (user) or answer text (assistant)
+// citations: array of {date, title, note_path} (assistant only, may be empty)
+function appendChatBubble(role, content, citations) {
+  const log = $("paraChatLog");
+  const bubble = document.createElement("div");
+  bubble.className = "chat-bubble chat-bubble-" + role;
+  if (role === "user") {
+    bubble.innerHTML = `<div class="chat-text">${escapeHtml(content)}</div>`;
+  } else {
+    // assistant: render markdown answer + optional citation list
+    let inner = `<div class="chat-text">${renderMarkdown(content)}</div>`;
+    if (citations && citations.length) {
+      const citeItems = citations.map((c) =>
+        `<li>${escapeHtml(c.date)} · ${escapeHtml(c.title || (c.note_path || "").split("/").pop())}</li>`
+      ).join("");
+      inner += `<ul class="chat-cites">${citeItems}</ul>`;
+    }
+    bubble.innerHTML = inner;
+  }
+  log.appendChild(bubble);
+  log.scrollTop = log.scrollHeight;
+  return bubble;
+}
+
+// Append a "typing…" indicator bubble; returns the element so it can be removed.
+function appendTypingIndicator() {
+  const log = $("paraChatLog");
+  const el = document.createElement("div");
+  el.className = "chat-bubble chat-bubble-assistant chat-typing";
+  el.innerHTML = '<div class="chat-text"><span class="chat-dots"><span></span><span></span><span></span></span></div>';
+  log.appendChild(el);
+  log.scrollTop = log.scrollHeight;
+  return el;
+}
+
+async function runParaSearch() {
+  if (!state.para || !state.para.root) { alert("Сначала создай vault на вкладке «Разбор»"); return; }
+  const input = $("paraSearchQuery");
+  const query = input.value.trim();
+  if (!query) return;
+
+  const btn = $("paraSearchBtn");
+  // Append user turn
+  chatMessages.push({ role: "user", content: query });
+  appendChatBubble("user", query, null);
+  input.value = "";
+  btn.disabled = true;
+  btn.textContent = "Ищу…";
+  input.disabled = true;
+
+  // Show typing indicator while waiting
+  const typingEl = appendTypingIndicator();
+
+  // Pass a snapshot so the mock/backend receives a stable array regardless of
+  // when the caller inspects it (the live array gets the assistant reply appended later).
+  let res;
+  try {
+    res = await window.api.paraSearch(state.para.root, chatMessages.slice());
+  } catch (e) {
+    typingEl.remove();
+    const errMsg = "❌ " + (e.message || String(e));
+    appendChatBubble("assistant", errMsg, null);
+    chatMessages.push({ role: "assistant", content: errMsg });
+    btn.disabled = false;
+    btn.textContent = "🔍 Спросить";
+    input.disabled = false;
+    input.focus();
+    return;
+  }
+
+  typingEl.remove();
+  const answerText = res.answer || "Не нашёл по этому вопросу записей в заметках.";
+  appendChatBubble("assistant", answerText, res.found ? (res.citations || []) : []);
+  chatMessages.push({ role: "assistant", content: answerText });
+
+  btn.disabled = false;
+  btn.textContent = "🔍 Спросить";
+  input.disabled = false;
+  input.focus();
+}
 
 $("paraPick").addEventListener("click", async () => {
   const dir = await window.api.pickOutDir();
