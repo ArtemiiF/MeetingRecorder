@@ -202,7 +202,7 @@ def cmd_record(out_path, device_index):
 # ──────────────────────────────────────────────────────────────────────────
 class Pipeline:
     def __init__(self, out_dir, engine="mlx", diarize=True, cache_dir=None,
-                 language="ru", do_summary=True, template="", db_path=None):
+                 language="ru", do_summary=True, template="", db_path=None, glossary=""):
         self.TEMPLATE = template
         self.db_path = db_path
         self.OBSIDIAN_PATH = Path(out_dir)
@@ -212,6 +212,7 @@ class Pipeline:
         self.USE_DIARIZATION = diarize
         self.LANGUAGE = language          # "ru" | "en" | "auto"
         self.DO_SUMMARY = do_summary
+        self.GLOSSARY = glossary          # comma/newline-separated terms biasing Whisper initial_prompt
         self.HF_TOKEN = os.environ.get("HF_TOKEN")
         # cache for resumable stages (heavy work — convert/transcribe/diarize).
         self.cache_dir = Path(cache_dir) if cache_dir else None
@@ -328,10 +329,36 @@ class Pipeline:
             return self.CONTEXT_PROMPT_EN
         return None  # auto → no language-biased prompt
 
+    def _glossary_terms(self):
+        if not self.GLOSSARY:
+            return []
+        import re
+        return [t.strip() for t in re.split(r"[,\n]+", self.GLOSSARY) if t.strip()]
+
+    def _glossary_prompt(self):
+        terms = self._glossary_terms()
+        if not terms:
+            return None
+        return "Термины: " + ", ".join(terms) + "."
+
+    def _glossary_cache_suffix(self):
+        # cache key must change whenever the glossary changes (or stale transcripts
+        # would be served) — canonicalized so cosmetic separator differences that
+        # yield the same term list don't cause needless cache misses.
+        terms = self._glossary_terms()
+        if not terms:
+            return ""
+        import hashlib
+        h = hashlib.sha1(", ".join(terms).encode("utf-8")).hexdigest()[:8]
+        return f"-g{h}"
+
     def transcribe(self, mono_audio):
         result = None
         lang = self._whisper_lang()
         prompt = self._context_prompt()
+        glossary_prompt = self._glossary_prompt()
+        if glossary_prompt:
+            prompt = f"{prompt} {glossary_prompt}" if prompt else glossary_prompt
         if self.TRANSCRIPTION_ENGINE == "mlx":
             try:
                 import mlx_whisper
@@ -774,7 +801,7 @@ class Pipeline:
 
         # ── 2. transcribe (cache: transcribe.json) ────────────────────────
         stage("transcribe", "Транскрибация")
-        tj = self._cache(f"transcribe-{self.LANGUAGE}.json")  # transcript depends on language
+        tj = self._cache(f"transcribe-{self.LANGUAGE}{self._glossary_cache_suffix()}.json")  # depends on language + glossary
         cached_t = self._cache_read(tj) if (tj and tj.exists()) else None
         if cached_t:
             segments, transcript = cached_t["segments"], cached_t["transcript"]
@@ -911,7 +938,7 @@ def cmd_process(args):
         prompt = "Сделай краткую структурированную сводку этой встречи в Markdown."
     pipe = Pipeline(out_dir=args.out_dir, engine=args.engine, diarize=args.diarize,
                     cache_dir=args.cache_dir, language=args.language, do_summary=args.summarize,
-                    template=args.template, db_path=args.db)
+                    template=args.template, db_path=args.db, glossary=args.glossary)
     try:
         pipe.process(args.infile, prompt, keep_audio_in_obsidian=args.keep_audio)
     except Exception as e:
@@ -1744,6 +1771,7 @@ def main():
     p_proc.add_argument("--keep-audio", dest="keep_audio", type=str2bool, default=True)
     p_proc.add_argument("--cache-dir", dest="cache_dir", default=None)
     p_proc.add_argument("--language", default="ru")  # ru | en | auto
+    p_proc.add_argument("--glossary", default="")  # comma/newline-separated terms → Whisper initial_prompt
     p_proc.add_argument("--summarize", type=str2bool, default=True)
     p_proc.add_argument("--template", default="")
     p_proc.add_argument("--db", default=None)

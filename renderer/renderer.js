@@ -15,6 +15,7 @@ const state = {
   hfToken: "",
   language: "ru",
   authorName: "Автор",
+  glossary: "",
   para: null, // { root, folders: {projects, areas, resources, archives} }
 };
 
@@ -148,12 +149,14 @@ async function init() {
   state.hfToken = data.hfToken || "";
   state.language = data.language || "ru";
   state.authorName = data.authorName || "Автор";
+  state.glossary = data.glossary || "";
   state.para = data.para || null;
   state.secretEncrypted = data.secretEncrypted !== false;
   $("outDir").value = state.outDir;
   $("hfToken").value = state.hfToken;
   $("language").value = state.language;
   $("authorName").value = state.authorName;
+  $("glossary").value = state.glossary;
   updateTokenWarn();
   renderPresets();
   if (state.presets.length) selectPreset(0);
@@ -217,6 +220,7 @@ async function persistPresets() {
     hfToken: state.hfToken,
     language: state.language,
     authorName: state.authorName,
+    glossary: state.glossary,
     para: state.para,
   });
 }
@@ -234,6 +238,11 @@ $("hfToken").addEventListener("change", (e) => {
 
 $("authorName").addEventListener("change", (e) => {
   state.authorName = e.target.value || "Автор";
+  persistPresets();
+});
+
+$("glossary").addEventListener("change", (e) => {
+  state.glossary = e.target.value || "";
   persistPresets();
 });
 
@@ -460,6 +469,7 @@ async function startProcessing(fresh) {
     hfToken: state.hfToken,
     fresh: !!fresh,
     language: state.language,
+    glossary: state.glossary,
     summarize: !$("noSummary").checked,
     template: (state.presets[state.currentPreset] || {}).name || "",
   });

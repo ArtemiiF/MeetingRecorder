@@ -431,7 +431,7 @@ function cacheDirFor(audioFile) {
 
 // processing pipeline
 ipcMain.handle("process-audio", async (_e, opts) => {
-  const { audioFile, prompt, diarize, outDir, engine, hfToken, fresh, language, summarize, template } = opts;
+  const { audioFile, prompt, diarize, outDir, engine, hfToken, fresh, language, glossary, summarize, template } = opts;
   if (procProc) return { ok: false, error: "Обработка уже идёт" };
 
   const cacheDir = cacheDirFor(audioFile);
@@ -451,6 +451,7 @@ ipcMain.handle("process-audio", async (_e, opts) => {
     "--engine", engine || "mlx",
     "--cache-dir", cacheDir,
     "--language", language || "ru",
+    "--glossary", glossary || "",
     "--summarize", summarize === false ? "false" : "true",
     "--template", template || "",
     "--db", DB_PATH,

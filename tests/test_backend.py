@@ -553,7 +553,7 @@ def test_cmd_process_uses_default_prompt_when_file_blank(monkeypatch, tmp_path):
     args = types.SimpleNamespace(
         prompt_file=str(blank), out_dir=str(tmp_path), engine="mlx",
         diarize=False, infile="x.wav", keep_audio=False, cache_dir=None,
-        language="ru", summarize=True, template="", db=None)
+        language="ru", glossary="", summarize=True, template="", db=None)
     backend.cmd_process(args)
     assert "краткую структурированную сводку" in captured["prompt"]
 
@@ -567,7 +567,7 @@ def test_cmd_process_forwards_user_prompt(monkeypatch, tmp_path):
     args = types.SimpleNamespace(
         prompt_file=str(pf), out_dir=str(tmp_path), engine="mlx",
         diarize=True, infile="x.wav", keep_audio=False, cache_dir=None,
-        language="ru", summarize=True, template="", db=None)
+        language="ru", glossary="", summarize=True, template="", db=None)
     backend.cmd_process(args)
     assert captured["p"] == "МОЙ КАСТОМНЫЙ ПРОМПТ"
 
@@ -712,6 +712,118 @@ def test_language_passed_to_cache_filename(tmp_path, monkeypatch):
     p = backend.Pipeline(out_dir=str(tmp_path / "v"), diarize=False,
                          cache_dir=str(tmp_path / "c"), language="en")
     assert p._cache("transcribe-en.json").name == "transcribe-en.json"
+
+
+# ── glossary → Whisper initial_prompt + cache key ───────────────────────────
+def install_fake_mlx_whisper(monkeypatch):
+    fake = types.ModuleType("mlx_whisper")
+    calls = {}
+
+    def transcribe(audio, **kwargs):
+        calls["audio"] = audio
+        calls["kwargs"] = kwargs
+        return {"segments": [], "text": ""}
+
+    fake.transcribe = transcribe
+    monkeypatch.setitem(sys.modules, "mlx_whisper", fake)
+    return calls
+
+
+def test_empty_glossary_leaves_initial_prompt_unchanged(monkeypatch, tmp_path):
+    calls = install_fake_mlx_whisper(monkeypatch)
+    p = backend.Pipeline(out_dir=str(tmp_path / "v"), diarize=False, language="ru")
+    p.transcribe("mono.wav")
+    assert calls["kwargs"]["initial_prompt"] == backend.Pipeline.CONTEXT_PROMPT_RU
+
+
+def test_glossary_appended_to_initial_prompt(monkeypatch, tmp_path):
+    calls = install_fake_mlx_whisper(monkeypatch)
+    p = backend.Pipeline(out_dir=str(tmp_path / "v"), diarize=False, language="ru",
+                         glossary="Иван Петров, Mindbox\nClickHouse")
+    p.transcribe("mono.wav")
+    prompt = calls["kwargs"]["initial_prompt"]
+    assert backend.Pipeline.CONTEXT_PROMPT_RU in prompt
+    assert "Термины: Иван Петров, Mindbox, ClickHouse." in prompt
+
+
+def test_glossary_alone_used_when_language_auto(monkeypatch, tmp_path):
+    # auto → no language-biased context prompt, so glossary is the whole initial_prompt
+    calls = install_fake_mlx_whisper(monkeypatch)
+    p = backend.Pipeline(out_dir=str(tmp_path / "v"), diarize=False, language="auto",
+                         glossary="Kubernetes")
+    p.transcribe("mono.wav")
+    assert calls["kwargs"]["initial_prompt"] == "Термины: Kubernetes."
+
+
+def test_glossary_blank_terms_ignored():
+    p = backend.Pipeline(out_dir="/tmp/mr-test-out", diarize=False, glossary=" , \n ,")
+    assert p._glossary_prompt() is None
+    assert p._glossary_cache_suffix() == ""
+
+
+def test_glossary_empty_cache_suffix_is_blank(tmp_path):
+    p = backend.Pipeline(out_dir=str(tmp_path / "v"), diarize=False, language="ru")
+    assert p._glossary_cache_suffix() == ""
+    assert f"transcribe-{p.LANGUAGE}{p._glossary_cache_suffix()}.json" == "transcribe-ru.json"
+
+
+def test_glossary_cache_suffix_deterministic_and_distinguishing(tmp_path):
+    p1 = backend.Pipeline(out_dir=str(tmp_path / "v"), diarize=False, language="ru",
+                          glossary="Иван, Mindbox")
+    p2 = backend.Pipeline(out_dir=str(tmp_path / "v"), diarize=False, language="ru",
+                          glossary="Иван, Mindbox")
+    p3 = backend.Pipeline(out_dir=str(tmp_path / "v"), diarize=False, language="ru",
+                          glossary="Другие термины")
+    assert p1._glossary_cache_suffix() != ""
+    assert p1._glossary_cache_suffix() == p2._glossary_cache_suffix()  # same glossary → same key
+    assert p1._glossary_cache_suffix() != p3._glossary_cache_suffix()  # different glossary → different key
+
+
+def test_glossary_change_busts_transcribe_cache(monkeypatch, tmp_path):
+    # mirrors test_cache_resume_skips_transcribe_on_rerun, but changes glossary between
+    # runs — a stale cached transcript must NOT be served across a glossary change.
+    src = tmp_path / "in.wav"
+    src.write_bytes(b"x")
+    cache = tmp_path / "cache"
+    calls = {"n": 0}
+
+    def fake_transcribe(self, f):
+        calls["n"] += 1
+        return {"segments": [seg("кэш тест встречи", 0, 3)], "text": "x"}
+
+    monkeypatch.setattr(backend.Pipeline, "transcribe", fake_transcribe)
+
+    def mk(glossary):
+        p = backend.Pipeline(out_dir=str(tmp_path / "v"), diarize=False, cache_dir=str(cache),
+                             glossary=glossary)
+        monkeypatch.setattr(p, "convert_to_mono", lambda f: f)
+        monkeypatch.setattr(p, "remove_silence_vad", lambda f: f)
+        monkeypatch.setattr(p, "summarize", lambda t, pr: None)
+        return p
+
+    capture(mk("").process, str(src), "p")         # baseline run, no glossary
+    capture(mk("Mindbox").process, str(src), "p")  # glossary changed → must not reuse baseline cache
+
+    assert calls["n"] == 2  # transcribe ran again — the glossary change invalidated the cache key
+
+
+def test_cmd_process_forwards_glossary_to_pipeline(monkeypatch, tmp_path):
+    captured = {}
+    orig_init = backend.Pipeline.__init__
+
+    def spy_init(self, *a, **kw):
+        captured["glossary"] = kw.get("glossary")
+        orig_init(self, *a, **kw)
+
+    monkeypatch.setattr(backend.Pipeline, "__init__", spy_init)
+    monkeypatch.setattr(backend.Pipeline, "process",
+                        lambda self, a, p, keep_audio_in_obsidian=True: None)
+    args = types.SimpleNamespace(
+        prompt_file=None, out_dir=str(tmp_path), engine="mlx",
+        diarize=False, infile="x.wav", keep_audio=False, cache_dir=None,
+        language="ru", glossary="Иван Петров, Mindbox", summarize=True, template="", db=None)
+    backend.cmd_process(args)
+    assert captured["glossary"] == "Иван Петров, Mindbox"
 
 
 def test_copy_atomic_roundtrip_no_tmp_left(tmp_path):

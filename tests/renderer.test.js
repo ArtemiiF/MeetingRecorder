@@ -655,6 +655,55 @@ test("changing authorName input persists with authorName in savePresets payload"
   assert.equal(saved.authorName, "Наталья");
 });
 
+// ── glossary setting ──────────────────────────────────────────────────────────
+
+test("glossary loads from presets into state and the settings textarea", async () => {
+  const { $, window } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru",
+      glossary: "Иван Петров, Mindbox",
+    }),
+  });
+  await tick(window);
+  assert.equal($("glossary").value, "Иван Петров, Mindbox");
+});
+
+test("glossary defaults to '' when absent from presets", async () => {
+  const { $, window } = await boot({
+    getPresets: async () => ({ presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru" }),
+  });
+  await tick(window);
+  assert.equal($("glossary").value, "");
+});
+
+test("changing glossary input persists with glossary in savePresets payload", async () => {
+  let saved = null;
+  const { $, window } = await boot({ savePresets: async (data) => { saved = data; return true; } });
+  await tick(window);
+  $("glossary").value = "ClickHouse, Kubernetes";
+  $("glossary").dispatchEvent(new window.Event("change"));
+  await tick(window);
+  assert.ok(saved, "savePresets was not called");
+  assert.equal(saved.glossary, "ClickHouse, Kubernetes");
+});
+
+test("glossary is forwarded to processAudio when running", async () => {
+  let sent = null;
+  const { window, $, handlers } = await boot({
+    getPresets: async () => ({
+      presets: [{ name: "P", prompt: "x" }], defaultOutDir: "/tmp", hfToken: "", language: "ru",
+      glossary: "Иван Петров, Mindbox",
+    }),
+    processAudio: async (opts) => { sent = opts; return { ok: true }; },
+  });
+  await tick(window);
+  handlers.record({ event: "recorded", file: "/tmp/mixed.wav", mic: "/tmp/m.wav", system: null, tracks: 1 });
+  $("runBtn").click();
+  await tick(window);
+  assert.ok(sent, "processAudio was not called");
+  assert.equal(sent.glossary, "Иван Петров, Mindbox");
+});
+
 test("'это я' button fills speaker row input with authorName; Apply sends it through rename API", async () => {
   let renamed = null;
   const { window, $, handlers } = await boot({
