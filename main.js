@@ -7,7 +7,7 @@ const readline = require("readline");
 const {
   WavWriter, rmsLevel, cacheKey, pairHistory,
   encodeTokenBlob, decodeTokenBlob, isStale,
-  rewriteNoteSpeakers,
+  rewriteNoteSpeakers, isOutsideRoot, indexRunReducer,
 } = require("./lib/mainutil");
 
 // audiotee is ESM-only — load it lazily via dynamic import() from this CommonJS module.
@@ -444,14 +444,21 @@ ipcMain.handle("process-audio", async (_e, opts) => {
   ];
   // UI-entered token wins over a shell env one; empty → backend skips diarization.
   const extraEnv = hfToken && hfToken.trim() ? { HF_TOKEN: hfToken.trim() } : {};
+  let doneNote = null; // captured from the "done" event, used to auto-index on close
   procProc = runBackend(
     args,
-    (ev) => send("process-event", ev),
+    (ev) => {
+      if (ev.event === "done") doneNote = ev.note;
+      send("process-event", ev);
+    },
     (code, stderr) => {
-      send("process-event", { event: "process-closed", code, stderr, canceled: procCanceled });
+      const canceled = procCanceled;
+      send("process-event", { event: "process-closed", code, stderr, canceled });
       try { fs.unlinkSync(promptFile); } catch {}
       procProc = null;
       procCanceled = false;
+      // Fire-and-forget: resolves to the renderer above regardless; indexing runs after.
+      if (!canceled && code === 0 && doneNote) triggerAutoIndex(doneNote);
     },
     extraEnv
   );
@@ -628,10 +635,63 @@ ipcMain.handle("reveal", async (_e, p) => {
   shell.showItemInFolder(p);
 });
 
+// Shared with the auto-index trigger below — one place defines what "run the indexer" means.
+function indexArgs(root) {
+  return ["index", "--root", root, "--db", DB_PATH];
+}
+
+// ── auto-index (background, after a successful `process` run) ───────────────
+// Same spawn as the button-driven para-reindex above, but self-triggered and
+// serialized via indexRunReducer so a run already in flight isn't duplicated.
+let indexRunState = { inFlight: false, queued: false };
+
+// Direct presets.json read, mirroring get-presets's own read+fallback. Unlike
+// para-reindex (root comes in as an IPC arg from the renderer's cached state),
+// this fires from a background completion callback with no renderer round-trip
+// to piggyback config on, so main reads the persisted config itself.
+function readParaRoot() {
+  let data;
+  try {
+    data = JSON.parse(fs.readFileSync(PRESETS_FILE, "utf-8"));
+  } catch {
+    try { data = JSON.parse(fs.readFileSync(PRESETS_EXAMPLE, "utf-8")); }
+    catch { return null; }
+  }
+  const root = data && data.para && data.para.root;
+  return root ? expandHome(root) : null;
+}
+
+function startAutoIndex(root) {
+  runBackend(indexArgs(root),
+    (ev) => {
+      if (ev.event === "log" || ev.event === "error") send("para-reindex-event", ev);
+    },
+    () => {
+      const next = indexRunReducer(indexRunState, "complete");
+      indexRunState = next.state;
+      if (next.shouldStart) startAutoIndex(root);
+    });
+}
+
+// Called after process-audio saves a note. Silent no-op if PARA isn't configured.
+function triggerAutoIndex(notePath) {
+  const root = readParaRoot();
+  if (!root) return;
+  if (isOutsideRoot(path.dirname(notePath), root)) {
+    send("para-reindex-event", {
+      event: "log",
+      msg: `Заметка сохранена вне индексируемого vault (${root}): ${notePath}`,
+    });
+  }
+  const next = indexRunReducer(indexRunState, "trigger");
+  indexRunState = next.state;
+  if (next.shouldStart) startAutoIndex(root);
+}
+
 ipcMain.handle("para-reindex", async (_e, { root }) => {
   return new Promise((resolve) => {
     let summary = null;
-    runBackend(["index", "--root", root, "--db", DB_PATH],
+    runBackend(indexArgs(root),
       (ev) => {
         if (ev.event === "indexed") summary = { indexed: ev.indexed, skipped: ev.skipped, removed: ev.removed };
         else if (ev.event === "log" || ev.event === "error") send("para-reindex-event", ev);

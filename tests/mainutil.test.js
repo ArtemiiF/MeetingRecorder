@@ -7,7 +7,7 @@ const path = require("path");
 const {
   buildWavHeader, WavWriter, rmsLevel, cacheKey,
   pairHistory, encodeTokenBlob, decodeTokenBlob, isStale,
-  rewriteNoteSpeakers,
+  rewriteNoteSpeakers, isOutsideRoot, indexRunReducer,
 } = require("../lib/mainutil");
 
 // ── WAV header ──────────────────────────────────────────────────────────────
@@ -166,4 +166,53 @@ test("rewriteNoteSpeakers: no frontmatter speakers key leaves body-only rewrite 
   const out = rewriteNoteSpeakers(text, { "Спикер 1": "Алексей" });
   assert.ok(out.includes("**[Алексей]**: hi"));
   assert.ok(!out.includes("speakers:")); // no key was added
+});
+
+// ── auto-index gating ────────────────────────────────────────────────────────
+test("isOutsideRoot: dir inside root is not outside", () => {
+  assert.equal(isOutsideRoot("/vault/Meetings", "/vault"), false);
+});
+test("isOutsideRoot: dir equal to root is not outside", () => {
+  assert.equal(isOutsideRoot("/vault", "/vault"), false);
+});
+test("isOutsideRoot: dir outside root is outside", () => {
+  assert.equal(isOutsideRoot("/Users/x/Documents/Obsidian/Meetings", "/Users/x/vault"), true);
+});
+test("isOutsideRoot: no root configured → false (nothing to compare)", () => {
+  assert.equal(isOutsideRoot("/anywhere", ""), false);
+  assert.equal(isOutsideRoot("/anywhere", null), false);
+});
+test("isOutsideRoot: no dir → false", () => {
+  assert.equal(isOutsideRoot("", "/vault"), false);
+});
+
+test("indexRunReducer: trigger while idle starts immediately", () => {
+  const r = indexRunReducer({ inFlight: false, queued: false }, "trigger");
+  assert.equal(r.shouldStart, true);
+  assert.deepEqual(r.state, { inFlight: true, queued: false });
+});
+test("indexRunReducer: trigger while in-flight queues a trailing run, does not start", () => {
+  const r = indexRunReducer({ inFlight: true, queued: false }, "trigger");
+  assert.equal(r.shouldStart, false);
+  assert.deepEqual(r.state, { inFlight: true, queued: true });
+});
+test("indexRunReducer: second trigger while already queued stays queued (no pile-up)", () => {
+  const r = indexRunReducer({ inFlight: true, queued: true }, "trigger");
+  assert.equal(r.shouldStart, false);
+  assert.deepEqual(r.state, { inFlight: true, queued: true });
+});
+test("indexRunReducer: complete with no queued trailing run goes idle", () => {
+  const r = indexRunReducer({ inFlight: true, queued: false }, "complete");
+  assert.equal(r.shouldStart, false);
+  assert.deepEqual(r.state, { inFlight: false, queued: false });
+});
+test("indexRunReducer: complete with a queued trailing run starts it and clears the flag", () => {
+  const r = indexRunReducer({ inFlight: true, queued: true }, "complete");
+  assert.equal(r.shouldStart, true);
+  assert.deepEqual(r.state, { inFlight: true, queued: false });
+});
+test("indexRunReducer: undefined state defaults to idle, trigger starts", () => {
+  const r = indexRunReducer(undefined, "trigger");
+  assert.equal(r.shouldStart, true);
+  assert.deepEqual(r.state, { inFlight: true, queued: false });
 });
