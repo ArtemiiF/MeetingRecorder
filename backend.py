@@ -10,7 +10,8 @@ Events:
   devices   {"devices": [{"index", "name", "channels", "default"}]}
   elapsed   {"seconds": int}                    recording tick
   recorded  {"file": str, "size_mb": float}     recording finalized
-  done      {"note": str, "audio": str, "transcript": str, "summary": str}
+  done      {"note": str, "audio": str, "transcript": str, "summary": str,
+             "actions": {"items": [{"what","who","due"}], "decisions": [str]}}
   error     {"msg": str}
 
 Commands (argv[1]):
@@ -580,6 +581,89 @@ class Pipeline:
             pass
         return {}
 
+    @staticmethod
+    def _extract_json_object(text):
+        """Locate the first syntactically valid JSON *object* in text. Unlike the
+        single-level scans used by infer_speaker_names/cmd_classify (`\\{[^{}]*\\}`,
+        which cannot match nested braces), this brace-balances so a structure like
+        {"items":[{"what":...}], "decisions":[...]} still parses. Tolerates a
+        ```json ... ``` fence and surrounding prose. Returns a dict or None."""
+        import re
+        fenced = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.S)
+        candidates = [fenced.group(1)] if fenced else []
+        for start, ch in enumerate(text):
+            if ch != "{":
+                continue
+            depth = 0
+            for i in range(start, len(text)):
+                if text[i] == "{":
+                    depth += 1
+                elif text[i] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        candidates.append(text[start:i + 1])
+                        break
+        for cand in candidates:
+            try:
+                data = json.loads(cand)
+            except Exception:
+                continue
+            if isinstance(data, dict):
+                return data
+        return None
+
+    def extract_actions(self, transcript):
+        """Extract action items / decisions / follow-ups from the meeting transcript
+        via one structured JSON LLM call. Same JSON-snippet contract as
+        infer_speaker_names/cmd_classify (content, falling back to reasoning_content —
+        safe here because the result is schema-validated, not echoed verbatim like
+        summarize()'s note body). Malformed/empty output degrades to {} — no note
+        section, no crash."""
+        import requests
+        try:
+            resp = requests.post(self.LMSTUDIO_API, json={
+                "messages": [
+                    {"role": "system", "content":
+                        "Ты извлекаешь из транскрипта встречи задачи, договорённости и решения. "
+                        "Отвечай только JSON."},
+                    {"role": "user", "content":
+                        "Извлеки из транскрипта конкретные действия/договорённости и принятые "
+                        "решения. Ничего не выдумывай — только то, что явно есть в тексте. "
+                        'Ответь строго JSON: {"items":[{"what":"что сделать",'
+                        '"who":"кто (или пустая строка)","due":"срок (или пустая строка)"}],'
+                        '"decisions":["принятое решение", ...]}. '
+                        "Если пунктов нет — пустые списки.\n\n"
+                        f"ТРАНСКРИПТ:\n{transcript[:8000]}"},
+                ],
+                "temperature": 0.1, "max_tokens": 4000,
+            }, timeout=180)
+            if resp.status_code != 200:
+                return {}
+            msg = (resp.json().get("choices") or [{}])[0].get("message", {})
+            c = (msg.get("content") or "") or (msg.get("reasoning_content") or "")
+            if not c.strip():
+                return {}
+            data = self._extract_json_object(c)
+            if not isinstance(data, dict):
+                return {}
+            items = []
+            for it in (data.get("items") or []):
+                if not isinstance(it, dict):
+                    continue
+                what = str(it.get("what", "")).strip()
+                if not what:
+                    continue
+                items.append({
+                    "what": what,
+                    "who": str(it.get("who", "")).strip(),
+                    "due": str(it.get("due", "")).strip(),
+                })
+            decisions = [str(d).strip() for d in (data.get("decisions") or []) if str(d).strip()]
+            return {"items": items, "decisions": decisions}
+        except Exception as e:
+            log(f"⚠️ Извлечение действий не удалось: {e}")
+            return {}
+
     def set_frontmatter(self, note, fields):
         """Inject key: "value" pairs into the note's YAML frontmatter (create if absent).
         Empty values skipped. Source of truth for the SQLite index is this frontmatter."""
@@ -616,6 +700,25 @@ class Pipeline:
                     end = i + 1
                     return "\n".join(lines[:end]) + "\n" + section + "\n".join(lines[end:])
         return section + note
+
+    def add_actions_section(self, note, actions):
+        """Append a '## Действия' checklist section (items + decisions) to the note
+        body, above the transcript. actions: {"items":[{what,who,due}], "decisions":[...]}.
+        Empty/missing → no-op (no empty section, no error)."""
+        items = (actions or {}).get("items") or []
+        decisions = (actions or {}).get("decisions") or []
+        if not items and not decisions:
+            return note
+        lines = ["\n\n## Действия\n"]
+        for it in items:
+            who = f" — {it['who']}" if it.get("who") else ""
+            due = f" (срок: {it['due']})" if it.get("due") else ""
+            lines.append(f"- [ ] {it['what']}{who}{due}")
+        if decisions:
+            lines.append("\n**Решения:**")
+            for d in decisions:
+                lines.append(f"- {d}")
+        return note + "\n".join(lines) + "\n"
 
     def add_transcript(self, note, transcript):
         return note + (
@@ -736,10 +839,13 @@ class Pipeline:
         stage("meta", "Заголовок и спикеры")
         title = ""
         speakers = {}
+        actions = {}
         if self.DO_SUMMARY and (summary or formatted):
             if summary:
                 log("Генерирую заголовок…")
                 title = self.generate_title(transcript_for_llm)
+                log("Извлекаю действия и решения…")
+                actions = self.extract_actions(transcript_for_llm)
             if formatted:
                 log("Определяю имена спикеров…")
                 speakers = self.infer_speaker_names(transcript_for_llm)
@@ -764,6 +870,7 @@ class Pipeline:
             "speakers": speakers_str})
 
         note = self.add_audio_link(note, audio_basename)
+        note = self.add_actions_section(note, actions)
         note = self.add_transcript(note, transcript_for_llm)
 
         # ── 5. save ───────────────────────────────────────────────────────
@@ -794,7 +901,8 @@ class Pipeline:
              transcript=transcript_for_llm,
              summary=summary,
              title=title,
-             speakers=speakers)
+             speakers=speakers,
+             actions=actions)
 
 
 def cmd_process(args):

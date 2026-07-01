@@ -38,8 +38,29 @@ document.querySelectorAll(".rtab").forEach((t) =>
     const r = t.dataset.r;
     $("resSummary").classList.toggle("hidden", r !== "summary");
     $("resTranscript").classList.toggle("hidden", r !== "transcript");
+    $("resActions").classList.toggle("hidden", r !== "actions");
   })
 );
+
+// format the done event's {items,decisions} into the same plain-markdown-text
+// style as the "## Действия" note section (checkboxes are plain text, not
+// interactive — matches resSummary/resTranscript, which are also plain <pre>).
+function formatActions(actions) {
+  const items = (actions && actions.items) || [];
+  const decisions = (actions && actions.decisions) || [];
+  if (!items.length && !decisions.length) return "(пунктов действий нет)";
+  const lines = items.map((it) => {
+    const who = it.who ? ` — ${it.who}` : "";
+    const due = it.due ? ` (срок: ${it.due})` : "";
+    return `- [ ] ${it.what}${who}${due}`;
+  });
+  if (decisions.length) {
+    if (lines.length) lines.push("");
+    lines.push("Решения:");
+    decisions.forEach((d) => lines.push(`- ${d}`));
+  }
+  return lines.join("\n");
+}
 
 // ── preflight readiness ──────────────────────────────────────────────────────
 async function refreshPreflight() {
@@ -1013,6 +1034,7 @@ function showResult(ev) {
   $("resultCard").style.display = "";
   $("resSummary").textContent = ev.summary || "(сводка пустая — LM Studio запущен?)";
   $("resTranscript").textContent = ev.transcript || "";
+  $("resActions").textContent = formatActions(ev.actions);
   $("openNote").onclick = () => window.api.reveal(ev.note);
   $("openAudio").onclick = () => window.api.reveal(ev.audio);
   currentNote = ev.note;

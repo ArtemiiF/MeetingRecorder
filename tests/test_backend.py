@@ -400,6 +400,88 @@ def test_infer_speaker_names_no_labels_no_call(pipe):
     assert pipe.infer_speaker_names("обычный текст без меток") == {}
 
 
+# ── extract_actions (action items / decisions structured LLM call) ─────────────
+def test_extract_actions_happy_path(monkeypatch, pipe):
+    payload = {"choices": [{"message": {"content":
+        '{"items":[{"what":"отправить отчёт","who":"Алексей","due":"пятница"},'
+        '{"what":"без срока и ответственного"}],'
+        '"decisions":["перенести релиз на март"]}'}}]}
+    install_fake_requests(monkeypatch, payload=payload)
+    out = pipe.extract_actions("транскрипт встречи")
+    assert out == {
+        "items": [
+            {"what": "отправить отчёт", "who": "Алексей", "due": "пятница"},
+            {"what": "без срока и ответственного", "who": "", "due": ""},
+        ],
+        "decisions": ["перенести релиз на март"],
+    }
+
+
+def test_extract_actions_wrapped_in_prose_and_fence(monkeypatch, pipe):
+    # model wraps the JSON in a markdown fence + surrounding prose — must still parse
+    # (regular non-nested regexes used elsewhere in this file can't handle this shape).
+    content = (
+        "Вот извлечённые пункты:\n```json\n"
+        '{"items":[{"what":"созвониться с клиентом","who":"","due":""}],"decisions":[]}'
+        "\n```\nНадеюсь, помогло!"
+    )
+    install_fake_requests(monkeypatch, payload={"choices": [{"message": {"content": content}}]})
+    out = pipe.extract_actions("транскрипт")
+    assert out == {"items": [{"what": "созвониться с клиентом", "who": "", "due": ""}], "decisions": []}
+
+
+def test_extract_actions_empty_lists_returns_empty_dict_shape(monkeypatch, pipe):
+    install_fake_requests(monkeypatch, payload={"choices": [{"message": {
+        "content": '{"items":[],"decisions":[]}'}}]})
+    assert pipe.extract_actions("транскрипт") == {"items": [], "decisions": []}
+
+
+def test_extract_actions_malformed_output_degrades_to_empty(monkeypatch, pipe):
+    # no JSON at all — reasoning model rambled, nothing to salvage
+    install_fake_requests(monkeypatch, payload={"choices": [{"message": {
+        "content": "Хм, дайте подумать... кажется тут не было явных задач."}}]})
+    assert pipe.extract_actions("транскрипт") == {}
+
+
+def test_extract_actions_empty_content_returns_empty(monkeypatch, pipe):
+    install_fake_requests(monkeypatch, payload={"choices": [{"message": {"content": ""}}]})
+    assert pipe.extract_actions("транскрипт") == {}
+
+
+def test_extract_actions_non_200_returns_empty(monkeypatch, pipe):
+    install_fake_requests(monkeypatch, status=500, payload={})
+    assert pipe.extract_actions("транскрипт") == {}
+
+
+def test_extract_actions_swallows_exception(monkeypatch, pipe):
+    install_fake_requests(monkeypatch, raise_exc=RuntimeError("boom"))
+    assert pipe.extract_actions("транскрипт") == {}
+
+
+# ── add_actions_section (note body assembly) ────────────────────────────────────
+def test_add_actions_section_renders_checklist_and_decisions(pipe):
+    actions = {
+        "items": [
+            {"what": "отправить отчёт", "who": "Алексей", "due": "пятница"},
+            {"what": "без деталей", "who": "", "due": ""},
+        ],
+        "decisions": ["перенести релиз на март"],
+    }
+    out = pipe.add_actions_section("# note", actions)
+    assert "## Действия" in out
+    assert "- [ ] отправить отчёт — Алексей (срок: пятница)" in out
+    assert "- [ ] без деталей" in out
+    assert "— " not in out.split("без деталей")[1].split("\n")[0]  # empty who/due omitted
+    assert "**Решения:**" in out
+    assert "- перенести релиз на март" in out
+
+
+def test_add_actions_section_empty_is_noop(pipe):
+    assert pipe.add_actions_section("# note", {}) == "# note"
+    assert pipe.add_actions_section("# note", {"items": [], "decisions": []}) == "# note"
+    assert pipe.add_actions_section("# note", None) == "# note"
+
+
 def test_build_mix_filter_single_no_filter():
     assert backend.build_mix_filter(1, [0]) == (None, None)
 
@@ -506,6 +588,7 @@ def _mock_pipe(monkeypatch, out_dir, transcribe_ret, summary_ret):
     monkeypatch.setattr(pipe, "summarize", lambda t, p: summary_ret)
     monkeypatch.setattr(pipe, "generate_title", lambda t: "")           # no live LLM in tests
     monkeypatch.setattr(pipe, "infer_speaker_names", lambda t: {})
+    monkeypatch.setattr(pipe, "extract_actions", lambda t: {})
     return pipe
 
 
@@ -1186,6 +1269,7 @@ def _mock_pipe_diarized(monkeypatch, out_dir, formatted_transcript, inferred_spe
     monkeypatch.setattr(pipe, "summarize", lambda t, p: "# Сводка\n\n" + "итог " * 30)
     monkeypatch.setattr(pipe, "generate_title", lambda t: "Тестовая встреча")
     monkeypatch.setattr(pipe, "infer_speaker_names", lambda t: inferred_speakers)
+    monkeypatch.setattr(pipe, "extract_actions", lambda t: {})
     return pipe
 
 
@@ -1221,6 +1305,68 @@ def test_process_no_diarization_omits_speakers_key(monkeypatch, tmp_path):
     capture(pipe.process, str(src), "prompt")
     note_text = list((tmp_path / "v").glob("*.md"))[0].read_text(encoding="utf-8")
     assert "speakers:" not in note_text
+
+
+# ── process() ↔ action items wiring (note section + done payload) ──────────────
+def test_process_appends_actions_section_and_done_payload(monkeypatch, tmp_path):
+    """extract_actions() result must land in the note's '## Действия' section AND
+    the done event's actions payload (backend.py process(): meta stage + add_actions_section)."""
+    src = tmp_path / "in.wav"; src.write_bytes(b"x")
+    long_summary = "# Сводка\n\n" + ("итог " * 30)
+    pipe = _mock_pipe(
+        monkeypatch, str(tmp_path / "v"),
+        {"segments": [seg("обсудили план", 0, 3)], "text": "обсудили план"},
+        long_summary)
+    fake_actions = {
+        "items": [{"what": "подготовить презентацию", "who": "Мария", "due": "среда"}],
+        "decisions": ["перенести встречу на вторник"],
+    }
+    monkeypatch.setattr(pipe, "extract_actions", lambda t: fake_actions)
+    events = capture(pipe.process, str(src), "prompt")
+    done = [e for e in events if e["event"] == "done"][0]
+    assert done["actions"] == fake_actions
+    note_text = list((tmp_path / "v").glob("*.md"))[0].read_text(encoding="utf-8")
+    assert "## Действия" in note_text
+    assert "- [ ] подготовить презентацию — Мария (срок: среда)" in note_text
+    assert "**Решения:**" in note_text
+    assert "- перенести встречу на вторник" in note_text
+    # actions section sits above the transcript section
+    assert note_text.index("## Действия") < note_text.index("## 📄 Полный транскрипт")
+
+
+def test_process_no_summary_mode_skips_actions_call(monkeypatch, tmp_path):
+    """noSummary mode (do_summary=False): no extract_actions call, no section, empty done payload."""
+    src = tmp_path / "in.wav"; src.write_bytes(b"x")
+    calls = {"n": 0}
+    p = backend.Pipeline(out_dir=str(tmp_path / "v"), diarize=False, do_summary=False)
+    monkeypatch.setattr(p, "convert_to_mono", lambda f: f)
+    monkeypatch.setattr(p, "remove_silence_vad", lambda f: f)
+    monkeypatch.setattr(p, "transcribe", lambda f: {"segments": [seg("текст встречи", 0, 4)], "text": "x"})
+    monkeypatch.setattr(p, "extract_actions", lambda t: calls.__setitem__("n", calls["n"] + 1))
+    events = capture(p.process, str(src), "prompt")
+    assert calls["n"] == 0  # actions LLM call never made in transcript-only mode
+    done = [e for e in events if e["event"] == "done"][0]
+    assert done["actions"] == {}
+    note_text = list((tmp_path / "v").glob("*.md"))[0].read_text(encoding="utf-8")
+    assert "## Действия" not in note_text
+
+
+def test_process_malformed_actions_output_degrades_without_crash(monkeypatch, tmp_path):
+    """extract_actions() returning {} (malformed LLM JSON) → no section, no crash, done still emitted."""
+    src = tmp_path / "in.wav"; src.write_bytes(b"x")
+    long_summary = "# Сводка\n\n" + ("итог " * 30)
+    pipe = _mock_pipe(
+        monkeypatch, str(tmp_path / "v"),
+        {"segments": [seg("обсудили план", 0, 3)], "text": "обсудили план"},
+        long_summary)
+    # extract_actions already degrades internally on bad LLM output to {}; simulate that here
+    monkeypatch.setattr(pipe, "extract_actions", lambda t: {})
+    events = capture(pipe.process, str(src), "prompt")
+    assert "error" not in [e["event"] for e in events]
+    done = [e for e in events if e["event"] == "done"][0]
+    assert done["actions"] == {}
+    note_text = list((tmp_path / "v").glob("*.md"))[0].read_text(encoding="utf-8")
+    assert "## Действия" not in note_text
 
 
 def test_cmd_search_citation_includes_speakers(monkeypatch, tmp_path):

@@ -179,6 +179,43 @@ test("inferred speaker names prefill the rename inputs", async () => {
   assert.equal(byOld["Спикер 2"], "");         // unknown left blank
 });
 
+test("«Действия» tab renders items + decisions from done event", async () => {
+  const { window, $, handlers } = await boot();
+  handlers.record({ event: "recorded", file: "/tmp/mixed.wav", mic: "/tmp/m.wav", system: null, tracks: 1 });
+  $("runBtn").click(); await tick(window);
+  handlers.process({
+    event: "done", note: "/o/n.md", audio: "/o/a.wav",
+    transcript: "t", summary: "s",
+    actions: {
+      items: [
+        { what: "подготовить презентацию", who: "Мария", due: "среда" },
+        { what: "без деталей", who: "", due: "" },
+      ],
+      decisions: ["перенести встречу на вторник"],
+    },
+  });
+  await tick(window);
+  const actionsTab = [...window.document.querySelectorAll(".rtab")].find((b) => b.dataset.r === "actions");
+  actionsTab.click();
+  assert.equal($("resActions").classList.contains("hidden"), false);   // now the active pane
+  assert.equal($("resSummary").classList.contains("hidden"), true);    // siblings hidden
+  assert.equal($("resTranscript").classList.contains("hidden"), true);
+  const text = $("resActions").textContent;
+  assert.ok(text.includes("- [ ] подготовить презентацию — Мария (срок: среда)"));
+  assert.ok(text.includes("- [ ] без деталей"));                       // empty who/due omitted
+  assert.ok(text.includes("Решения:"));
+  assert.ok(text.includes("- перенести встречу на вторник"));
+});
+
+test("«Действия» tab shows empty-state text when no actions", async () => {
+  const { window, $, handlers } = await boot();
+  handlers.record({ event: "recorded", file: "/tmp/mixed.wav", mic: "/tmp/m.wav", system: null, tracks: 1 });
+  $("runBtn").click(); await tick(window);
+  handlers.process({ event: "done", note: "/o/n.md", audio: "/o/a.wav", transcript: "t", summary: "s" });
+  await tick(window);
+  assert.equal($("resActions").textContent, "(пунктов действий нет)");
+});
+
 test("history label shows title when present", async () => {
   const { window, $ } = await boot({
     listHistory: async () => [{ name: "2026-01-01", title: "Синк по релизу", note: "/n.md", audio: "/a.wav" }],
