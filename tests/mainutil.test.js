@@ -7,7 +7,7 @@ const path = require("path");
 const {
   buildWavHeader, WavWriter, rmsLevel, cacheKey,
   pairHistory, encodeTokenBlob, decodeTokenBlob, isStale,
-  rewriteNoteSpeakers, isOutsideRoot, indexRunReducer,
+  rewriteNoteSpeakers, isOutsideRoot, indexRunReducer, diskGuardVerdict,
 } = require("../lib/mainutil");
 
 // ── WAV header ──────────────────────────────────────────────────────────────
@@ -122,6 +122,40 @@ test("isStale: older than maxAge is stale, newer is not", () => {
   const now = 1_000_000;
   assert.equal(isStale(now - 10, now, 100), false);
   assert.equal(isStale(now - 200, now, 100), true);
+});
+
+// ── disk guard ────────────────────────────────────────────────────────────────
+const GIB = 1024 * 1024 * 1024;
+test("diskGuardVerdict: below 1 GiB refuses with MB free in the message", () => {
+  const v = diskGuardVerdict(500 * 1024 * 1024); // 500 MB
+  assert.equal(v.action, "refuse");
+  assert.match(v.msg, /Мало места на диске: свободно 500 МБ, нужно ≥1 ГБ/);
+});
+test("diskGuardVerdict: just under 1 GiB refuses", () => {
+  const v = diskGuardVerdict(GIB - 1);
+  assert.equal(v.action, "refuse");
+});
+test("diskGuardVerdict: exactly 1 GiB warns (not refuse)", () => {
+  const v = diskGuardVerdict(GIB);
+  assert.equal(v.action, "warn");
+});
+test("diskGuardVerdict: between 1 and 3 GiB warns with GB free in the message", () => {
+  const v = diskGuardVerdict(2.4 * GIB);
+  assert.equal(v.action, "warn");
+  assert.match(v.msg, /Мало места на диске \(свободно 2\.4 ГБ\)/);
+});
+test("diskGuardVerdict: just under 3 GiB warns", () => {
+  const v = diskGuardVerdict(3 * GIB - 1);
+  assert.equal(v.action, "warn");
+});
+test("diskGuardVerdict: exactly 3 GiB and above is ok, no message", () => {
+  const v = diskGuardVerdict(3 * GIB);
+  assert.equal(v.action, "ok");
+  assert.equal(v.msg, null);
+});
+test("diskGuardVerdict: plenty of free space is ok", () => {
+  const v = diskGuardVerdict(50 * GIB);
+  assert.equal(v.action, "ok");
 });
 
 // ── rewriteNoteSpeakers ───────────────────────────────────────────────────────

@@ -319,6 +319,9 @@ window.api.onRecordEvent((ev) => {
   } else if (ev.event === "system-audio-error") {
     setSysStatus("🔊 Системный звук недоступен — пишу только микрофон. " + SYS_HELP, "warn");
     appendLog("⚠️ system audio: " + ev.msg);
+  } else if (ev.event === "disk-warning") {
+    setSysStatus(ev.msg, "warn");
+    appendLog(ev.msg);
   } else if (ev.event === "recorded") {
     state.recordedFile = ev.file;
     state.hasRun = false; // new recording → hide retry/fresh until processed

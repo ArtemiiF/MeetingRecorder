@@ -83,6 +83,14 @@ test("level events set VU bar width per source (direct, works backgrounded)", as
   assert.equal($("vuSys").style.width, "25%");
 });
 
+// ── disk guard warning ───────────────────────────────────────────────────────
+test("disk-warning record-event shows the message in #sysStatus with warn styling", async () => {
+  const { $, handlers } = await boot();
+  handlers.record({ event: "disk-warning", msg: "⚠️ Мало места на диске (свободно 2.4 ГБ)" });
+  assert.equal($("sysStatus").textContent, "⚠️ Мало места на диске (свободно 2.4 ГБ)");
+  assert.ok($("sysStatus").classList.contains("warn"));
+});
+
 // ── Run/Stop/Retry/Fresh state machine ──────────────────────────────────────
 test("processing shows Stop, hides Run; done shows Retry/Fresh", async () => {
   const { window, $, handlers } = await boot();

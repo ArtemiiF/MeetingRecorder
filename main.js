@@ -7,7 +7,7 @@ const readline = require("readline");
 const {
   WavWriter, rmsLevel, cacheKey, pairHistory,
   encodeTokenBlob, decodeTokenBlob, isStale,
-  rewriteNoteSpeakers, isOutsideRoot, indexRunReducer,
+  rewriteNoteSpeakers, isOutsideRoot, indexRunReducer, diskGuardVerdict,
 } = require("./lib/mainutil");
 
 // audiotee is ESM-only — load it lazily via dynamic import() from this CommonJS module.
@@ -286,6 +286,17 @@ ipcMain.handle("pick-out-dir", async () => {
 // recording: start — mic (python/pyaudio) + system audio (AudioTee), in parallel
 ipcMain.handle("start-recording", async (_e, opts) => {
   if (recordProc || tee) return { ok: false, error: "Запись уже идёт" };
+
+  // Disk guard: session dirs live under TMP_DIR — check that volume's free space
+  // before committing to a recording. statfs failures (unsupported FS, etc.)
+  // don't block recording — the guard degrades to "ok" silently.
+  let diskVerdict = { action: "ok", msg: null };
+  try {
+    const st = fs.statfsSync(TMP_DIR);
+    diskVerdict = diskGuardVerdict(st.bavail * st.bsize);
+  } catch {}
+  if (diskVerdict.action === "refuse") return { ok: false, error: diskVerdict.msg };
+
   const micDevice = opts && opts.micDevice;
   const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
   const dir = path.join(TMP_DIR, `rec-${stamp}`);
@@ -341,6 +352,8 @@ ipcMain.handle("start-recording", async (_e, opts) => {
     if (sysWav) { try { sysWav.close(); } catch {} sysWav = null; }
     tee = null;
   }
+  // low-disk warning goes last so it isn't clobbered by the system-audio status above
+  if (diskVerdict.action === "warn") send("record-event", { event: "disk-warning", msg: diskVerdict.msg });
   return { ok: true };
 });
 
