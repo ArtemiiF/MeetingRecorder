@@ -703,6 +703,16 @@ function triggerAutoIndex(notePath) {
 }
 
 ipcMain.handle("para-reindex", async (_e, { root }) => {
+  // Route through the same in-flight guard as the auto-index trigger (indexRunReducer)
+  // so a manual reindex can never run concurrently with a background one on the same
+  // index.db. If one is already running, this queues exactly one trailing run (same
+  // semantics as triggerAutoIndex) and tells the renderer immediately via the existing
+  // error slot instead of leaving the button spinner hanging on a run that never starts.
+  const trig = indexRunReducer(indexRunState, "trigger");
+  indexRunState = trig.state;
+  if (!trig.shouldStart) {
+    return { error: "Индексация уже выполняется — запрос поставлен в очередь" };
+  }
   return new Promise((resolve) => {
     let summary = null;
     runBackend(indexArgs(root),
@@ -712,6 +722,9 @@ ipcMain.handle("para-reindex", async (_e, { root }) => {
       },
       (_code, stderr) => {
         if (!summary) summary = { error: stderr || "нет ответа от backend" };
+        const next = indexRunReducer(indexRunState, "complete");
+        indexRunState = next.state;
+        if (next.shouldStart) startAutoIndex(root);
         resolve(summary);
       });
   });

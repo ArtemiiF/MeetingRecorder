@@ -308,6 +308,17 @@ def test_index_reconcile_add_then_drop(tmp_path):
     conn.close()
 
 
+def test_db_connect_sets_busy_timeout(tmp_path):
+    # A manual reindex and a background auto-index can still overlap briefly (the
+    # in-flight guard lives in main.js, not here) — busy_timeout makes a concurrent
+    # writer wait for the lock instead of failing with SQLITE_BUSY.
+    db = str(tmp_path / "i.db")
+    conn = backend._db_connect(db)
+    timeout_ms = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+    conn.close()
+    assert timeout_ms == 10000
+
+
 def test_process_records_template_in_index_and_frontmatter(monkeypatch, tmp_path):
     out = tmp_path / "v"
     db = str(tmp_path / "i.db")

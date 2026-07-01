@@ -1014,6 +1014,10 @@ def _db_connect(db_path):
     import sqlite3
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
+    # A manual reindex and a background auto-index can still overlap briefly (the
+    # in-flight guard lives in main.js, not here); busy_timeout makes an unlucky
+    # concurrent writer wait for the lock instead of failing with SQLITE_BUSY.
+    conn.execute("PRAGMA busy_timeout=10000")
     conn.execute("""CREATE TABLE IF NOT EXISTS meetings(
         note TEXT PRIMARY KEY, stamp TEXT, title TEXT, template TEXT,
         language TEXT, date TEXT, audio TEXT, mtime REAL)""")
