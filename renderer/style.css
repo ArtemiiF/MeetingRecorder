@@ -38,6 +38,7 @@ main { max-width: 860px; margin: 0 auto; padding: 20px 24px 60px; }
 }
 .rail-head { display: flex; justify-content: space-between; align-items: center;
   color: var(--muted); font-size: 12px; padding: 4px 6px 8px; }
+.rail-head-btns { display: flex; gap: 6px; }
 .rail-item {
   display: flex; flex-direction: column; gap: 2px; width: 100%; text-align: left;
   background: transparent; border: none; border-radius: 8px; padding: 9px 10px;
@@ -275,6 +276,7 @@ pre {
   display: flex; flex-direction: column; gap: 3px;
 }
 .chat-cites li { font-size: 11.5px; color: var(--muted); }
+.chat-degraded { margin-top: 8px; font-size: 11.5px; color: #f5a623; }
 
 /* Typing indicator dots */
 .chat-typing .chat-dots { display: inline-flex; gap: 4px; align-items: center; padding: 2px 0; }

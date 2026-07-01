@@ -506,6 +506,12 @@ function switchView(v) {
 }
 document.querySelectorAll(".topbtn").forEach((b) => b.addEventListener("click", () => switchView(b.dataset.view)));
 $("historyRefresh").addEventListener("click", refreshHistory);
+// Entry point into the PARA chat from История — same view-switch + subtab machinery, same chat instance.
+$("historyAskBtn").addEventListener("click", () => {
+  switchView("para");
+  subSwitchPara("search");
+  $("paraSearchQuery").focus();
+});
 
 // ── history (rail + note viewer) ─────────────────────────────────────────────
 let historyItems = [];
@@ -796,15 +802,19 @@ $("paraSearchQuery").addEventListener("keydown", (e) => { if (e.key === "Enter")
 // role: "user" | "assistant"
 // content: plain text (user) or answer text (assistant)
 // citations: array of {date, title, note_path} (assistant only, may be empty)
-function appendChatBubble(role, content, citations) {
+// degraded: true if this search ran keyword-only (embedding model unavailable)
+function appendChatBubble(role, content, citations, degraded) {
   const log = $("paraChatLog");
   const bubble = document.createElement("div");
   bubble.className = "chat-bubble chat-bubble-" + role;
   if (role === "user") {
     bubble.innerHTML = `<div class="chat-text">${escapeHtml(content)}</div>`;
   } else {
-    // assistant: render markdown answer + optional citation list
+    // assistant: render markdown answer + optional degraded-mode badge + citation list
     let inner = `<div class="chat-text">${renderMarkdown(content)}</div>`;
+    if (degraded) {
+      inner += `<div class="chat-degraded">⚠️ Поиск только по ключевым словам — embedding-модель не загружена</div>`;
+    }
     if (citations && citations.length) {
       const citeItems = citations.map((c) =>
         `<li>${escapeHtml(c.date)} · ${escapeHtml(c.title || (c.note_path || "").split("/").pop())}</li>`
@@ -866,7 +876,7 @@ async function runParaSearch() {
 
   typingEl.remove();
   const answerText = res.answer || "Не нашёл по этому вопросу записей в заметках.";
-  appendChatBubble("assistant", answerText, res.found ? (res.citations || []) : []);
+  appendChatBubble("assistant", answerText, res.found ? (res.citations || []) : [], !!res.degraded);
   chatMessages.push({ role: "assistant", content: answerText });
 
   btn.disabled = false;

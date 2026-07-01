@@ -712,12 +712,18 @@ ipcMain.handle("para-search", async (_e, { root, messages, query }) => {
     msgArray = [{ role: "user", content: query || "" }];
   }
   const messagesJson = JSON.stringify(msgArray);
+  // backend.py logs this exact line (via log(), in _rag_retrieve) before emitting
+  // search_result whenever no embedding model was found — search fell back to
+  // keyword-only (FTS) retrieval. Surfaced to the renderer as result.degraded.
+  const DEGRADED_LOG_MSG = "Embedding-модель недоступна — поиск только по ключевым словам";
   return new Promise((resolve, reject) => {
     let result = null;
+    let degraded = false;
     runBackend(["search", "--root", root, "--db", DB_PATH, "--messages", messagesJson],
       (ev) => {
-        if (ev.event === "search_result") result = { found: ev.found, answer: ev.answer, citations: ev.citations };
+        if (ev.event === "search_result") result = { found: ev.found, answer: ev.answer, citations: ev.citations, degraded };
         else if (ev.event === "error") result = { found: false, error: ev.msg };
+        else if (ev.event === "log" && ev.msg === DEGRADED_LOG_MSG) degraded = true;
       },
       (_code, stderr) => {
         if (result) resolve(result);

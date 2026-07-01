@@ -431,6 +431,46 @@ test("PARA chat: sending a message appends user bubble + assistant bubble with a
   assert.equal(capturedMessages[capturedMessages.length - 1].content, "тест вопрос", "user content matches");
 });
 
+test("PARA chat: degraded:true on the result shows the keyword-only badge", async () => {
+  const { window, $ } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru",
+      para: { root: "/v", folders: { projects: "Projects", areas: "Areas", resources: "Resources", archives: "Archives" } },
+    }),
+    paraSearch: async () => ({ found: true, answer: "Ответ.", citations: [], degraded: true }),
+  });
+  window.document.querySelector('.topbtn[data-view="para"]').click();
+  await tick(window);
+  window.document.querySelector('.subbtn[data-sub="search"]').click();
+  await tick(window);
+  $("paraSearchQuery").value = "вопрос";
+  $("paraSearchBtn").click(); await tick(window); await tick(window);
+
+  const bubbles = $("paraChatLog").querySelectorAll(".chat-bubble");
+  const assistantBubble = bubbles[bubbles.length - 1];
+  assert.ok(assistantBubble.querySelector(".chat-degraded"), "degraded badge must be present");
+});
+
+test("PARA chat: degraded absent/false → no keyword-only badge", async () => {
+  const { window, $ } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru",
+      para: { root: "/v", folders: { projects: "Projects", areas: "Areas", resources: "Resources", archives: "Archives" } },
+    }),
+    paraSearch: async () => ({ found: true, answer: "Ответ.", citations: [] }), // no degraded field
+  });
+  window.document.querySelector('.topbtn[data-view="para"]').click();
+  await tick(window);
+  window.document.querySelector('.subbtn[data-sub="search"]').click();
+  await tick(window);
+  $("paraSearchQuery").value = "вопрос";
+  $("paraSearchBtn").click(); await tick(window); await tick(window);
+
+  const bubbles = $("paraChatLog").querySelectorAll(".chat-bubble");
+  const assistantBubble = bubbles[bubbles.length - 1];
+  assert.ok(!assistantBubble.querySelector(".chat-degraded"), "no badge when result isn't degraded");
+});
+
 test("PARA chat: «Новый чат» clears the chat thread", async () => {
   const { window, $ } = await boot({
     getPresets: async () => ({
@@ -499,6 +539,19 @@ test("view switching toggles record/history panels", async () => {
   window.document.querySelector('.topbtn[data-view="record"]').click();
   assert.ok(!$("view-record").classList.contains("hidden"));
   assert.ok($("view-history").classList.contains("hidden"));
+});
+
+test("history 'Спросить' button jumps to PARA search subtab and focuses the chat input", async () => {
+  const { window, $ } = await boot();
+  window.document.querySelector('.topbtn[data-view="history"]').click();
+  await tick(window);
+  $("historyAskBtn").click();
+  await tick(window);
+  assert.ok(!$("view-para").classList.contains("hidden"), "PARA view must be visible");
+  assert.ok($("view-history").classList.contains("hidden"), "history view must be hidden");
+  assert.ok(!$("para-pane-search").classList.contains("hidden"), "#para-pane-search must be visible");
+  assert.ok($("para-pane-inbox").classList.contains("hidden"), "#para-pane-inbox must be hidden");
+  assert.equal(window.document.activeElement, $("paraSearchQuery"), "chat input must be focused");
 });
 
 // ── authorName setting ────────────────────────────────────────────────────────
