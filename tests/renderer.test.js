@@ -15,6 +15,8 @@ async function boot(apiOverrides = {}) {
   const { window } = dom;
   const handlers = {};
   window.alert = () => {};
+  // jsdom doesn't implement the Clipboard API — default no-op mock, tests override writeText to spy.
+  window.navigator.clipboard = { writeText: async () => {} };
   window.api = Object.assign({
     preflight: async () => ({ lmStudio: false, mic: "granted", screen: "unknown", ffmpeg: true, whisperCached: true, hfToken: false }),
     renameSpeakers: async () => ({ ok: true }),
@@ -95,6 +97,34 @@ test("processing shows Stop, hides Run; done shows Retry/Fresh", async () => {
   assert.equal($("retryBtn").style.display, "");     // Retry shown
   assert.equal($("freshBtn").style.display, "");     // Fresh shown
   assert.ok($("resultCard").style.display !== "none");
+});
+
+// ── copy-to-clipboard (result pane) ─────────────────────────────────────────
+test("copy button copies the active result pane's text; switching tabs changes what's copied", async () => {
+  const { window, $, handlers } = await boot();
+  const copied = [];
+  window.navigator.clipboard.writeText = async (text) => { copied.push(text); };
+
+  handlers.record({ event: "recorded", file: "/tmp/mixed.wav", mic: "/tmp/mic.wav", system: "/tmp/system.wav", tracks: 2 });
+  $("runBtn").click(); await tick(window);
+  handlers.process({
+    event: "done", note: "/n.md", audio: "/a.wav",
+    transcript: "транскрипт-текст", summary: "сводка-текст",
+    actions: { items: [{ what: "Сделать X" }], decisions: [] },
+  });
+  await tick(window);
+
+  // default active rtab is "summary"
+  $("copyResult").click();
+  assert.equal(copied[0], "сводка-текст", "copies the active (summary) pane text");
+
+  window.document.querySelector('.rtab[data-r="transcript"]').click();
+  $("copyResult").click();
+  assert.equal(copied[1], "транскрипт-текст", "copies the transcript pane after switching tabs");
+
+  window.document.querySelector('.rtab[data-r="actions"]').click();
+  $("copyResult").click();
+  assert.equal(copied[2], $("resActions").textContent, "copies the actions pane after switching tabs");
 });
 
 test("process-closed canceled → 'Остановлено' log + stage skip, UI restored", async () => {
@@ -429,6 +459,38 @@ test("PARA chat: sending a message appends user bubble + assistant bubble with a
   assert.ok(Array.isArray(capturedMessages), "messages is an array");
   assert.equal(capturedMessages[capturedMessages.length - 1].role, "user", "last message is user");
   assert.equal(capturedMessages[capturedMessages.length - 1].content, "тест вопрос", "user content matches");
+});
+
+test("PARA chat: assistant bubble's copy button copies the answer text, not citations", async () => {
+  const { window, $ } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru",
+      para: { root: "/v", folders: { projects: "Projects", areas: "Areas", resources: "Resources", archives: "Archives" } },
+    }),
+    paraSearch: async () => ({
+      found: true,
+      answer: "Ответ по заметкам.",
+      citations: [{ date: "2026-01-01", title: "Синк", note_path: "/v/Projects/note.md" }],
+    }),
+  });
+  const copied = [];
+  window.navigator.clipboard.writeText = async (text) => { copied.push(text); };
+
+  window.document.querySelector('.topbtn[data-view="para"]').click();
+  await tick(window);
+  window.document.querySelector('.subbtn[data-sub="search"]').click();
+  await tick(window);
+  $("paraSearchQuery").value = "тест вопрос";
+  $("paraSearchBtn").click(); await tick(window); await tick(window);
+
+  const bubbles = $("paraChatLog").querySelectorAll(".chat-bubble");
+  const assistantBubble = bubbles[bubbles.length - 1];
+  assert.ok(!bubbles[0].querySelector(".chat-copy-btn"), "user bubble has no copy button");
+  const copyBtn = assistantBubble.querySelector(".chat-copy-btn");
+  assert.ok(copyBtn, "assistant bubble has a copy button");
+
+  copyBtn.click();
+  assert.equal(copied[0], "Ответ по заметкам.", "copies the raw answer text, without the citation list");
 });
 
 test("PARA chat: degraded:true on the result shows the keyword-only badge", async () => {

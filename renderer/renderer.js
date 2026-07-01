@@ -42,6 +42,26 @@ document.querySelectorAll(".rtab").forEach((t) =>
   })
 );
 
+// ── copy to clipboard (result pane + chat bubbles) ──────────────────────────
+// Writes text via the standard Clipboard API (available in the renderer regardless
+// of contextIsolation/nodeIntegration — no IPC/main-process plumbing needed), then
+// briefly flips the button's own label to "✓" as click feedback.
+function copyToClipboard(text, btn) {
+  navigator.clipboard.writeText(text || "").then(() => {
+    const prev = btn.textContent;
+    btn.textContent = "✓";
+    setTimeout(() => { btn.textContent = prev; }, 1000);
+  });
+}
+
+const RESULT_PANE_BY_TAB = { summary: "resSummary", transcript: "resTranscript", actions: "resActions" };
+$("copyResult").addEventListener("click", () => {
+  const activeTab = document.querySelector(".rtab.active");
+  const r = activeTab ? activeTab.dataset.r : "summary";
+  const pane = $(RESULT_PANE_BY_TAB[r] || "resSummary");
+  copyToClipboard(pane.textContent, $("copyResult"));
+});
+
 // format the done event's {items,decisions} into the same plain-markdown-text
 // style as the "## Действия" note section (checkboxes are plain text, not
 // interactive — matches resSummary/resTranscript, which are also plain <pre>).
@@ -822,6 +842,16 @@ function appendChatBubble(role, content, citations, degraded) {
       inner += `<ul class="chat-cites">${citeItems}</ul>`;
     }
     bubble.innerHTML = inner;
+    // copies the raw answer text (this closure's `content`), not the citations/markdown HTML
+    const copyRow = document.createElement("div");
+    copyRow.className = "chat-copy-row";
+    const copyBtn = document.createElement("button");
+    copyBtn.className = "chat-copy-btn";
+    copyBtn.title = "Скопировать ответ";
+    copyBtn.textContent = "⧉";
+    copyBtn.addEventListener("click", () => copyToClipboard(content, copyBtn));
+    copyRow.appendChild(copyBtn);
+    bubble.appendChild(copyRow);
   }
   log.appendChild(bubble);
   log.scrollTop = log.scrollHeight;
