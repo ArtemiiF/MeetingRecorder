@@ -198,6 +198,203 @@ def cmd_record(out_path, device_index):
 
 
 # ──────────────────────────────────────────────────────────────────────────
+# Glossary-based transcript correction — pure helpers (no I/O, unit-testable).
+# Two stages compose around these: a deterministic fuzzy pass (fuzzy_correct)
+# and an LLM pass whose reply is validated token-by-token before acceptance
+# (gate_llm_correction). The I/O side (LM Studio call, chunking) lives on
+# Pipeline.correct_glossary_llm.
+# ──────────────────────────────────────────────────────────────────────────
+_PUNCT_CHARS = ".,!?;:\"'«»()[]{}—–-…"
+
+# Best-effort Cyrillic→Latin transliteration so a slangy phonetic spelling of an
+# anglicism (e.g. "слэк") lands close to its Latin glossary term ("Slack") under
+# Levenshtein distance. э→'a' (not the phonetically stricter 'e') because that is
+# the letter Russian informally reaches for to render a foreign short-a sound in
+# loanwords ("слэк", "рэп", "трэк") — tuned for this use case, not IPA-accurate.
+_RU_TO_LATIN = {
+    "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e",
+    "ж": "zh", "з": "z", "и": "i", "й": "i", "к": "k", "л": "l", "м": "m",
+    "н": "n", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u",
+    "ф": "f", "х": "h", "ц": "ts", "ч": "ch", "ш": "sh", "щ": "sch",
+    "ъ": "", "ы": "y", "ь": "", "э": "a", "ю": "yu", "я": "ya",
+}
+
+
+def _translit(word):
+    """Cyrillic→Latin via _RU_TO_LATIN; non-Cyrillic characters pass through
+    unchanged, so comparing two Latin words is a no-op transliteration."""
+    return "".join(_RU_TO_LATIN.get(ch, ch) for ch in word.lower())
+
+
+def _levenshtein(a, b):
+    """Edit distance (insert/delete/substitute). O(len(a)*len(b)), stdlib-only —
+    no extra dependency for comparing a handful of short tokens per call."""
+    if a == b:
+        return 0
+    if not a:
+        return len(b)
+    if not b:
+        return len(a)
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i] + [0] * len(b)
+        for j, cb in enumerate(b, 1):
+            cost = 0 if ca == cb else 1
+            cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost)
+        prev = cur
+    return prev[-1]
+
+
+def _fuzzy_threshold(term):
+    # short names/terms get a tighter budget so e.g. a random 3-letter word
+    # doesn't fire on nearly any other 3-letter word; longer terms absorb +1.
+    return 1 if len(term) <= 5 else 2
+
+
+def _term_or_declined_form(token, terms):
+    """Return the glossary term `token` already IS — exact match, or that term
+    plus a short (≤3 char) Cyrillic case ending ("Антон" → "Антона"/"Антону").
+    A hit means the token is already correctly spelled; callers must NOT touch
+    it. This is the guard that keeps fuzzy_correct from flattening a correctly
+    declined name to its nominative form."""
+    low = token.strip(_PUNCT_CHARS).lower()
+    if not low:
+        return None
+    for term in terms:
+        term = (term or "").strip()
+        if not term:
+            continue
+        lt = term.lower()
+        if low == lt or (low.startswith(lt) and 0 < len(low) - len(lt) <= 3):
+            return term
+    return None
+
+
+def _closest_term(token, terms, lenient=False):
+    """Return the glossary term `token` fuzzy-matches (transliteration-aware
+    Levenshtein within _fuzzy_threshold), or None. With lenient=True also tries
+    the term-length PREFIX of a token that is up to 3 chars longer than the
+    term — tolerates an old token that is BOTH misrecognized AND declined (e.g.
+    garbled "Онтона" still resolving to "Антон"). Stage-1's raw fuzzy pass keeps
+    lenient=False: a correctly-declined word must be caught by
+    _term_or_declined_form first, never guessed at here — v1 is conservative
+    about garbled+declined tokens and leaves them untouched rather than risk
+    corrupting a declension it can't confidently split (see fuzzy_correct)."""
+    core = token.strip(_PUNCT_CHARS).lower()
+    if not core:
+        return None
+    for term in terms:
+        term = (term or "").strip()
+        if not term:
+            continue
+        lt = term.lower()
+        threshold = _fuzzy_threshold(term)
+        candidates = [core]
+        if lenient and len(core) > len(lt) and len(core) - len(lt) <= 3:
+            candidates.append(core[:len(lt)])
+        if any(_levenshtein(_translit(c), _translit(lt)) <= threshold for c in candidates):
+            return term
+    return None
+
+
+def _fuzzy_correct_text(text, terms):
+    if not terms or not text:
+        return text, []
+    replacements = []
+    out_tokens = []
+    for tok in text.split():
+        core = tok.strip(_PUNCT_CHARS)
+        lead = tok[:len(tok) - len(tok.lstrip(_PUNCT_CHARS))]
+        trail = tok[len(tok.rstrip(_PUNCT_CHARS)):] if core else ""
+        new_core = core
+        if core and _term_or_declined_form(core, terms) is None:
+            term = _closest_term(core, terms, lenient=False)
+            if term:
+                new_core = term
+                replacements.append({"from": core, "to": term})
+        out_tokens.append(lead + new_core + trail)
+    return " ".join(out_tokens), replacements
+
+
+def fuzzy_correct(text_or_segments, terms):
+    """Stage 1 of glossary correction: deterministic, no LLM. Replace a token
+    with a glossary term when it is a close misrecognition (Levenshtein within
+    _fuzzy_threshold, on transliterated lowercase forms) of that term — UNLESS
+    the token is already the term or a declined form of it
+    (_term_or_declined_form): a correctly declined "Антона" is left exactly
+    as-is, never flattened to "Антон". A token that is BOTH misrecognized AND
+    declined (e.g. "Онтона") is conservatively left untouched in v1 rather than
+    guessed at — see _closest_term's docstring.
+
+    Accepts either a plain string or a list of Whisper segments (dicts with a
+    "text" key); returns the same shape. `terms` empty/falsy → no-op
+    passthrough (byte-identical), so a caller can skip this stage cheaply when
+    there is no glossary. Returns (corrected, replacements) where replacements
+    is an ordered list of {"from": token, "to": term}, for logging/counting."""
+    if isinstance(text_or_segments, list):
+        replacements = []
+        out = []
+        for seg in text_or_segments:
+            new_seg = dict(seg)
+            corrected, reps = _fuzzy_correct_text(seg.get("text", ""), terms)
+            new_seg["text"] = corrected
+            replacements.extend(reps)
+            out.append(new_seg)
+        return out, replacements
+    return _fuzzy_correct_text(text_or_segments or "", terms)
+
+
+def gate_llm_correction(original, corrected, terms):
+    """Stage 2 safety gate. `corrected` is an LLM's attempt to fix glossary
+    terms in `original`; this validates it token-by-token and returns a string
+    built from `original` with ONLY the validated swaps applied — anything the
+    LLM invented, reworded, or restructured is discarded and the original wins.
+
+    Rejects the WHOLE chunk (returns `original` unchanged) when:
+      - character-length delta vs `original` exceeds ~20% (cheap early-out), or
+      - more than ~30% of original tokens differ from `corrected` (a wholesale
+        rewrite, not a targeted term fix) — with a floor of 2 tokens so a
+        single legitimate term fix in a short chunk/segment never trips this
+        purely on percentage (1 changed word in a 3-word sentence is 33%, but
+        it's still just one term fix, not a rewrite).
+    Otherwise, walks the token-level diff (difflib) and accepts an individual
+    replacement ONLY when the new token is a glossary term or a short declined
+    form of one (_term_or_declined_form) AND the old token it replaces was a
+    plausible misrecognition of that SAME term (_closest_term, lenient=True so
+    a garbled+declined old token like "Онтона" still counts). Insertions,
+    deletions, and unequal-length replace spans are rejected outright — they
+    change structure, which a term correction never should.
+
+    Guarantees output token COUNT == input token count (every kept-or-swapped
+    position comes 1:1 from `original`), which is what lets a caller redistribute
+    an accepted chunk's words back onto the original per-segment boundaries."""
+    if not terms or not (original or "").strip():
+        return original
+    orig_tokens = original.split()
+    corr_tokens = (corrected or "").split()
+    if not orig_tokens:
+        return original
+    len_delta = abs(len(corrected or "") - len(original)) / max(1, len(original))
+    if len_delta > 0.2:
+        return original
+    import difflib
+    opcodes = difflib.SequenceMatcher(None, orig_tokens, corr_tokens, autojunk=False).get_opcodes()
+    changed = sum((i2 - i1) for tag, i1, i2, j1, j2 in opcodes if tag != "equal")
+    if changed > max(2, 0.3 * len(orig_tokens)):
+        return original
+    out = list(orig_tokens)
+    for tag, i1, i2, j1, j2 in opcodes:
+        if tag != "replace" or (i2 - i1) != (j2 - j1):
+            continue
+        for k in range(i2 - i1):
+            old_tok, new_tok = orig_tokens[i1 + k], corr_tokens[j1 + k]
+            term = _term_or_declined_form(new_tok, terms)
+            if term and _closest_term(old_tok, terms, lenient=True) == term:
+                out[i1 + k] = new_tok
+    return " ".join(out)
+
+
+# ──────────────────────────────────────────────────────────────────────────
 # Processing pipeline (refactored from meeting_simple_v9.py)
 # ──────────────────────────────────────────────────────────────────────────
 class Pipeline:
@@ -317,6 +514,12 @@ class Pipeline:
         "A business meeting with several participants. Technical terms may be used: "
         "API, pipeline, deploy, sprint, backlog, roadmap, release, commit, merge, review."
     )
+    # Stage 2 of glossary correction (see correct_glossary_llm) — {terms} filled per call.
+    CORRECT_SYSTEM_PROMPT = (
+        "В тексте — расшифровка речи. Словарь правильных терминов: {terms}. "
+        "Исправь ТОЛЬКО неверно распознанные слова из словаря (имена, термины). "
+        "Верни текст без других изменений."
+    )
 
     def _whisper_lang(self):
         # mlx/whisper take None for auto-detect
@@ -394,6 +597,73 @@ class Pipeline:
                 log(f"❌ Транскрипция не удалась: {e}")
                 return None
         return result
+
+    # ── glossary correction, stage 2: LLM pass, diff-gated ─────────────────
+    def correct_glossary_llm(self, segments, terms):
+        """Stage 2 of glossary correction (see module-level fuzzy_correct for
+        Stage 1). Groups consecutive segments into ~_RAG_CHUNK_CHARS windows —
+        chunk boundaries always fall on segment boundaries, never mid-word — and
+        asks LM Studio to fix ONLY glossary terms in each window. The reply is
+        validated with gate_llm_correction before acceptance; because the gate
+        preserves each chunk's token COUNT, an accepted chunk's words can be
+        redistributed back onto the original per-segment boundaries by word
+        count alone. Returns (new_segments, accepted_count).
+
+        On any LM Studio failure the WHOLE pass aborts and returns (None, 0) —
+        mirrors summarize()'s degrade-and-log pattern — so the caller falls back
+        to the Stage-1-only result instead of a half-corrected transcript."""
+        if not terms or not segments:
+            return segments, 0
+        import requests
+        sys_msg = self.CORRECT_SYSTEM_PROMPT.format(terms=", ".join(terms))
+
+        groups, cur, cur_len = [], [], 0
+        for i, s in enumerate(segments):
+            t = (s.get("text") or "").strip()
+            if cur and cur_len + len(t) > _RAG_CHUNK_CHARS:
+                groups.append(cur)
+                cur, cur_len = [], 0
+            cur.append(i)
+            cur_len += len(t) + 1
+        if cur:
+            groups.append(cur)
+
+        new_segments = [dict(s) for s in segments]
+        accepted = 0
+        try:
+            for idx_group in groups:
+                texts = [(new_segments[i].get("text") or "").strip() for i in idx_group]
+                word_counts = [len(t.split()) for t in texts]
+                chunk = " ".join(texts)
+                if not chunk.strip():
+                    continue
+                resp = requests.post(self.LMSTUDIO_API, json={
+                    "messages": [
+                        {"role": "system", "content": sys_msg},
+                        {"role": "user", "content": chunk},
+                    ],
+                    "temperature": 0.0, "max_tokens": 4000,
+                }, timeout=120)
+                if resp.status_code != 200:
+                    continue
+                msg = (resp.json().get("choices") or [{}])[0].get("message", {})
+                raw = (msg.get("content") or "") or (msg.get("reasoning_content") or "")
+                if not raw.strip():
+                    continue
+                gated_tokens = gate_llm_correction(chunk, raw, terms).split()
+                if len(gated_tokens) != sum(word_counts):
+                    continue  # safety net — gate() should already guarantee this
+                orig_tokens = chunk.split()
+                accepted += sum(1 for a, b in zip(orig_tokens, gated_tokens) if a != b)
+                pos = 0
+                for local_i, i in enumerate(idx_group):
+                    n = word_counts[local_i]
+                    new_segments[i]["text"] = " ".join(gated_tokens[pos:pos + n])
+                    pos += n
+        except Exception as e:
+            log(f"⚠️ LLM недоступен — коррекция терминов только по словарю: {e}")
+            return None, 0
+        return new_segments, accepted
 
     def filter_hallucinations(self, segments):
         import re
@@ -819,6 +1089,37 @@ class Pipeline:
                 transcript = result.get("text", "").strip() or "[пусто после фильтрации]"
                 log("⚠️ Сегментов нет — транскрипция пустая/неудачная")
                 stage_end("transcribe", "fail", "нет сегментов после фильтрации")
+
+        # ── 2b. correct (cache: correct-<lang><glossary-suffix>.json) ─────
+        # Own cache file rather than folding into transcribe's — mirrors the
+        # diarize stage right below (own stage, own cache, consumes the prior
+        # stage's already-loaded segments) instead of entangling two stages'
+        # worth of logging inside transcribe()'s cache-hit/cache-miss branches.
+        stage("correct", "Коррекция терминов")
+        terms = self._glossary_terms()
+        if not terms or not segments:
+            stage_end("correct", "skip", "глоссарий пуст" if not terms else "нет сегментов")
+        else:
+            cj = self._cache(f"correct-{self.LANGUAGE}{self._glossary_cache_suffix()}.json")
+            cached_c = self._cache_read(cj) if (cj and cj.exists()) else None
+            if cached_c:
+                segments, transcript = cached_c["segments"], cached_c["transcript"]
+                stage_end("correct", "ok", f"{cached_c.get('count', 0)} терминов (из кеша)")
+            else:
+                segments, stage1_reps = fuzzy_correct(segments, terms)
+                llm_segments, llm_count = self.correct_glossary_llm(segments, terms)
+                total = len(stage1_reps)
+                if llm_segments is not None:
+                    segments = llm_segments
+                    total += llm_count
+                transcript = " ".join(s["text"].strip() for s in segments if s["text"].strip())
+                log(f"✅ Исправлено терминов: {total}")
+                if cj:
+                    self._cache_write(cj, {"segments": segments, "transcript": transcript, "count": total})
+                if llm_segments is None:
+                    stage_end("correct", "fail", f"LLM недоступен — {total} по словарю")
+                else:
+                    stage_end("correct", "ok", f"Исправлено терминов: {total}")
 
         # ── 3. diarize (cache: diarize.json) ──────────────────────────────
         formatted = None

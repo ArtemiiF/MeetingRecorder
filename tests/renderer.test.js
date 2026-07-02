@@ -74,6 +74,16 @@ test("stage_end: cached (msg 'из кеша') marks done + cached", async () => 
   assert.ok($("stage-transcribe").classList.contains("cached"));
 });
 
+// ── correct (glossary term correction) stage chip ────────────────────────────
+test("correct stage renders the 'Коррекция терминов' label and colours by status", async () => {
+  const { window, $, handlers } = await boot();
+  handlers.record({ event: "recorded", file: "/tmp/mixed.wav", mic: "/tmp/m.wav", system: null, tracks: 1 });
+  $("runBtn").click(); await tick(window); // builds the stage chips
+  assert.equal($("stage-correct").textContent, "Коррекция терминов");
+  handlers.process({ event: "stage_end", stage: "correct", status: "ok", msg: "Исправлено терминов: 2" });
+  assert.ok($("stage-correct").classList.contains("done"));
+});
+
 // ── VU meter ─────────────────────────────────────────────────────────────────
 test("level events set VU bar width per source (direct, works backgrounded)", async () => {
   const { $, handlers } = await boot();

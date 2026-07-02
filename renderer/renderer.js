@@ -361,7 +361,7 @@ function refreshRunBtn() {
 
 // ── run processing ───────────────────────────────────────────────────────────
 const STAGE_LABELS = {
-  convert: "Аудио", transcribe: "Транскрипция",
+  convert: "Аудио", transcribe: "Транскрипция", correct: "Коррекция терминов",
   diarize: "Спикеры", llm: "Сводка", meta: "Метаданные", save: "Сохранение",
 };
 const STAGE_KEYS = Object.keys(STAGE_LABELS);
