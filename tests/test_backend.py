@@ -1736,3 +1736,136 @@ def test_correct_stage_cache_honored_on_retry_skips_llm_recompute(monkeypatch, t
     assert llm_calls["n"] == 1  # Stage-2 LLM ran ONCE; the retry reused the cache
     ends = {e["stage"]: e for e in events if e["event"] == "stage_end"}
     assert "из кеша" in ends["correct"]["msg"]
+
+
+# ── critic follow-up fixes ──────────────────────────────────────────────────
+
+# BLOCKER 1 — Stage-1 fuzzy was ungated for short terms: "Дан" (distance-1 from
+# the common word "дам") used to misfire. Terms ≤3 chars now require an exact
+# (post-translit) match — no fuzz budget.
+def test_fuzzy_correct_short_term_distance_one_does_not_misfire_on_unrelated_word():
+    text, reps = backend.fuzzy_correct("Я вам дам ответ", ["Дан"])
+    assert text == "Я вам дам ответ"
+    assert reps == []
+
+
+def test_fuzzy_correct_short_term_still_matches_on_exact_form():
+    text, reps = backend.fuzzy_correct("Позвал Дан вчера", ["Дан"])
+    assert text == "Позвал Дан вчера"  # already correct — untouched, no replacement logged
+    assert reps == []
+
+
+def test_gate_short_term_distance_one_rewrite_rejected_as_unrelated():
+    original = "Я вам дам ответ"
+    out = backend.gate_llm_correction(original, "Я вам Дан ответ", ["Дан"])
+    assert out == original
+
+
+def test_fuzzy_correct_onton_to_anton_still_works_after_threshold_tightening():
+    # the happy path the tightened threshold must not break (5-char term keeps ±1).
+    text, reps = backend.fuzzy_correct("Слово Онтон тут", ["Антон"])
+    assert text == "Слово Антон тут"
+    assert reps == [{"from": "Онтон", "to": "Антон"}]
+
+
+# BLOCKER 2 — multi-word glossary terms ("Иван Петров") now match across a run
+# of consecutive tokens (n-gram window), in both fuzzy_correct and the gate.
+def test_fuzzy_correct_multiword_term_matches_across_consecutive_tokens():
+    text, reps = backend.fuzzy_correct("Встретил иван питров вчера", ["Иван Петров"])
+    assert text == "Встретил Иван Петров вчера"
+    assert reps == [{"from": "иван питров", "to": "Иван Петров"}]
+
+
+def test_fuzzy_correct_single_token_terms_unaffected_by_multiword_glossary_entries():
+    text, reps = backend.fuzzy_correct("Слово Онтон тут", ["Иван Петров", "Антон"])
+    assert text == "Слово Антон тут"
+    assert reps == [{"from": "Онтон", "to": "Антон"}]
+
+
+def test_gate_accepts_multiword_term_correction():
+    out = backend.gate_llm_correction(
+        "Встретил иван питров вчера", "Встретил Иван Петров вчера", ["Иван Петров"])
+    assert out == "Встретил Иван Петров вчера"
+
+
+def test_gate_single_token_term_unaffected_by_multiword_glossary_entries():
+    out = backend.gate_llm_correction(
+        "Позвал Онтон на встречу", "Позвал Антон на встречу", ["Иван Петров", "Антон"])
+    assert out == "Позвал Антон на встречу"
+
+
+# MAJOR — declension guard now checks a whitelist of actual Russian case-ending
+# suffixes, not "any ≤3 chars": "Антонов" is a different name (built with the
+# possessive/surname suffix "-ов"), not a declined "Антон".
+def test_term_or_declined_form_accepts_whitelisted_case_endings():
+    assert backend._term_or_declined_form("Антона", ["Антон"]) == "Антон"
+    assert backend._term_or_declined_form("Антону", ["Антон"]) == "Антон"
+    assert backend._term_or_declined_form("Антоном", ["Антон"]) == "Антон"
+
+
+def test_term_or_declined_form_rejects_surname_forming_suffix():
+    assert backend._term_or_declined_form("Антонов", ["Антон"]) is None
+
+
+def test_gate_rejects_surname_like_suffix_not_a_real_declension():
+    original = "Позвал Онтон на встречу"
+    out = backend.gate_llm_correction(original, "Позвал Антонов на встречу", ["Антон"])
+    assert out == original  # "Антонов" is a different word — not accepted
+
+
+def test_gate_accepts_genuine_case_ending_declension():
+    out = backend.gate_llm_correction(
+        "Встретил Онтона вчера", "Встретил Антона вчера", ["Антон"])
+    assert out == "Встретил Антона вчера"
+
+
+# MINOR — gate must transplant the validated core onto the ORIGINAL token's own
+# punctuation, never the LLM's punctuation choice.
+def test_gate_transplants_validated_core_onto_original_punctuation():
+    original = "Написал ему в слэк."
+    corrected = "Написал ему в Slack!"
+    out = backend.gate_llm_correction(original, corrected, ["Slack"])
+    assert out == "Написал ему в Slack."  # keeps ORIGINAL's ".", drops the LLM's "!"
+
+
+# MINOR — correct-cache staleness vs a recomputed transcribe cache: if transcribe's
+# own cache is busted and reruns with DIFFERENT segments, a surviving (now stale)
+# correct-cache entry must be detected and recomputed, not served blindly.
+def test_correct_cache_recomputes_when_transcribe_output_changes_underneath_it(monkeypatch, tmp_path):
+    cache = tmp_path / "cache"
+    src = tmp_path / "in.wav"; src.write_bytes(b"x")
+    llm_calls = {"n": 0}
+
+    def fake_correct_llm(self, segs, terms):
+        llm_calls["n"] += 1
+        return segs, 0
+
+    monkeypatch.setattr(backend.Pipeline, "correct_glossary_llm", fake_correct_llm)
+
+    def mk():
+        p = backend.Pipeline(out_dir=str(tmp_path / "v"), diarize=False,
+                              cache_dir=str(cache), glossary="Антон")
+        monkeypatch.setattr(p, "convert_to_mono", lambda f: f)
+        monkeypatch.setattr(p, "remove_silence_vad", lambda f: f)
+        monkeypatch.setattr(p, "summarize", lambda t, pr: None)
+        return p
+
+    p1 = mk()
+    monkeypatch.setattr(p1, "transcribe", lambda f: {"segments": [seg("привет Онтон первый", 0, 3)], "text": "x"})
+    capture(p1.process, str(src), "p")  # caches transcribe.json AND correct.json for this transcript
+
+    # bust ONLY the transcribe cache (real path via the Pipeline's own _cache(),
+    # not hand-reconstructed — avoids a filename mismatch missing the real file)
+    tj = p1._cache(f"transcribe-{p1.LANGUAGE}{p1._glossary_cache_suffix()}.json")
+    tj.write_text("CORRUPT", encoding="utf-8")
+
+    p2 = mk()
+    monkeypatch.setattr(p2, "transcribe",
+                         lambda f: {"segments": [seg("привет Онтон совершенно другой текст", 0, 3)], "text": "x"})
+    events = capture(p2.process, str(src), "p")  # transcribe reruns with DIFFERENT segments
+
+    assert llm_calls["n"] == 2  # correct recomputed, not served stale
+    ends = {e["stage"]: e for e in events if e["event"] == "stage_end"}
+    assert "из кеша" not in ends["correct"]["msg"]
+    done = [e for e in events if e["event"] == "done"][0]
+    assert "совершенно другой текст" in done["transcript"]  # fresh content, not the stale run's
