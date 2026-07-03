@@ -50,6 +50,8 @@ let autoIndexProc = null; // background auto-index subprocess (fires after a suc
 let procCanceled = false; // set when the user cancels processing
 let modelDlProc = null;    // live model-download subprocess (settings "Модели" section)
 let modelDlCanceled = false; // set when the user cancels a model download
+let searchProc = null;      // live para-search subprocess (chat/search chunk)
+let searchCanceled = false; // set when the user cancels an in-flight search
 let tee = null;        // AudioTee instance (system audio)
 let sysWav = null;     // WavWriter for system.wav
 let session = null;    // { dir, micPath, sysPath, mixedPath, micRecorded }
@@ -161,11 +163,13 @@ app.on("before-quit", async (e) => {
     if (procProc) procProc.kill();
     if (autoIndexProc) autoIndexProc.kill();
     if (modelDlProc) modelDlProc.kill();
+    if (searchProc) searchProc.kill();
     app.quit();
-  } else if (procProc || autoIndexProc || modelDlProc) {
+  } else if (procProc || autoIndexProc || modelDlProc || searchProc) {
     if (procProc) procProc.kill();
     if (autoIndexProc) autoIndexProc.kill();
     if (modelDlProc) modelDlProc.kill();
+    if (searchProc) searchProc.kill();
   }
 });
 app.on("window-all-closed", () => {
@@ -855,6 +859,7 @@ ipcMain.handle("para-reindex", async (_e, { root }) => {
 });
 
 ipcMain.handle("para-search", async (_e, { root, messages, query }) => {
+  if (searchProc) return { ok: false, error: "Поиск уже идёт" };
   // Accept either {root, messages} (multi-turn) or {root, query} (legacy single-shot).
   // Normalise to --messages form so backend always gets a proper conversation array.
   let msgArray = messages;
@@ -867,18 +872,33 @@ ipcMain.handle("para-search", async (_e, { root, messages, query }) => {
   // search_result whenever no embedding model was found — search fell back to
   // keyword-only (FTS) retrieval. Surfaced to the renderer as result.degraded.
   const DEGRADED_LOG_MSG = "Embedding-модель недоступна — поиск только по ключевым словам";
+  searchCanceled = false;
   return new Promise((resolve, reject) => {
     let result = null;
     let degraded = false;
-    runBackend(["search", "--root", root, "--db", DB_PATH, "--messages", messagesJson],
+    searchProc = runBackend(["search", "--root", root, "--db", DB_PATH, "--messages", messagesJson],
       (ev) => {
         if (ev.event === "search_result") result = { found: ev.found, answer: ev.answer, citations: ev.citations, degraded };
         else if (ev.event === "error") result = { found: false, error: ev.msg };
         else if (ev.event === "log" && ev.msg === DEGRADED_LOG_MSG) degraded = true;
       },
       (_code, stderr) => {
-        if (result) resolve(result);
+        const canceled = searchCanceled;
+        searchProc = null;
+        searchCanceled = false;
+        if (canceled) resolve({ found: false, canceled: true });
+        else if (result) resolve(result);
         else reject(new Error(stderr || "нет ответа от backend"));
       });
   });
+});
+
+// cancel an in-flight search query; safe because backend's cmd_search closes its
+// DB handle before the slow answer-LLM call (backend.py) — SIGTERM mid-request
+// has no local state left to corrupt. Mirrors cancel-process verbatim.
+ipcMain.handle("cancel-search", async () => {
+  if (!searchProc) return { ok: false, error: "Поиск не идёт" };
+  searchCanceled = true;
+  searchProc.kill("SIGTERM");
+  return { ok: true };
 });

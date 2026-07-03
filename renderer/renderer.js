@@ -1120,6 +1120,12 @@ $("paraChatNewBtn").addEventListener("click", () => {
 
 $("paraSearchBtn").addEventListener("click", () => runParaSearch());
 $("paraSearchQuery").addEventListener("keydown", (e) => { if (e.key === "Enter") runParaSearch(); });
+$("paraSearchCancel").addEventListener("click", () => {
+  // Self-disable so a second click before the backend's onClose fires is a no-op
+  // (mirrors paraClassifyCancel's own click-guard).
+  $("paraSearchCancel").disabled = true;
+  window.api.cancelSearch();
+});
 
 // Append a bubble to the chat log.
 // role: "user" | "assistant"
@@ -1161,6 +1167,19 @@ function appendChatBubble(role, content, citations, degraded) {
   return bubble;
 }
 
+// Tag the most recent user bubble as canceled (search was aborted mid-flight) — the
+// bubble stays visible so the user can see what they asked, but no assistant reply
+// follows. Caller is responsible for popping the phantom turn from chatMessages.
+function markLastUserBubbleCanceled() {
+  const bubbles = $("paraChatLog").querySelectorAll(".chat-bubble-user");
+  const last = bubbles[bubbles.length - 1];
+  if (!last) return;
+  const tag = document.createElement("div");
+  tag.className = "chat-canceled-tag";
+  tag.textContent = "⏹ отменено";
+  last.appendChild(tag);
+}
+
 // Append a "typing…" indicator bubble; returns the element so it can be removed.
 function appendTypingIndicator() {
   const log = $("paraChatLog");
@@ -1179,6 +1198,7 @@ async function runParaSearch() {
   if (!query) return;
 
   const btn = $("paraSearchBtn");
+  const cancelBtn = $("paraSearchCancel");
   // Append user turn
   chatMessages.push({ role: "user", content: query });
   appendChatBubble("user", query, null);
@@ -1186,6 +1206,8 @@ async function runParaSearch() {
   btn.disabled = true;
   btn.textContent = "Ищу…";
   input.disabled = true;
+  cancelBtn.disabled = false;
+  cancelBtn.classList.remove("hidden");
 
   // Show typing indicator while waiting
   const typingEl = appendTypingIndicator();
@@ -1203,18 +1225,30 @@ async function runParaSearch() {
     btn.disabled = false;
     btn.textContent = "🔍 Спросить";
     input.disabled = false;
+    cancelBtn.classList.add("hidden");
     input.focus();
     return;
   }
 
   typingEl.remove();
-  const answerText = res.answer || "Не нашёл по этому вопросу записей в заметках.";
-  appendChatBubble("assistant", answerText, res.found ? (res.citations || []) : [], !!res.degraded);
-  chatMessages.push({ role: "assistant", content: answerText });
+
+  if (res.canceled) {
+    // Backend was SIGTERM'd mid-query — drop the phantom user turn from the array
+    // sent to the backend (it got no assistant reply) so a follow-up question's
+    // history-rewrite never sees two consecutive user turns; the DOM bubble stays
+    // visible but tagged, so the user can still see what they asked.
+    chatMessages.pop();
+    markLastUserBubbleCanceled();
+  } else {
+    const answerText = res.answer || "Не нашёл по этому вопросу записей в заметках.";
+    appendChatBubble("assistant", answerText, res.found ? (res.citations || []) : [], !!res.degraded);
+    chatMessages.push({ role: "assistant", content: answerText });
+  }
 
   btn.disabled = false;
   btn.textContent = "🔍 Спросить";
   input.disabled = false;
+  cancelBtn.classList.add("hidden");
   input.focus();
 }
 

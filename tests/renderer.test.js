@@ -52,6 +52,7 @@ async function boot(apiOverrides = {}) {
     paraExtract: async () => ({ content: "x" }),
     paraReindex: async () => ({ indexed: 0, skipped: 0, removed: 0 }),
     paraSearch: async (_root, _messages) => ({ found: false, answer: "Не нашёл по этому вопросу записей в заметках.", citations: [] }),
+    cancelSearch: async () => ({ ok: true }),
     reveal: () => {},
     onRecordEvent: (cb) => { handlers.record = cb; },
     onProcessEvent: (cb) => { handlers.process = cb; },
@@ -775,6 +776,126 @@ test("PARA chat: second message passes full history in messages array", async ()
   assert.equal(calls[1][2].content, "уточнение");
 });
 
+test("PARA chat: cancel button hidden by default, shown while search in-flight, hidden again after response", async () => {
+  let resolveSearch;
+  const { window, $ } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru",
+      para: { root: "/v", folders: { projects: "Projects", areas: "Areas", resources: "Resources", archives: "Archives" } },
+    }),
+    paraSearch: async () => new Promise((resolve) => { resolveSearch = resolve; }),
+  });
+  window.document.querySelector('.topbtn[data-view="para"]').click();
+  await tick(window);
+  window.document.querySelector('.subbtn[data-sub="search"]').click();
+  await tick(window);
+
+  assert.ok($("paraSearchCancel").classList.contains("hidden"), "cancel button hidden before any query");
+
+  $("paraSearchQuery").value = "вопрос";
+  $("paraSearchBtn").click(); await tick(window);
+  assert.ok(!$("paraSearchCancel").classList.contains("hidden"), "cancel button shown while in-flight");
+  assert.equal($("paraSearchCancel").disabled, false, "cancel button enabled while in-flight");
+
+  resolveSearch({ found: true, answer: "Ответ.", citations: [] });
+  await tick(window); await tick(window);
+  assert.ok($("paraSearchCancel").classList.contains("hidden"), "cancel button hidden again after response");
+});
+
+test("PARA chat: clicking cancel calls cancelSearch once and self-disables (a second click is a no-op)", async () => {
+  let resolveSearch;
+  let cancelCalls = 0;
+  const { window, $ } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru",
+      para: { root: "/v", folders: { projects: "Projects", areas: "Areas", resources: "Resources", archives: "Archives" } },
+    }),
+    paraSearch: async () => new Promise((resolve) => { resolveSearch = resolve; }),
+    cancelSearch: async () => { cancelCalls++; return { ok: true }; },
+  });
+  window.document.querySelector('.topbtn[data-view="para"]').click();
+  await tick(window);
+  window.document.querySelector('.subbtn[data-sub="search"]').click();
+  await tick(window);
+  $("paraSearchQuery").value = "вопрос";
+  $("paraSearchBtn").click(); await tick(window);
+
+  $("paraSearchCancel").click();
+  $("paraSearchCancel").click(); // second click must be a no-op — button self-disabled on the first
+  await tick(window);
+  assert.equal(cancelCalls, 1, "cancelSearch invoked exactly once");
+  assert.equal($("paraSearchCancel").disabled, true, "cancel button stays disabled after click");
+
+  // Let the pending paraSearch promise settle so the test exits cleanly.
+  resolveSearch({ found: false, canceled: true });
+  await tick(window); await tick(window);
+});
+
+test("PARA chat: canceled result tags the user bubble, appends no assistant bubble, and re-enables input", async () => {
+  let resolveSearch;
+  const { window, $ } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru",
+      para: { root: "/v", folders: { projects: "Projects", areas: "Areas", resources: "Resources", archives: "Archives" } },
+    }),
+    paraSearch: async () => new Promise((resolve) => { resolveSearch = resolve; }),
+  });
+  window.document.querySelector('.topbtn[data-view="para"]').click();
+  await tick(window);
+  window.document.querySelector('.subbtn[data-sub="search"]').click();
+  await tick(window);
+  $("paraSearchQuery").value = "вопрос отменённый";
+  $("paraSearchBtn").click(); await tick(window);
+
+  $("paraSearchCancel").click();
+  resolveSearch({ found: false, canceled: true });
+  await tick(window); await tick(window);
+
+  const bubbles = $("paraChatLog").querySelectorAll(".chat-bubble");
+  assert.equal(bubbles.length, 1, "no assistant bubble appended for a canceled turn");
+  assert.ok(bubbles[0].classList.contains("chat-bubble-user"), "the surviving bubble is the user's");
+  assert.ok(bubbles[0].querySelector(".chat-canceled-tag"), "user bubble must be tagged canceled");
+  assert.equal($("paraSearchBtn").disabled, false, "send button re-enabled");
+  assert.equal($("paraSearchQuery").disabled, false, "input re-enabled");
+  assert.ok($("paraSearchCancel").classList.contains("hidden"), "cancel button hidden again");
+});
+
+test("PARA chat: canceled turn is dropped from history sent on the next query (no phantom turn)", async () => {
+  let resolveFirst;
+  const calls = [];
+  let call = 0;
+  const { window, $ } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru",
+      para: { root: "/v", folders: { projects: "Projects", areas: "Areas", resources: "Resources", archives: "Archives" } },
+    }),
+    paraSearch: async (_root, messages) => {
+      call++;
+      calls.push(messages);
+      if (call === 1) return new Promise((resolve) => { resolveFirst = resolve; });
+      return { found: true, answer: "Ответ 2", citations: [] };
+    },
+  });
+  window.document.querySelector('.topbtn[data-view="para"]').click();
+  await tick(window);
+  window.document.querySelector('.subbtn[data-sub="search"]').click();
+  await tick(window);
+
+  $("paraSearchQuery").value = "первый (будет отменён)";
+  $("paraSearchBtn").click(); await tick(window);
+  resolveFirst({ found: false, canceled: true });
+  await tick(window); await tick(window);
+
+  // New query after cancel must work (input/button are re-enabled, no leftover lock).
+  $("paraSearchQuery").value = "второй";
+  $("paraSearchBtn").click(); await tick(window); await tick(window);
+
+  assert.equal(calls.length, 2, "paraSearch called twice");
+  assert.equal(calls[1].length, 1, "second call's history has only the new turn — the canceled one was dropped");
+  assert.equal(calls[1][0].role, "user");
+  assert.equal(calls[1][0].content, "второй");
+});
+
 test("view switching toggles record/history panels", async () => {
   const { window, $ } = await boot();
   window.document.querySelector('.topbtn[data-view="history"]').click();
@@ -1243,6 +1364,42 @@ test("main.js: modelDlProc is killed in before-quit alongside the other tracked 
   const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
   const beforeQuit = mainSrc.match(/app\.on\("before-quit"[\s\S]*?\n\}\);/)[0];
   assert.match(beforeQuit, /modelDlProc/);
+});
+
+// ── main.js para-search cancel wiring (chunk 12) ────────────────────────────
+// Same reasoning as the model-download wiring block above: main.js requires("electron")
+// and can't be loaded headless under plain node --test — source-text checks cover the
+// main-process handlers a jsdom renderer test can't reach.
+test("main.js: cancel-search kills searchProc via the same SIGTERM pattern as cancel-process", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const cancelProcess = mainSrc.match(/ipcMain\.handle\("cancel-process"[\s\S]*?\n\}\);/);
+  const cancelSearch = mainSrc.match(/ipcMain\.handle\("cancel-search"[\s\S]*?\n\}\);/);
+  assert.ok(cancelProcess, "cancel-process handler not found");
+  assert.ok(cancelSearch, "cancel-search handler not found");
+  assert.match(cancelProcess[0], /procProc\.kill\("SIGTERM"\)/);
+  assert.match(cancelSearch[0], /searchProc\.kill\("SIGTERM"\)/);
+  assert.match(cancelSearch[0], /searchCanceled = true/);
+});
+
+test("main.js: para-search refuses to start a second query while one is already in flight", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const paraSearch = mainSrc.match(/ipcMain\.handle\("para-search"[\s\S]*?\n\}\);/)[0];
+  assert.match(paraSearch, /if \(searchProc\) return/);
+});
+
+test("main.js: para-search's onClose resolves {canceled:true} on a canceled run and clears both slots", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const paraSearch = mainSrc.match(/ipcMain\.handle\("para-search"[\s\S]*?\n\}\);/)[0];
+  assert.match(paraSearch, /searchProc = runBackend\(/, "must capture runBackend's return into searchProc");
+  assert.match(paraSearch, /canceled: true/, "onClose must resolve {canceled:true} on cancel, not reject");
+  assert.match(paraSearch, /searchProc = null;/, "slot must be cleared in onClose");
+  assert.match(paraSearch, /searchCanceled = false;/, "flag must be reset in onClose");
+});
+
+test("main.js: searchProc is killed in before-quit alongside the other tracked children", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const beforeQuit = mainSrc.match(/app\.on\("before-quit"[\s\S]*?\n\}\);/)[0];
+  assert.match(beforeQuit, /searchProc/);
 });
 
 // ── main.js pick-audio: multi-select ────────────────────────────────────────

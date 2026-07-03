@@ -26,6 +26,7 @@ contextBridge.exposeInMainWorld("api", {
   paraFile: (args) => ipcRenderer.invoke("para-file", args),
   paraReindex: (root) => ipcRenderer.invoke("para-reindex", { root }),
   paraSearch: (root, messages) => ipcRenderer.invoke("para-search", { root, messages }),
+  cancelSearch: () => ipcRenderer.invoke("cancel-search"),
 
   onRecordEvent: (cb) => ipcRenderer.on("record-event", (_e, ev) => cb(ev)),
   onProcessEvent: (cb) => ipcRenderer.on("process-event", (_e, ev) => cb(ev)),
