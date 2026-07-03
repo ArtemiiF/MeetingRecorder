@@ -966,6 +966,9 @@ $("applySpeakers").addEventListener("click", async () => {
 
 // ── PARA view ────────────────────────────────────────────────────────────────
 let paraInboxItems = [];
+// Guards against re-fetching (and wiping filed/grey rows) on every pane re-entry —
+// set once the first auto-load has run; reset only when the vault identity changes.
+let paraInboxLoaded = false;
 const PARA_KEYS = ["projects", "areas", "resources", "archives"];
 
 let paraSub = "inbox";
@@ -988,7 +991,7 @@ function renderParaInboxView() {
   $("paraWork").style.display = configured ? "" : "none";
   if (configured) {
     $("paraVaultPath").textContent = "Vault: " + state.para.root;
-    refreshParaInbox();
+    if (!paraInboxLoaded) { paraInboxLoaded = true; refreshParaInbox(); }
   }
 }
 
@@ -1011,7 +1014,7 @@ function renderTreeNodes(nodes) {
     if (n.type === "dir") {
       const hasChildren = n.children && n.children.length;
       const caret = hasChildren ? '<span class="tree-caret">▾</span>' : '<span class="tree-caret empty"></span>';
-      return `<li class="tree-dir">` +
+      return `<li class="tree-dir${hasChildren ? " collapsed" : ""}">` +
         `<div class="tree-dir-head">${caret}📁 ${escapeHtml(n.name)} <span class="tree-count">${n.notes}</span></div>` +
         (hasChildren ? renderTreeNodes(n.children) : "") + "</li>";
     }
@@ -1200,6 +1203,7 @@ $("paraCreate").addEventListener("click", async () => {
   const res = await window.api.paraCreateVault({ root, folders, outDir: state.outDir, outDirCustom: state.outDirCustom });
   if (res && res.ok === false) { alert("Не удалось создать: " + res.error); return; }
   state.para = { root, folders };
+  paraInboxLoaded = false; // new vault → force a fresh disk scan on next Разбор view
   if (res && res.outDir) { state.outDir = res.outDir; $("outDir").value = state.outDir; }
   await persistPresets();
   renderPara();
@@ -1214,6 +1218,8 @@ $("paraChangeVault").addEventListener("click", () => {
   $("paraWork").style.display = "none";
 });
 
+$("paraInboxRefresh").addEventListener("click", refreshParaInbox);
+
 async function refreshParaInbox() {
   paraInboxItems = await window.api.listHistory(state.outDir); // unfiled = still in Meetings dir
   const box = $("paraInbox");
@@ -1224,7 +1230,8 @@ async function refreshParaInbox() {
     row.className = "para-row";
     row.dataset.idx = idx;
     row.innerHTML =
-      `<div class="para-note">${escapeHtml(it.title || it.name)}</div>
+      `<span class="para-row-spinner spinner hidden"></span>
+       <div class="para-note">${escapeHtml(it.title || it.name)}</div>
        <select class="para-cat">
          <option value="">— категория —</option>
          <option value="projects">Projects</option>
@@ -1261,6 +1268,7 @@ $("paraClassifyAll").addEventListener("click", async () => {
   btn.textContent = "Разбираю…";
   cancelBtn.disabled = false;
   cancelBtn.classList.remove("hidden");
+  $("paraInboxRefresh").disabled = true; // mid-batch refresh would detach the loop's captured rows
   log.textContent = "";
   log.classList.remove("hidden");
   paraLog(`Старт: ${rows.length} заметок.`);
@@ -1270,11 +1278,13 @@ $("paraClassifyAll").addEventListener("click", async () => {
     const it = paraInboxItems[+row.dataset.idx];
     const name = it.title || it.name;
     paraLog(`→ ${name}`);
+    setRowProcessing(row, true);
     try {
       const r = await window.api.paraClassify({ note: it.note, root: state.para.root, folders: state.para.folders });
       if (!r || r.error || !r.category) {
         paraLog(`   ✗ не классифицирована: ${(r && r.error) || "категория не определена"}`);
         errors++;
+        setRowProcessing(row, false);
         continue;
       }
       row.querySelector(".para-cat").value = r.category;
@@ -1284,6 +1294,7 @@ $("paraClassifyAll").addEventListener("click", async () => {
       if (!ex || ex.error || !ex.content) {
         paraLog(`   ✗ ${r.category} подобрана, но выжимка не извлечена: ${(ex && ex.error) || "пусто"}`);
         errors++;
+        setRowProcessing(row, false);
         continue;
       }
       const res = await window.api.paraFile({
@@ -1294,7 +1305,11 @@ $("paraClassifyAll").addEventListener("click", async () => {
       if (res && res.ok === false) {
         paraLog(`   ✗ ${r.category} подобрана, но не разложена: ${res.error}`);
         errors++;
+        setRowProcessing(row, false);
       } else {
+        // setRowProcessing(false) first, markRowFiled last — markRowFiled's permanent
+        // disable must win over setRowProcessing's transient re-enable.
+        setRowProcessing(row, false);
         markRowFiled(row);
         paraLog(`   ✓ разложена → ${r.category}${r.project ? " / " + r.project : ""}`);
         done++;
@@ -1302,13 +1317,24 @@ $("paraClassifyAll").addEventListener("click", async () => {
     } catch (e) {
       paraLog(`   ✗ исключение: ${e && e.message ? e.message : e}`);
       errors++;
+      setRowProcessing(row, false);
     }
   }
   paraLog(`Готово: разобрано ${done}, ошибок ${errors}${paraClassifyCancelled ? ", прервано" : ""}.`);
   btn.disabled = false;
   btn.textContent = "🗂 Разобрать все (LLM)";
   cancelBtn.classList.add("hidden");
+  $("paraInboxRefresh").disabled = false;
 });
+
+// Toggles the per-row spinner + a transient disable on this row's own controls while
+// it's mid-flight in paraClassifyAll — narrows (does not fully close) the window where
+// a manual "Разложить" click could race the bulk loop on the same row.
+function setRowProcessing(row, on) {
+  const spinner = row.querySelector(".para-row-spinner");
+  if (spinner) spinner.classList.toggle("hidden", !on);
+  row.querySelectorAll("select, input, button").forEach((el) => { el.disabled = on; });
+}
 
 function markRowFiled(row) {
   row.classList.add("filed");
@@ -1340,7 +1366,7 @@ async function fileParaRow(idx, row) {
     alert("Не удалось разложить: " + res.error);
     btn.disabled = false; btn.textContent = prev; return;
   }
-  row.remove(); // distilled + archived → out of the Meetings inbox
+  markRowFiled(row); // distilled + archived — grey/disabled in place, same as the bulk path
 }
 
 function showResult(ev) {

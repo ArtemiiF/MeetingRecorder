@@ -431,7 +431,7 @@ test("PARA: setup shown until vault created, then workspace", async () => {
   assert.notEqual($("paraWork").style.display, "none");
 });
 
-test("PARA: classify fills rows, file removes from inbox", async () => {
+test("PARA: classify fills rows, manual file marks row filed (grey, disabled, not removed)", async () => {
   const { window, $ } = await boot({
     getPresets: async () => ({
       presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru",
@@ -453,12 +453,16 @@ test("PARA: classify fills rows, file removes from inbox", async () => {
   projIn.value = "Лендинг";
   assert.equal(catSel.value, "projects");
   assert.equal(projIn.value, "Лендинг");
-  // Now click file-btn: paraExtract → paraFile → row.remove()
+  // Now click file-btn: paraExtract → paraFile → markRowFiled (consistent with the bulk path —
+  // stays in place, greyed and disabled, not removed).
   rows[0].querySelector(".para-file-btn").click(); await tick(window); await tick(window);
-  assert.equal($("paraInbox").querySelectorAll(".para-row").length, 0);
+  assert.equal($("paraInbox").querySelectorAll(".para-row").length, 1);
+  assert.ok(rows[0].classList.contains("filed"));
+  assert.ok(catSel.disabled);
+  assert.equal(rows[0].querySelector(".para-file-btn").textContent, "✓ Разложена");
 });
 
-test("PARA sub-tabs: switch to Хранилище renders the vault tree", async () => {
+test("PARA sub-tabs: switch to Хранилище renders the vault tree, collapsed by default", async () => {
   const { window, $ } = await boot({
     getPresets: async () => ({
       presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru",
@@ -480,6 +484,106 @@ test("PARA sub-tabs: switch to Хранилище renders the vault tree", async
   assert.ok(!$("para-pane-tree").classList.contains("hidden"));
   assert.ok($("paraTree").textContent.includes("Projects"));
   assert.equal($("paraTree").querySelectorAll(".tree-note").length, 1);
+  // ask 4: dirs with children render collapsed by default, before any click
+  const dir = $("paraTree").querySelector(".tree-dir");
+  assert.ok(dir.classList.contains("collapsed"));
+  dir.querySelector(".tree-dir-head").click();
+  assert.ok(!dir.classList.contains("collapsed")); // existing toggle behavior, unchanged
+});
+
+test("PARA classify-all: per-row spinner shows while processing, clears once filed", async () => {
+  const { window, $ } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru",
+      para: { root: "/v", folders: { projects: "Projects", areas: "Areas", resources: "Resources", archives: "Archives" } },
+    }),
+    listHistory: async () => [{ name: "2026-01-01", title: "T", note: "/n.md", audio: null }],
+    paraClassify: async () => ({ category: "projects", project: "P" }),
+    paraFile: async () => ({ ok: true }),
+  });
+  window.document.querySelector('.topbtn[data-view="para"]').click();
+  await tick(window);
+  const row = $("paraInbox").querySelector(".para-row");
+  $("paraClassifyAll").click();
+  // The click handler's synchronous prefix (setRowProcessing(row, true)) runs before the
+  // first await (window.api.paraClassify), so the spinner + row-disable are visible immediately.
+  assert.ok(!row.querySelector(".para-row-spinner").classList.contains("hidden"));
+  assert.ok(row.querySelector(".para-cat").disabled);
+  await tick(window); await tick(window); await tick(window); await tick(window);
+  assert.ok(row.classList.contains("filed"));
+  assert.ok(row.querySelector(".para-row-spinner").classList.contains("hidden"));
+});
+
+test("PARA: filed row survives switching panes away and back (regression — no auto re-fetch)", async () => {
+  let listHistoryCalls = 0;
+  const { window, $ } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru",
+      para: { root: "/v", folders: { projects: "Projects", areas: "Areas", resources: "Resources", archives: "Archives" } },
+    }),
+    listHistory: async () => { listHistoryCalls++; return [{ name: "2026-01-01", title: "T", note: "/n.md", audio: null }]; },
+    paraClassify: async () => ({ category: "projects", project: "P" }),
+    paraFile: async () => ({ ok: true }),
+  });
+  listHistoryCalls = 0; // discard init()'s own refreshHistory() fetch — unrelated to PARA
+  window.document.querySelector('.topbtn[data-view="para"]').click();
+  await tick(window);
+  assert.equal(listHistoryCalls, 1);
+  $("paraClassifyAll").click();
+  await tick(window); await tick(window); await tick(window); await tick(window);
+  assert.ok($("paraInbox").querySelector(".para-row").classList.contains("filed"));
+  // round-trip within PARA: Разбор → Поиск → Разбор (subSwitchPara only toggles .hidden,
+  // it doesn't touch #paraInbox unless renderParaInboxView decides to re-fetch)
+  window.document.querySelector('.subbtn[data-sub="search"]').click();
+  await tick(window);
+  window.document.querySelector('.subbtn[data-sub="inbox"]').click();
+  await tick(window);
+  assert.equal(listHistoryCalls, 1); // no re-fetch on pane re-entry
+  assert.ok($("paraInbox").querySelector(".para-row").classList.contains("filed"));
+});
+
+test("PARA: «Обновить» re-fetches and drops the now-filed/moved note", async () => {
+  let listHistoryCalls = 0;
+  let noteMovedOut = false;
+  const { window, $ } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru",
+      para: { root: "/v", folders: { projects: "Projects", areas: "Areas", resources: "Resources", archives: "Archives" } },
+    }),
+    listHistory: async () => {
+      listHistoryCalls++;
+      return noteMovedOut ? [] : [{ name: "2026-01-01", title: "T", note: "/n.md", audio: null }];
+    },
+  });
+  listHistoryCalls = 0; // discard init()'s own refreshHistory() fetch — unrelated to PARA
+  window.document.querySelector('.topbtn[data-view="para"]').click();
+  await tick(window);
+  assert.equal(listHistoryCalls, 1);
+  assert.equal($("paraInbox").querySelectorAll(".para-row").length, 1);
+  noteMovedOut = true; // simulates the note having been filed/moved out of Meetings
+  $("paraInboxRefresh").click();
+  await tick(window);
+  assert.equal(listHistoryCalls, 2);
+  assert.equal($("paraInbox").querySelectorAll(".para-row").length, 0);
+});
+
+test("PARA: «Обновить» is disabled while classify-all batch is running", async () => {
+  const { window, $ } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru",
+      para: { root: "/v", folders: { projects: "Projects", areas: "Areas", resources: "Resources", archives: "Archives" } },
+    }),
+    listHistory: async () => [{ name: "2026-01-01", title: "T", note: "/n.md", audio: null }],
+    paraClassify: async () => ({ category: "projects", project: "P" }),
+    paraFile: async () => ({ ok: true }),
+  });
+  window.document.querySelector('.topbtn[data-view="para"]').click();
+  await tick(window);
+  assert.equal($("paraInboxRefresh").disabled, false);
+  $("paraClassifyAll").click();
+  assert.equal($("paraInboxRefresh").disabled, true); // disabled by the same synchronous prefix
+  await tick(window); await tick(window); await tick(window); await tick(window);
+  assert.equal($("paraInboxRefresh").disabled, false);
 });
 
 test("PARA search sub-tab is enabled and switching to it shows #para-pane-search", async () => {
