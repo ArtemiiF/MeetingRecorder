@@ -270,6 +270,52 @@ def make_wav(path, seconds=0.2, rate=16000):
         w.writeframes(b"\x00\x00" * int(rate * seconds))
 
 
+def make_wav_from_samples(path, samples, rate, channels=1):
+    """Write int16 PCM `samples` (already interleaved if multi-channel) to a WAV file."""
+    import wave as wavemod
+    with wavemod.open(str(path), "wb") as w:
+        w.setnchannels(channels)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(samples.astype("<i2").tobytes())
+
+
+def make_offset_pair(tmp_path, shift_ms, late, mic_rate=44100, sys_rate=16000,
+                      mic_channels=1, seed=42, dur_s=2.5):
+    """Build a (mic.wav, system.wav) pair that share the same underlying noise content
+    but were resampled from a common source to their own native rates/channel counts,
+    with one track missing its first `shift_ms` of real-world audio (the "started
+    late" model — see design doc §3). Used to exercise estimate_start_offset_ms with
+    a known, verifiable ground-truth offset."""
+    import numpy as np
+    from scipy.signal import resample_poly
+    rng = np.random.default_rng(seed)
+    base_rate = 48000
+    base = rng.standard_normal(int(base_rate * (dur_s + shift_ms / 1000 + 0.5)))
+    mic_full = resample_poly(base, mic_rate, base_rate)
+    sys_full = resample_poly(base, sys_rate, base_rate)
+    mic_shift = int(round(shift_ms / 1000 * mic_rate)) if late == "mic" else 0
+    sys_shift = int(round(shift_ms / 1000 * sys_rate)) if late == "system" else 0
+    mic_track = mic_full[mic_shift:mic_shift + int(mic_rate * dur_s)]
+    sys_track = sys_full[sys_shift:sys_shift + int(sys_rate * dur_s)]
+
+    def to_int16(x):
+        peak = np.max(np.abs(x)) + 1e-9
+        return (x / peak * 30000).astype("<i2")
+
+    mic16, sys16 = to_int16(mic_track), to_int16(sys_track)
+    if mic_channels == 2:
+        stereo = np.empty(mic16.size * 2, dtype="<i2")
+        stereo[0::2] = mic16
+        stereo[1::2] = mic16
+        mic16 = stereo
+
+    mic_path, sys_path = tmp_path / "mic.wav", tmp_path / "system.wav"
+    make_wav_from_samples(mic_path, mic16, mic_rate, mic_channels)
+    make_wav_from_samples(sys_path, sys16, sys_rate, 1)
+    return mic_path, sys_path
+
+
 def test_parse_frontmatter():
     fm = backend._parse_frontmatter('---\ntitle: "Тема"\ntemplate: "X"\nlanguage: "ru"\n---\nbody')
     assert fm["title"] == "Тема" and fm["template"] == "X" and fm["language"] == "ru"
@@ -538,6 +584,164 @@ def test_cmd_mix_ignores_empty_files(tmp_path):
     make_wav(sysf)
     events = capture(backend.cmd_mix, str(empty), str(sysf), str(out))
     assert any(e["event"] == "mixed" and e["tracks"] == 1 for e in events)
+
+
+# ── _normalized_xcorr_peak (pure helper, synthetic arrays) ─────────────────────
+def test_normalized_xcorr_peak_recovers_positive_shift():
+    import numpy as np
+    rng = np.random.default_rng(42)
+    shared = rng.standard_normal(2000)
+    shift = 137
+    early, late = shared[:1500], shared[shift:shift + 1500]
+    lag, conf = backend._normalized_xcorr_peak(early, late, max_lag=500)
+    assert lag == shift
+    assert conf > 0.5
+
+
+def test_normalized_xcorr_peak_recovers_negative_shift():
+    import numpy as np
+    rng = np.random.default_rng(42)
+    shared = rng.standard_normal(2000)
+    shift = 137
+    early, late = shared[:1500], shared[shift:shift + 1500]
+    # swapping a/b flips the sign of the recovered lag
+    lag, conf = backend._normalized_xcorr_peak(late, early, max_lag=500)
+    assert lag == -shift
+    assert conf > 0.5
+
+
+def test_normalized_xcorr_peak_uncorrelated_below_threshold():
+    import numpy as np
+    rng = np.random.default_rng(7)
+    a = rng.standard_normal(1500)
+    b = rng.standard_normal(1500)
+    _, conf = backend._normalized_xcorr_peak(a, b, max_lag=500)
+    assert conf < backend._XCORR_MIN_CONFIDENCE
+
+
+def test_normalized_xcorr_peak_all_zero_no_divide_by_zero():
+    import numpy as np
+    lag, conf = backend._normalized_xcorr_peak(np.zeros(500), np.zeros(500), max_lag=100)
+    assert lag == 0 and conf == 0.0
+
+
+def test_normalized_xcorr_peak_shift_beyond_max_lag_stays_bounded():
+    import numpy as np
+    rng = np.random.default_rng(3)
+    shared = rng.standard_normal(3000)
+    shift = 1000  # far outside max_lag below
+    early, late = shared[:1500], shared[shift:shift + 1500]
+    lag, _ = backend._normalized_xcorr_peak(early, late, max_lag=100)
+    assert abs(lag) <= 100  # bounded to the search window, never crashes
+
+
+# ── estimate_start_offset_ms (I/O boundary, synthetic WAVs with real ground truth) ──
+def test_estimate_start_offset_ms_recovers_system_late(tmp_path):
+    # mic stereo@44100 vs system mono@16000 — differing rate AND channel count,
+    # per design doc §3 test plan
+    mic, sysf = make_offset_pair(tmp_path, shift_ms=200, late="system", mic_channels=2)
+    md, sd, conf = backend.estimate_start_offset_ms(str(mic), str(sysf))
+    assert (md, sd) == (0, 200)
+    assert conf > backend._XCORR_MIN_CONFIDENCE
+
+
+def test_estimate_start_offset_ms_recovers_mic_late(tmp_path):
+    mic, sysf = make_offset_pair(tmp_path, shift_ms=150, late="mic")
+    md, sd, conf = backend.estimate_start_offset_ms(str(mic), str(sysf))
+    assert (md, sd) == (150, 0)
+    assert conf > backend._XCORR_MIN_CONFIDENCE
+
+
+def test_estimate_start_offset_ms_uncorrelated_falls_back(tmp_path):
+    import numpy as np
+    rng = np.random.default_rng(9)
+    mic16 = (rng.standard_normal(16000 * 2) * 3000).astype("<i2")
+    sys16 = (rng.standard_normal(16000 * 2) * 3000).astype("<i2")  # independent noise
+    mic, sysf = tmp_path / "mic.wav", tmp_path / "system.wav"
+    make_wav_from_samples(mic, mic16, 16000, 1)
+    make_wav_from_samples(sysf, sys16, 16000, 1)
+    md, sd, conf = backend.estimate_start_offset_ms(str(mic), str(sysf))
+    assert (md, sd) == (0, 0)
+    assert conf < backend._XCORR_MIN_CONFIDENCE
+
+
+def test_estimate_start_offset_ms_too_short_falls_back(tmp_path):
+    mic, sysf = tmp_path / "mic.wav", tmp_path / "system.wav"
+    make_wav(mic, seconds=0.3, rate=16000)  # well under the 1s-post-decimation guard
+    make_wav(sysf, seconds=0.3, rate=16000)
+    assert backend.estimate_start_offset_ms(str(mic), str(sysf)) == (0, 0, 0.0)
+
+
+def test_estimate_start_offset_ms_import_error_falls_back(monkeypatch, tmp_path):
+    mic, sysf = tmp_path / "mic.wav", tmp_path / "system.wav"
+    make_wav(mic, seconds=0.3)
+    make_wav(sysf, seconds=0.3)
+    import builtins
+    real_import = builtins.__import__
+
+    def fake_import(name, *a, **k):
+        if name.split(".")[0] in ("numpy", "scipy"):
+            raise ImportError(f"simulated missing {name}")
+        return real_import(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    assert backend.estimate_start_offset_ms(str(mic), str(sysf)) == (0, 0, 0.0)
+
+
+# ── cmd_mix auto-alignment integration (mocked ffmpeg subprocess) ──────────────
+def test_cmd_mix_silent_inputs_no_adelay(tmp_path, monkeypatch):
+    # characterization test: silent tracks → zero-norm confidence → no adelay applied,
+    # keeping the 4 pre-existing silent-WAV mix tests' behavior an explicit invariant
+    import subprocess
+    mic, sysf, out = tmp_path / "mic.wav", tmp_path / "system.wav", tmp_path / "mixed.wav"
+    make_wav(mic, seconds=2.0)
+    make_wav(sysf, seconds=2.0)
+    captured = {}
+
+    def fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        return types.SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    events = capture(backend.cmd_mix, str(mic), str(sysf), str(out))
+    assert any(e["event"] == "mixed" and e["tracks"] == 2 for e in events)
+    fc = captured["cmd"][captured["cmd"].index("-filter_complex") + 1]
+    assert "adelay" not in fc
+
+
+def test_cmd_mix_auto_detects_real_offset(tmp_path, monkeypatch):
+    import subprocess
+    mic, sysf = make_offset_pair(tmp_path, shift_ms=200, late="system")
+    out = tmp_path / "mixed.wav"
+    captured = {}
+
+    def fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        return types.SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    capture(backend.cmd_mix, str(mic), str(sysf), str(out))
+    fc = captured["cmd"][captured["cmd"].index("-filter_complex") + 1]
+    assert "[1:a]adelay=200|200[d1]" in fc  # system (input 1) delayed by the detected offset
+
+
+def test_cmd_mix_explicit_delay_skips_auto_detect(tmp_path, monkeypatch):
+    # explicit CLI override (nonzero mic_delay/sys_delay) must bypass auto-detect
+    # entirely — even though these tracks share real, correlatable content
+    import subprocess
+    mic, sysf = make_offset_pair(tmp_path, shift_ms=200, late="system")
+    out = tmp_path / "mixed.wav"
+    captured = {}
+
+    def fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        return types.SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    events = capture(backend.cmd_mix, str(mic), str(sysf), str(out), mic_delay=250, sys_delay=0)
+    fc = captured["cmd"][captured["cmd"].index("-filter_complex") + 1]
+    assert "[0:a]adelay=250|250[d0]" in fc  # explicit override applied, not the auto-detected 200ms
+    assert not any("Автовыравнивание" in e.get("msg", "") for e in events if e["event"] == "log")
 
 
 def test_find_device_index_matches_substring(monkeypatch):

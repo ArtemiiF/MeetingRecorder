@@ -1386,6 +1386,115 @@ def cmd_process(args):
         sys.stderr.write(traceback.format_exc())
 
 
+# Confidence threshold for the PCM cross-correlation auto-alignment below (§ estimate_start_offset_ms).
+# HYPO default, not empirically calibrated against real recordings — see TODO.md history.
+_XCORR_MIN_CONFIDENCE = 0.15
+
+
+def _normalized_xcorr_peak(a, b, max_lag):
+    """Pure numpy/scipy: find the integer sample lag that best aligns `b` to `a` via
+    FFT cross-correlation, restricted to |lag| <= max_lag.
+    lag > 0  → `b` started later (its content matches `a` shifted back by `lag` samples)
+    lag < 0  → `a` started later
+    lag == 0 → already aligned (or nothing could be resolved)
+    Returns (lag, confidence). confidence = corr[peak] / (||a|| * ||b||), a
+    cosine-similarity-like score (global normalization, not per-lag — a known
+    conservative approximation, weaker near the edges of the search window).
+    All-zero / empty / degenerate input never raises — returns (0, 0.0)."""
+    import numpy as np
+    from scipy.signal import correlate
+
+    a = np.asarray(a, dtype=np.float64)
+    b = np.asarray(b, dtype=np.float64)
+    if a.size == 0 or b.size == 0:
+        return 0, 0.0
+    norm = float(np.linalg.norm(a) * np.linalg.norm(b))
+    if norm == 0.0:
+        return 0, 0.0
+
+    corr = correlate(a, b, mode="full", method="fft")
+    lags = np.arange(-(len(b) - 1), len(a))
+    mask = np.abs(lags) <= max_lag
+    if not np.any(mask):
+        return 0, 0.0
+    corr_r, lags_r = corr[mask], lags[mask]
+    peak_idx = int(np.argmax(corr_r))
+    lag = int(lags_r[peak_idx])
+    confidence = float(corr_r[peak_idx] / norm)
+    return lag, confidence
+
+
+def _read_mono_decimated(path, max_seconds, target_rate):
+    """Read up to `max_seconds` of audio from a WAV file, downmix to mono (average
+    channels) if needed, and resample to `target_rate` Hz. Never assumes the file's
+    channel count or sample rate — both are read from the WAV header (mic is 1 or 2ch,
+    device-dependent rate; system.wav is fixed mono/16000, but this stays generic).
+    Returns a 1-D numpy float64 array."""
+    import numpy as np
+    from fractions import Fraction
+    from scipy.signal import resample_poly
+
+    with wave.open(str(path), "rb") as w:
+        rate = w.getframerate()
+        channels = w.getnchannels()
+        sampwidth = w.getsampwidth()
+        n_frames = min(w.getnframes(), int(max_seconds * rate))
+        raw = w.readframes(n_frames)
+
+    dtype = {1: np.int8, 2: np.int16, 4: np.int32}.get(sampwidth)
+    if dtype is None:
+        raise ValueError(f"unsupported sample width: {sampwidth}")
+    samples = np.frombuffer(raw, dtype=dtype).astype(np.float64)
+    if channels > 1:
+        samples = samples.reshape(-1, channels).mean(axis=1)
+
+    if samples.size > 0 and rate != target_rate:
+        frac = Fraction(target_rate, rate).limit_denominator(1000)
+        samples = resample_poly(samples, frac.numerator, frac.denominator)
+
+    return samples
+
+
+def estimate_start_offset_ms(mic_path, system_path, max_offset_ms=3000, corr_window_s=15,
+                              target_rate=4000, min_confidence=_XCORR_MIN_CONFIDENCE):
+    """Estimate the (mic_delay_ms, sys_delay_ms) pair that aligns two independently-
+    started recordings via PCM cross-correlation on speaker→mic leakage, plus a
+    confidence score. Fails safe: numpy/scipy missing, unreadable WAVs, too-short
+    audio, or low confidence all fall back to (0, 0, confidence) — i.e. today's
+    zero-delay behavior — and each path logs which one was taken."""
+    try:
+        import numpy  # noqa: F401  (availability probe; actual use is in the helpers above)
+        import scipy.signal  # noqa: F401
+    except ImportError as e:
+        log(f"Автовыравнивание (xcorr): numpy/scipy недоступны ({e}) — без сдвига")
+        return 0, 0, 0.0
+
+    read_seconds = corr_window_s + max_offset_ms / 1000.0
+    try:
+        mic = _read_mono_decimated(mic_path, read_seconds, target_rate)
+        system = _read_mono_decimated(system_path, read_seconds, target_rate)
+    except Exception as e:
+        log(f"Автовыравнивание (xcorr): ошибка чтения WAV ({e}) — без сдвига")
+        return 0, 0, 0.0
+
+    min_samples = int(1.0 * target_rate)  # minimum-length guard: <1s post-decimation is degenerate
+    if len(mic) < min_samples or len(system) < min_samples:
+        log("Автовыравнивание (xcorr): дорожка короче 1с после децимации — без сдвига")
+        return 0, 0, 0.0
+
+    max_lag = int(max_offset_ms * target_rate / 1000)
+    lag, confidence = _normalized_xcorr_peak(mic, system, max_lag)
+
+    if confidence < min_confidence:
+        log(f"Автовыравнивание (xcorr): низкая уверенность ({confidence:.2f}) — без сдвига")
+        return 0, 0, confidence
+
+    mic_delay_ms = round(max(0, -lag) * 1000 / target_rate)
+    sys_delay_ms = round(max(0, lag) * 1000 / target_rate)
+    log(f"Автовыравнивание (xcorr): delays=[{mic_delay_ms}, {sys_delay_ms}]мс, confidence={confidence:.2f}")
+    return mic_delay_ms, sys_delay_ms, confidence
+
+
 def build_mix_filter(n, delays_ms):
     """Build the ffmpeg -filter_complex graph for n inputs (1 or 2) with optional
     per-input leading-silence delay (ms) to align tracks that started at different
@@ -1421,6 +1530,10 @@ def cmd_mix(mic, system, out, mic_delay=0, sys_delay=0):
         return
     inputs = [t[0] for t in tracks]
     delays = [max(0, int(t[1])) for t in tracks]
+    if len(inputs) == 2 and mic_delay == 0 and sys_delay == 0:
+        # auto-detect only when caller didn't explicitly request a delay (tests/manual override)
+        md, sd, _ = estimate_start_offset_ms(inputs[0], inputs[1])
+        delays = [md, sd]
     Path(out).parent.mkdir(parents=True, exist_ok=True)
     try:
         if len(inputs) == 1:
