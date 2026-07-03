@@ -152,6 +152,8 @@ select:focus, input:focus, textarea:focus { outline: none; border-color: var(--a
 .btn.small { padding: 6px 12px; font-size: 13px; }
 .btn.ghost { background: transparent; }
 .btn.recording { background: var(--danger); border-color: var(--danger); color: #fff; }
+.btn.danger { border-color: var(--danger); color: var(--danger); }
+.btn.danger:hover { background: var(--danger); color: #fff; }
 
 .sys-status {
   margin-top: 12px; padding: 9px 12px; border-radius: 8px; font-size: 12.5px;

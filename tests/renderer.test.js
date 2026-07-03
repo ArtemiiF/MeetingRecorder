@@ -15,6 +15,9 @@ async function boot(apiOverrides = {}) {
   const { window } = dom;
   const handlers = {};
   window.alert = () => {};
+  // no destructive-confirm test wants an actual blocking dialog; default to "confirmed"
+  // so unrelated tests aren't affected, individual tests override to spy/decline.
+  window.confirm = () => true;
   // jsdom doesn't implement the Clipboard API — default no-op mock, tests override writeText to spy.
   window.navigator.clipboard = { writeText: async () => {} };
   window.api = Object.assign({
@@ -23,6 +26,10 @@ async function boot(apiOverrides = {}) {
     listDevices: async () => [{ index: 0, name: "MacBook Mic", default: true }],
     getPresets: async () => ({ presets: [{ name: "P", prompt: "x" }], defaultOutDir: "/tmp/out", hfToken: "", language: "ru" }),
     savePresets: async () => true,
+    resetApp: async () => ({
+      presets: [], defaultOutDir: "/tmp/out", hfToken: "", authorName: "Автор", glossary: "",
+      language: "ru", para: { root: "", folders: {} }, secretEncrypted: true,
+    }),
     listHistory: async () => [{ name: "2026-01-01", title: "Синк", note: "/o/meeting-x.md", audio: "/o/meeting-x.wav" }],
     readNote: async () => '---\ntitle: "T"\n---\n\n## Резюме\n\nтекст\n\n**[Спикер 1]**: привет',
     paraCreateVault: async () => ({ ok: true }),
@@ -1356,4 +1363,129 @@ test("recording indicator turns off on the mic-error path too", async () => {
   handlers.record({ event: "error", msg: "mic disconnected" });
   await tick(window);
   assert.ok($("recIndicator").classList.contains("hidden"));
+});
+
+// ── app reset ("настроить заново") ──────────────────────────────────────────
+test("reset: confirm() cancel → resetApp is never called, settings stay untouched", async () => {
+  let called = false;
+  const { window, $ } = await boot({
+    getPresets: async () => ({ presets: [], defaultOutDir: "/tmp", hfToken: "hf_x", language: "ru", authorName: "Ольга" }),
+    resetApp: async () => { called = true; return {}; },
+  });
+  window.confirm = () => false;
+  $("settingsOpen").click(); await tick(window);
+  $("resetAppBtn").click(); await tick(window);
+  assert.equal(called, false, "resetApp must not be called when confirm is declined");
+  assert.equal($("hfToken").value, "hf_x");
+  assert.equal($("authorName").value, "Ольга");
+});
+
+test("reset: confirmed → resetApp() called, init() rewrites fields to fresh defaults", async () => {
+  // getPresets always reads from the SAME mutable "virtualFile" that resetApp() writes —
+  // this is the real main-process coupling (reset-app persists a fresh presets.json;
+  // get-presets just reads whatever is on disk). The two mocks intentionally share state
+  // instead of each returning an independently hand-picked literal, so this test can't
+  // pass by asserting a post-reset shape that reset-app never actually produced.
+  let virtualFile = {
+    presets: [{ name: "P", prompt: "x" }], defaultOutDir: "/tmp/out", hfToken: "hf_old", language: "ru",
+    authorName: "Ольга", glossary: "Иван Петров, Mindbox",
+    para: { root: "/v", folders: { projects: "Projects", areas: "Areas", resources: "Resources", archives: "Archives" } },
+  };
+  const { window, $ } = await boot({
+    getPresets: async () => virtualFile,
+    resetApp: async () => {
+      virtualFile = {
+        presets: [], defaultOutDir: "/tmp/out", hfToken: "", authorName: "Автор", glossary: "",
+        language: "ru", para: { root: "", folders: {} },
+      };
+      return virtualFile;
+    },
+  });
+  window.document.querySelector('.topbtn[data-view="para"]').click();
+  await tick(window);
+  assert.notEqual($("paraWork").style.display, "none"); // configured before reset
+  $("settingsOpen").click(); await tick(window);
+  $("resetAppBtn").click();
+  await tick(window); await tick(window);
+  assert.equal($("hfToken").value, "");
+  assert.equal($("authorName").value, "Автор");
+  assert.equal($("glossary").value, DEFAULT_GLOSSARY);
+  assert.equal($("outDir").value, "/tmp/out");
+  // PARA's "Разбор" subtab was the one visible when reset ran → must flip to unconfigured
+  // immediately (init() alone doesn't touch it, see renderParaInboxView's own call site).
+  assert.notEqual($("paraSetup").style.display, "none");
+  assert.equal($("paraWork").style.display, "none");
+});
+
+test("reset: main refuses while busy (ok:false) → alert shown, settings left untouched", async () => {
+  let alerted = null;
+  const { window, $ } = await boot({
+    getPresets: async () => ({ presets: [], defaultOutDir: "/tmp", hfToken: "hf_x", language: "ru", authorName: "Ольга" }),
+    resetApp: async () => ({ ok: false, error: "Нельзя сбросить настройки во время записи или обработки" }),
+  });
+  window.alert = (msg) => { alerted = msg; };
+  $("settingsOpen").click(); await tick(window);
+  $("resetAppBtn").click();
+  await tick(window); await tick(window);
+  assert.equal(alerted, "Нельзя сбросить настройки во время записи или обработки");
+  assert.equal($("hfToken").value, "hf_x");        // init() never re-ran
+  assert.equal($("authorName").value, "Ольга");
+  assert.equal($("resetAppBtn").disabled, false);  // re-enabled after refusal
+});
+
+test("reset: clears paraInboxLoaded so a later Разбор view re-fetches (not left stale from before reset)", async () => {
+  let listHistoryCalls = 0;
+  const { window, $ } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru",
+      para: { root: "/v", folders: { projects: "Projects", areas: "Areas", resources: "Resources", archives: "Archives" } },
+    }),
+    listHistory: async () => { listHistoryCalls++; return [{ name: "2026-01-01", title: "T", note: "/n.md", audio: null }]; },
+    // Mock keeps para "configured" post-reset so this test isolates the paraInboxLoaded
+    // flag from the real product's para.root-clearing behaviour (covered separately above).
+    resetApp: async () => ({
+      presets: [], defaultOutDir: "/tmp", hfToken: "", authorName: "Автор", glossary: "", language: "ru",
+      para: { root: "/v", folders: { projects: "Projects", areas: "Areas", resources: "Resources", archives: "Archives" } },
+      secretEncrypted: true,
+    }),
+  });
+  listHistoryCalls = 0; // discard init()'s own refreshHistory() fetch — unrelated to PARA
+  window.document.querySelector('.topbtn[data-view="para"]').click();
+  await tick(window);
+  assert.equal(listHistoryCalls, 1); // initial auto-load
+  $("settingsOpen").click(); await tick(window);
+  $("resetAppBtn").click();
+  await tick(window); await tick(window);
+  // +1 from init()'s own unconditional refreshHistory() (unrelated to PARA, same as the
+  // "initial auto-load" call above), +1 from renderParaInboxView()'s refreshParaInbox() —
+  // the one this test targets, only reachable if paraInboxLoaded was actually cleared.
+  assert.equal(listHistoryCalls, 3);
+});
+
+// main.js requires("electron") and can't be loaded headless under plain node --test
+// (same reason as the other main.js checks above) — source-text assertions cover the
+// handler's actual guard/deletion logic that a jsdom renderer test can't reach.
+test("main.js: reset-app refuses while recordProc/tee/procProc/modelDlProc are active", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const resetApp = mainSrc.match(/ipcMain\.handle\("reset-app"[\s\S]*?\n\}\);/);
+  assert.ok(resetApp, "reset-app handler not found");
+  assert.match(resetApp[0], /recordProc \|\| tee \|\| procProc \|\| modelDlProc/);
+  assert.match(resetApp[0], /ok: false/);
+});
+
+test("main.js: reset-app persists a fresh presets.json with para.root='' (survives restart) instead of only deleting the file", () => {
+  // Regression guard for the exact bug the critic caught: an earlier version only
+  // unlinked presets.json and zeroed para.root on the in-memory RETURN VALUE, which
+  // onResetApp discards (it re-hydrates via init() → get-presets, not resetApp()'s
+  // return). With no write, get-presets' PRESETS_EXAMPLE fallback resurrected the
+  // owner's real para.root on every subsequent read, including after an app restart.
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const resetApp = mainSrc.match(/ipcMain\.handle\("reset-app"[\s\S]*?\n\}\);/)[0];
+  assert.match(resetApp, /saveToken\(""\)/);
+  assert.match(resetApp, /writeJsonAtomic\(PRESETS_FILE,/,
+    "reset-app must persist the cleared config to disk — relying on the PRESETS_EXAMPLE " +
+    "fallback (via unlink-only) resurrects the owner's real para.root on the next read");
+  assert.match(resetApp, /\.para\.root = ""/);
+  assert.doesNotMatch(resetApp, /fs\.unlinkSync\(PRESETS_FILE\)/,
+    "must not merely delete presets.json and lean on fallback resurrection");
 });

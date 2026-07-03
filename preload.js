@@ -5,6 +5,7 @@ contextBridge.exposeInMainWorld("api", {
   listDevices: () => ipcRenderer.invoke("list-devices"),
   getPresets: () => ipcRenderer.invoke("get-presets"),
   savePresets: (data) => ipcRenderer.invoke("save-presets", data),
+  resetApp: () => ipcRenderer.invoke("reset-app"),
   pickAudio: () => ipcRenderer.invoke("pick-audio"),
   pickOutDir: () => ipcRenderer.invoke("pick-out-dir"),
   startRecording: (opts) => ipcRenderer.invoke("start-recording", opts),

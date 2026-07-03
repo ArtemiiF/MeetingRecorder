@@ -247,7 +247,9 @@ function loadToken() {
   return "";
 }
 
-ipcMain.handle("get-presets", async () => {
+// Shared by get-presets and reset-app: read presets.json (or fall back to the
+// committed presets.example.json template), expand paths, merge in the token.
+function loadPresetsData() {
   let data;
   try {
     data = JSON.parse(fs.readFileSync(PRESETS_FILE, "utf-8"));
@@ -272,13 +274,43 @@ ipcMain.handle("get-presets", async () => {
   data.hfToken = token;
   data.secretEncrypted = safeStorage.isEncryptionAvailable(); // false → token stored reversibly
   return data;
-});
+}
+
+ipcMain.handle("get-presets", async () => loadPresetsData());
 
 ipcMain.handle("save-presets", async (_e, data) => {
   const { hfToken, ...rest } = data;     // never persist the token in presets.json
   saveToken(hfToken || "");
   writeJsonAtomic(PRESETS_FILE, rest);
   return true;
+});
+
+// Full app reset ("настроить заново"): writes a fresh presets.json (derived from the
+// committed template) with para.root forced empty, and wipes the HF-token secret.
+// Never touches index.db, the Obsidian vault, or notes/recordings — those are the
+// source of truth (see README).
+//
+// Deliberately WRITES presets.json rather than just deleting it: deleting alone would
+// leave get-presets' PRESETS_EXAMPLE fallback in play, and that template bakes in a
+// real owner path (presets.example.json's para.root) — every subsequent get-presets
+// call, including after an app restart, would resurrect it, so PARA would never
+// actually read as unconfigured. Writing the cleared config directly removes the
+// fallback from the picture entirely.
+ipcMain.handle("reset-app", async () => {
+  if (recordProc || tee || procProc || modelDlProc) {
+    return { ok: false, error: "Нельзя сбросить настройки во время записи или обработки" };
+  }
+  saveToken("");
+  let fresh;
+  try {
+    fresh = JSON.parse(fs.readFileSync(PRESETS_EXAMPLE, "utf-8"));
+  } catch {
+    fresh = { presets: [], defaultOutDir: DEFAULT_OUT, authorName: "Автор", glossary: "", language: "ru" };
+  }
+  if (fresh.para) fresh.para.root = "";
+  else fresh.para = { root: "", folders: {} };
+  writeJsonAtomic(PRESETS_FILE, fresh);
+  return loadPresetsData();
 });
 
 ipcMain.handle("pick-audio", async () => {

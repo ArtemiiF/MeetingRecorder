@@ -241,6 +241,34 @@ $("settingsClose").addEventListener("click", closeSettings);
 $("settingsOverlay").addEventListener("click", (e) => { if (e.target === $("settingsOverlay")) closeSettings(); });
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeSettings(); });
 
+// full reset ("настроить заново"): main rewrites presets.json to fresh defaults
+// (para.root forced empty) + wipes the HF-token secret, then this reuses init()
+// (already idempotent — re-fetches presets, rewrites state+DOM)
+// instead of app.relaunch(). renderParaInboxView() isn't covered by init() (it's only
+// called from subSwitchPara), so re-render it explicitly when the Разбор subtab is
+// the one currently visible; paraInboxLoaded is reset so a later vault setup re-scans
+// instead of trusting a stale disk read from before the reset.
+async function onResetApp() {
+  const btn = $("resetAppBtn");
+  if (btn.disabled) return;
+  const ok = confirm(
+    "Сбросить настройки приложения (HF-токен, пресеты, имя автора, словарь, путь к vault)? " +
+    "Заметки и записи в Obsidian не пострадают, индекс истории при необходимости пересоберётся."
+  );
+  if (!ok) return;
+  btn.disabled = true;
+  try {
+    const res = await window.api.resetApp();
+    if (res && res.ok === false) { alert(res.error); return; }
+    paraInboxLoaded = false;
+    await init();
+    if (!$("view-para").classList.contains("hidden") && paraSub === "inbox") renderParaInboxView();
+  } finally {
+    btn.disabled = false;
+  }
+}
+$("resetAppBtn").addEventListener("click", onResetApp);
+
 // ── init ─────────────────────────────────────────────────────────────────────
 async function init() {
   const devices = await window.api.listDevices();
