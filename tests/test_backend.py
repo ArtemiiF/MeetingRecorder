@@ -118,18 +118,19 @@ def test_combine_groups_by_speaker_via_overlap(pipe):
         seg("отлично", 4.0, 6.0),
     ]
     timeline = [(0.0, 4.0, "SPEAKER_00"), (4.0, 6.0, "SPEAKER_01")]
-    out = pipe.combine(segments, timeline)
+    out, label_map = pipe.combine(segments, timeline)
     assert "**[Спикер 1]**: привет как дела" in out   # friendly relabel of SPEAKER_00
     assert "**[Спикер 2]**: отлично" in out
     assert out.count("**[Спикер ") == 2
+    assert label_map == {"SPEAKER_00": "Спикер 1", "SPEAKER_01": "Спикер 2"}
 
 
 def test_combine_empty_timeline_returns_none(pipe):
-    assert pipe.combine([seg("x")], []) is None
+    assert pipe.combine([seg("x")], []) == (None, {})
 
 
 def test_combine_unknown_when_no_overlap(pipe):
-    out = pipe.combine([seg("hi", 100.0, 101.0)], [(0.0, 5.0, "SPEAKER_00")])
+    out, _label_map = pipe.combine([seg("hi", 100.0, 101.0)], [(0.0, 5.0, "SPEAKER_00")])
     assert "**[Неизвестно]**: hi" == out
 
 
@@ -371,7 +372,7 @@ def test_process_records_template_in_index_and_frontmatter(monkeypatch, tmp_path
     src = tmp_path / "in.wav"; src.write_bytes(b"x")
     p = backend.Pipeline(out_dir=str(out), diarize=False, template="Митинг", db_path=db, language="ru")
     monkeypatch.setattr(p, "convert_to_mono", lambda f: f)
-    monkeypatch.setattr(p, "remove_silence_vad", lambda f: f)
+    monkeypatch.setattr(p, "remove_silence_vad", lambda f: (f, None))
     monkeypatch.setattr(p, "transcribe", lambda f: {"segments": [seg("hi", 0, 2)], "text": "x"})
     monkeypatch.setattr(p, "summarize", lambda t, pr: None)
     capture(p.process, str(src), "prompt")
@@ -744,6 +745,300 @@ def test_cmd_mix_explicit_delay_skips_auto_detect(tmp_path, monkeypatch):
     assert not any("Автовыравнивание" in e.get("msg", "") for e in events if e["event"] == "log")
 
 
+# ── auto-«Я» author-speaker detection (Chunk 3, design doc variant b) ──────────
+
+# ── _shift_chunks (pure helper) ─────────────────────────────────────────────
+def test_shift_chunks_mid_track_shift():
+    chunks = [{"start": 1000, "end": 2000}]
+    out = backend._shift_chunks(chunks, delay_ms=100, rate=1000, max_len=10000)
+    assert out == [{"start": 900, "end": 1900}]
+
+
+def test_shift_chunks_clips_past_start():
+    chunks = [{"start": 50, "end": 150}]
+    out = backend._shift_chunks(chunks, delay_ms=100, rate=1000, max_len=10000)
+    assert out == [{"start": 0, "end": 50}]
+
+
+def test_shift_chunks_clips_past_end():
+    chunks = [{"start": 9000, "end": 9500}]
+    out = backend._shift_chunks(chunks, delay_ms=-600, rate=1000, max_len=10000)
+    assert out == [{"start": 9600, "end": 10000}]
+
+
+def test_shift_chunks_fully_out_of_range_dropped():
+    chunks = [{"start": 0, "end": 50}]
+    out = backend._shift_chunks(chunks, delay_ms=1000, rate=1000, max_len=10000)
+    assert out == []
+
+
+# ── _collect_chunks_np (pure helper — numpy analogue of silero's collect_chunks) ──
+def test_collect_chunks_np_concatenates_in_order():
+    import numpy as np
+    samples = np.arange(20, dtype=np.float64)
+    out = backend._collect_chunks_np([{"start": 0, "end": 3}, {"start": 10, "end": 13}], samples)
+    assert list(out) == [0, 1, 2, 10, 11, 12]
+
+
+def test_collect_chunks_np_empty_chunks_returns_empty_array():
+    import numpy as np
+    out = backend._collect_chunks_np([], np.arange(10, dtype=np.float64))
+    assert len(out) == 0
+
+
+# ── compute_speaker_dominance (pure helper) ─────────────────────────────────
+def test_compute_speaker_dominance_mic_dominant_segment():
+    import numpy as np
+    rate = 1000
+    mic = np.ones(5000) * 1.0
+    sysd = np.zeros(5000)
+    scores = backend.compute_speaker_dominance([(1.0, 3.0, "SPEAKER_00")], mic, sysd, rate=rate)
+    assert scores["SPEAKER_00"]["mic_ratio"] > 0.99
+    assert scores["SPEAKER_00"]["duration_s"] == pytest.approx(2.0)
+
+
+def test_compute_speaker_dominance_system_dominant_segment():
+    import numpy as np
+    rate = 1000
+    mic = np.zeros(5000)
+    sysd = np.ones(5000) * 1.0
+    scores = backend.compute_speaker_dominance([(1.0, 3.0, "SPEAKER_00")], mic, sysd, rate=rate)
+    assert scores["SPEAKER_00"]["mic_ratio"] < 0.01
+
+
+def test_compute_speaker_dominance_silent_segment_neutral_no_divide_by_zero():
+    import numpy as np
+    rate = 1000
+    mic = np.zeros(5000)
+    sysd = np.zeros(5000)
+    scores = backend.compute_speaker_dominance([(1.0, 3.0, "SPEAKER_00")], mic, sysd, rate=rate)
+    assert scores["SPEAKER_00"]["mic_ratio"] == 0.5
+    assert scores["SPEAKER_00"]["duration_s"] == pytest.approx(2.0)
+
+
+def test_compute_speaker_dominance_duration_weighting():
+    import numpy as np
+    rate = 1000
+    # segment A: 1s, mic loud / system silent (ratio 1.0); segment B: 4s, mic == system (ratio 0.5)
+    mic = np.concatenate([np.ones(1000) * 2.0, np.ones(4000) * 1.0])
+    sysd = np.concatenate([np.zeros(1000), np.ones(4000) * 1.0])
+    timeline = [(0.0, 1.0, "SPEAKER_00"), (1.0, 5.0, "SPEAKER_00")]
+    scores = backend.compute_speaker_dominance(timeline, mic, sysd, rate=rate)
+    # weighted mean = (1.0*1 + 0.5*4) / 5 = 0.6
+    assert scores["SPEAKER_00"]["mic_ratio"] == pytest.approx(0.6)
+    assert scores["SPEAKER_00"]["duration_s"] == pytest.approx(5.0)
+
+
+# ── pick_author_label (pure helper) ─────────────────────────────────────────
+def test_pick_author_label_clear_winner():
+    scores = {"SPEAKER_00": {"mic_ratio": 0.9, "duration_s": 10.0},
+              "SPEAKER_01": {"mic_ratio": 0.2, "duration_s": 10.0}}
+    assert backend.pick_author_label(scores) == "SPEAKER_00"
+
+
+def test_pick_author_label_tie_between_top_two_returns_none():
+    scores = {"SPEAKER_00": {"mic_ratio": 0.80, "duration_s": 10.0},
+              "SPEAKER_01": {"mic_ratio": 0.75, "duration_s": 10.0}}  # margin 0.05 < default 0.15
+    assert backend.pick_author_label(scores) is None
+
+
+def test_pick_author_label_below_min_ratio_returns_none():
+    scores = {"SPEAKER_00": {"mic_ratio": 0.5, "duration_s": 10.0},   # below default 0.65
+              "SPEAKER_01": {"mic_ratio": 0.1, "duration_s": 10.0}}
+    assert backend.pick_author_label(scores) is None
+
+
+def test_pick_author_label_winner_too_short_returns_none():
+    scores = {"SPEAKER_00": {"mic_ratio": 0.9, "duration_s": 1.0},    # below default 3.0s
+              "SPEAKER_01": {"mic_ratio": 0.2, "duration_s": 10.0}}
+    assert backend.pick_author_label(scores) is None
+
+
+def test_pick_author_label_empty_scores_returns_none():
+    assert backend.pick_author_label({}) is None
+
+
+# ── detect_author_speaker (Pipeline orchestration method) ───────────────────
+def test_detect_author_speaker_missing_mic_file_returns_none(tmp_path, pipe):
+    sysf = tmp_path / "system.wav"
+    make_wav(sysf, seconds=2.0)
+    timeline = [(0.0, 2.0, "SPEAKER_00"), (2.0, 4.0, "SPEAKER_01")]
+    assert pipe.detect_author_speaker(str(tmp_path / "missing-mic.wav"), str(sysf), None, timeline, {}) is None
+
+
+def test_detect_author_speaker_missing_system_file_returns_none(tmp_path, pipe):
+    mic = tmp_path / "mic.wav"
+    make_wav(mic, seconds=2.0)
+    timeline = [(0.0, 2.0, "SPEAKER_00"), (2.0, 4.0, "SPEAKER_01")]
+    assert pipe.detect_author_speaker(str(mic), str(tmp_path / "missing-sys.wav"), None, timeline, {}) is None
+
+
+def test_detect_author_speaker_single_speaker_returns_none(tmp_path, pipe):
+    mic, sysf = tmp_path / "mic.wav", tmp_path / "system.wav"
+    make_wav(mic, seconds=2.0)
+    make_wav(sysf, seconds=2.0)
+    timeline = [(0.0, 2.0, "SPEAKER_00")]  # only one distinct label — no contrast possible
+    assert pipe.detect_author_speaker(str(mic), str(sysf), None, timeline, {}) is None
+
+
+def test_detect_author_speaker_vad_collapse_picks_mic_dominant_speaker(monkeypatch, tmp_path, pipe):
+    # no mix-time delay — isolates the _shift_chunks/_collect_chunks_np collapse logic
+    monkeypatch.setattr(backend, "estimate_start_offset_ms", lambda m, s: (0, 0, 1.0))
+    import numpy as np
+    rate = 16000
+    loud = (np.ones(4 * rate) * 5000).astype("<i2")
+    quiet = np.zeros(4 * rate, dtype="<i2")
+    gap = np.zeros(2 * rate, dtype="<i2")
+    # raw layout: [0,4s) SPEAKER_00 region, [4,6s) VAD-removed silence gap, [6,10s) SPEAKER_01 region
+    mic_samples = np.concatenate([loud, gap, quiet])
+    sys_samples = np.concatenate([quiet, gap, loud])
+    mic_path, sys_path = tmp_path / "mic.wav", tmp_path / "system.wav"
+    make_wav_from_samples(mic_path, mic_samples, rate, 1)
+    make_wav_from_samples(sys_path, sys_samples, rate, 1)
+    vad_chunks = [{"start": 0, "end": 4 * rate}, {"start": 6 * rate, "end": 10 * rate}]
+    timeline = [(0.0, 4.0, "SPEAKER_00"), (4.0, 8.0, "SPEAKER_01")]  # collapsed timebase
+    label_map = {"SPEAKER_00": "Спикер 1", "SPEAKER_01": "Спикер 2"}
+    winner = pipe.detect_author_speaker(str(mic_path), str(sys_path), vad_chunks, timeline, label_map)
+    assert winner == "Спикер 1"
+
+
+def test_detect_author_speaker_no_vad_uses_full_track_delay_offset(monkeypatch, tmp_path, pipe):
+    # vad_chunks=None (VAD skipped/failed) — timeline is wall-clock, mic_delay applied as
+    # a plain leading-silence offset instead of a chunk-based collapse.
+    monkeypatch.setattr(backend, "estimate_start_offset_ms", lambda m, s: (1000, 0, 1.0))
+    import numpy as np
+    rate = 16000
+    loud = (np.ones(3 * rate) * 5000).astype("<i2")
+    mic_samples = np.concatenate([loud, np.zeros(6 * rate, dtype="<i2")])
+    sys_samples = np.concatenate([np.zeros(5 * rate, dtype="<i2"), (np.ones(4 * rate) * 5000).astype("<i2")])
+    mic_path, sys_path = tmp_path / "mic.wav", tmp_path / "system.wav"
+    make_wav_from_samples(mic_path, mic_samples, rate, 1)
+    make_wav_from_samples(sys_path, sys_samples, rate, 1)
+    timeline = [(0.0, 4.0, "SPEAKER_00"), (5.0, 9.0, "SPEAKER_01")]
+    label_map = {"SPEAKER_00": "Спикер 1", "SPEAKER_01": "Спикер 2"}
+    winner = pipe.detect_author_speaker(str(mic_path), str(sys_path), None, timeline, label_map)
+    assert winner == "Спикер 1"
+
+
+# ── process() integration: cache resume + speakers merge ────────────────────
+def test_process_existing_cache_without_vad_map_skips_recompute_no_crash(monkeypatch, tmp_path):
+    """A cache_dir created before this feature has mono.wav but no vad_map.json —
+    resuming from it must not crash and must pass vad_chunks=None (no recompute)."""
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    (cache / "mono.wav").write_bytes(b"x")
+    pipe = backend.Pipeline(out_dir=str(tmp_path / "v"), diarize=True, cache_dir=str(cache))
+    monkeypatch.setattr(pipe, "transcribe", lambda f: {"segments": [seg("hi", 0, 2)], "text": "hi"})
+    monkeypatch.setattr(pipe, "diarize", lambda f: [(0.0, 1.0, "SPEAKER_00"), (1.0, 2.0, "SPEAKER_01")])
+    monkeypatch.setattr(pipe, "combine", lambda segs, tl: (
+        "**[Спикер 1]**: hi", {"SPEAKER_00": "Спикер 1", "SPEAKER_01": "Спикер 2"}))
+    monkeypatch.setattr(pipe, "summarize", lambda t, p: None)
+    monkeypatch.setattr(pipe, "generate_title", lambda t: "")
+    monkeypatch.setattr(pipe, "infer_speaker_names", lambda t: {})
+    monkeypatch.setattr(pipe, "extract_actions", lambda t: {})
+    captured = {}
+
+    def fake_detect(mic_file, system_file, vad_chunks, timeline, label_map):
+        captured["vad_chunks"] = vad_chunks
+        return None
+
+    monkeypatch.setattr(pipe, "detect_author_speaker", fake_detect)
+    src = tmp_path / "in.wav"; src.write_bytes(b"x")
+    mic = tmp_path / "mic.wav"; mic.write_bytes(b"x" * 100)
+    sysf = tmp_path / "system.wav"; sysf.write_bytes(b"x" * 100)
+    events = capture(pipe.process, str(src), "prompt", mic_file=str(mic), system_file=str(sysf))
+    assert any(e["event"] == "done" for e in events)
+    assert "vad_chunks" in captured, "detect_author_speaker should still be invoked"
+    assert captured["vad_chunks"] is None
+
+
+def test_process_vad_map_cache_roundtrip_reuses_vad_chunks(monkeypatch, tmp_path):
+    cache = tmp_path / "cache"
+    pipe = backend.Pipeline(out_dir=str(tmp_path / "v"), diarize=True, cache_dir=str(cache))
+    calls = {"vad": 0, "detect_vad_chunks": []}
+    monkeypatch.setattr(pipe, "convert_to_mono", lambda f: f)
+
+    def fake_vad(f):
+        calls["vad"] += 1
+        return f, [{"start": 0, "end": 16000}]
+
+    monkeypatch.setattr(pipe, "remove_silence_vad", fake_vad)
+    monkeypatch.setattr(pipe, "transcribe", lambda f: {"segments": [seg("hi", 0, 2)], "text": "hi"})
+    monkeypatch.setattr(pipe, "diarize", lambda f: [(0.0, 1.0, "SPEAKER_00"), (1.0, 2.0, "SPEAKER_01")])
+    monkeypatch.setattr(pipe, "combine", lambda segs, tl: (
+        "**[Спикер 1]**: hi", {"SPEAKER_00": "Спикер 1", "SPEAKER_01": "Спикер 2"}))
+    monkeypatch.setattr(pipe, "summarize", lambda t, p: None)
+    monkeypatch.setattr(pipe, "generate_title", lambda t: "")
+    monkeypatch.setattr(pipe, "infer_speaker_names", lambda t: {})
+    monkeypatch.setattr(pipe, "extract_actions", lambda t: {})
+
+    def fake_detect(mic_file, system_file, vad_chunks, timeline, label_map):
+        calls["detect_vad_chunks"].append(vad_chunks)
+        return "Спикер 1" if vad_chunks else None
+
+    monkeypatch.setattr(pipe, "detect_author_speaker", fake_detect)
+    src = tmp_path / "in.wav"; src.write_bytes(b"x")
+    mic = tmp_path / "mic.wav"; mic.write_bytes(b"x" * 100)
+    sysf = tmp_path / "system.wav"; sysf.write_bytes(b"x" * 100)
+
+    events1 = capture(pipe.process, str(src), "prompt", mic_file=str(mic), system_file=str(sysf))
+    events2 = capture(pipe.process, str(src), "prompt", mic_file=str(mic), system_file=str(sysf))
+
+    assert calls["vad"] == 1, "second run should hit the mono.wav/vad_map.json cache, not recompute VAD"
+    assert calls["detect_vad_chunks"] == [[{"start": 0, "end": 16000}], [{"start": 0, "end": 16000}]]
+    done1 = [e for e in events1 if e["event"] == "done"][0]
+    done2 = [e for e in events2 if e["event"] == "done"][0]
+    assert done1["speakers"]["Спикер 1"] == pipe.AUTHOR_NAME == done2["speakers"]["Спикер 1"]
+
+
+def _mock_pipe_with_auto_label(monkeypatch, out_dir, inferred_speakers, do_summary=True, auto_label="Спикер 1"):
+    pipe = backend.Pipeline(out_dir=out_dir, diarize=True, do_summary=do_summary, author_name="Артемий")
+    monkeypatch.setattr(pipe, "convert_to_mono", lambda f: f)
+    monkeypatch.setattr(pipe, "remove_silence_vad", lambda f: (f, None))
+    monkeypatch.setattr(pipe, "transcribe", lambda f: {"segments": [seg("hi", 0, 2)], "text": "hi"})
+    monkeypatch.setattr(pipe, "diarize", lambda f: [(0.0, 1.0, "SPEAKER_00"), (1.0, 2.0, "SPEAKER_01")])
+    monkeypatch.setattr(pipe, "combine", lambda segs, tl: (
+        "**[Спикер 1]**: hi\n\n**[Спикер 2]**: pa",
+        {"SPEAKER_00": "Спикер 1", "SPEAKER_01": "Спикер 2"}))
+    monkeypatch.setattr(pipe, "detect_author_speaker", lambda *a, **k: auto_label)
+    monkeypatch.setattr(pipe, "summarize", lambda t, p: "# Сводка\n\n" + "итог " * 30)
+    monkeypatch.setattr(pipe, "generate_title", lambda t: "Тест")
+    monkeypatch.setattr(pipe, "infer_speaker_names", lambda t: inferred_speakers)
+    monkeypatch.setattr(pipe, "extract_actions", lambda t: {})
+    return pipe
+
+
+def test_process_auto_label_setdefault_does_not_clobber_llm_name(monkeypatch, tmp_path):
+    pipe = _mock_pipe_with_auto_label(monkeypatch, str(tmp_path / "v"),
+                                       inferred_speakers={"Спикер 1": "Алексей"})
+    src = tmp_path / "in.wav"; src.write_bytes(b"x")
+    mic = tmp_path / "mic.wav"; mic.write_bytes(b"x" * 100)
+    sysf = tmp_path / "system.wav"; sysf.write_bytes(b"x" * 100)
+    events = capture(pipe.process, str(src), "prompt", mic_file=str(mic), system_file=str(sysf))
+    done = [e for e in events if e["event"] == "done"][0]
+    assert done["speakers"]["Спикер 1"] == "Алексей"  # LLM name wins, not clobbered by the auto label
+
+
+def test_process_auto_label_fills_missing_llm_name(monkeypatch, tmp_path):
+    pipe = _mock_pipe_with_auto_label(monkeypatch, str(tmp_path / "v"), inferred_speakers={})
+    src = tmp_path / "in.wav"; src.write_bytes(b"x")
+    mic = tmp_path / "mic.wav"; mic.write_bytes(b"x" * 100)
+    sysf = tmp_path / "system.wav"; sysf.write_bytes(b"x" * 100)
+    events = capture(pipe.process, str(src), "prompt", mic_file=str(mic), system_file=str(sysf))
+    done = [e for e in events if e["event"] == "done"][0]
+    assert done["speakers"]["Спикер 1"] == "Артемий"
+
+
+def test_process_auto_label_applies_without_llm_summary(monkeypatch, tmp_path):
+    pipe = _mock_pipe_with_auto_label(monkeypatch, str(tmp_path / "v"), inferred_speakers={}, do_summary=False)
+    src = tmp_path / "in.wav"; src.write_bytes(b"x")
+    mic = tmp_path / "mic.wav"; mic.write_bytes(b"x" * 100)
+    sysf = tmp_path / "system.wav"; sysf.write_bytes(b"x" * 100)
+    events = capture(pipe.process, str(src), "prompt", mic_file=str(mic), system_file=str(sysf))
+    done = [e for e in events if e["event"] == "done"][0]
+    assert done["speakers"]["Спикер 1"] == "Артемий"
+
+
 def test_find_device_index_matches_substring(monkeypatch):
     devs = [
         {"name": "MacBook Mic", "maxInputChannels": 1},
@@ -758,7 +1053,7 @@ def test_find_device_index_matches_substring(monkeypatch):
 def test_cmd_process_uses_default_prompt_when_file_blank(monkeypatch, tmp_path):
     captured = {}
 
-    def fake_process(self, audio, prompt, keep_audio_in_obsidian=True):
+    def fake_process(self, audio, prompt, keep_audio_in_obsidian=True, mic_file=None, system_file=None):
         captured["prompt"] = prompt
 
     monkeypatch.setattr(backend.Pipeline, "process", fake_process)
@@ -768,7 +1063,8 @@ def test_cmd_process_uses_default_prompt_when_file_blank(monkeypatch, tmp_path):
     args = types.SimpleNamespace(
         prompt_file=str(blank), out_dir=str(tmp_path), engine="mlx",
         diarize=False, infile="x.wav", keep_audio=False, cache_dir=None,
-        language="ru", glossary="", summarize=True, template="", db=None)
+        language="ru", glossary="", summarize=True, template="", db=None,
+        mic=None, system=None, author_name="Автор")
     backend.cmd_process(args)
     assert "краткую структурированную сводку" in captured["prompt"]
 
@@ -776,13 +1072,14 @@ def test_cmd_process_uses_default_prompt_when_file_blank(monkeypatch, tmp_path):
 def test_cmd_process_forwards_user_prompt(monkeypatch, tmp_path):
     captured = {}
     monkeypatch.setattr(backend.Pipeline, "process",
-                        lambda self, a, p, keep_audio_in_obsidian=True: captured.update(p=p))
+                        lambda self, a, p, keep_audio_in_obsidian=True, mic_file=None, system_file=None: captured.update(p=p))
     pf = tmp_path / "p.txt"
     pf.write_text("МОЙ КАСТОМНЫЙ ПРОМПТ")
     args = types.SimpleNamespace(
         prompt_file=str(pf), out_dir=str(tmp_path), engine="mlx",
         diarize=True, infile="x.wav", keep_audio=False, cache_dir=None,
-        language="ru", glossary="", summarize=True, template="", db=None)
+        language="ru", glossary="", summarize=True, template="", db=None,
+        mic=None, system=None, author_name="Автор")
     backend.cmd_process(args)
     assert captured["p"] == "МОЙ КАСТОМНЫЙ ПРОМПТ"
 
@@ -798,7 +1095,7 @@ def test_diarize_skipped_without_hf_token(pipe):
 def _mock_pipe(monkeypatch, out_dir, transcribe_ret, summary_ret):
     pipe = backend.Pipeline(out_dir=out_dir, diarize=False)
     monkeypatch.setattr(pipe, "convert_to_mono", lambda f: f)
-    monkeypatch.setattr(pipe, "remove_silence_vad", lambda f: f)
+    monkeypatch.setattr(pipe, "remove_silence_vad", lambda f: (f, None))
     monkeypatch.setattr(pipe, "transcribe", lambda f: transcribe_ret)
     monkeypatch.setattr(pipe, "summarize", lambda t, p: summary_ret)
     monkeypatch.setattr(pipe, "generate_title", lambda t: "")           # no live LLM in tests
@@ -860,7 +1157,7 @@ def test_cache_resume_skips_transcribe_on_rerun(monkeypatch, tmp_path):
     def fresh_pipe():
         p = backend.Pipeline(out_dir=str(tmp_path / "v"), diarize=False, cache_dir=str(cache))
         monkeypatch.setattr(p, "convert_to_mono", lambda f: f)
-        monkeypatch.setattr(p, "remove_silence_vad", lambda f: f)
+        monkeypatch.setattr(p, "remove_silence_vad", lambda f: (f, None))
         monkeypatch.setattr(p, "summarize", lambda t, pr: None)
         return p
 
@@ -899,7 +1196,7 @@ def test_corrupt_cache_triggers_recompute(monkeypatch, tmp_path):
     (cache / "transcribe.json").write_text("CORRUPT", encoding="utf-8")
     p = backend.Pipeline(out_dir=str(tmp_path / "v"), diarize=False, cache_dir=str(cache))
     monkeypatch.setattr(p, "convert_to_mono", lambda f: f)
-    monkeypatch.setattr(p, "remove_silence_vad", lambda f: f)
+    monkeypatch.setattr(p, "remove_silence_vad", lambda f: (f, None))
     monkeypatch.setattr(p, "summarize", lambda t, pr: None)
     capture(p.process, str(src), "prompt")
     assert calls["n"] == 1  # corrupt cache was busted → transcription actually ran
@@ -911,7 +1208,7 @@ def test_transcript_only_skips_llm(monkeypatch, tmp_path):
     summarize_calls = {"n": 0}
     p = backend.Pipeline(out_dir=str(tmp_path / "v"), diarize=False, do_summary=False)
     monkeypatch.setattr(p, "convert_to_mono", lambda f: f)
-    monkeypatch.setattr(p, "remove_silence_vad", lambda f: f)
+    monkeypatch.setattr(p, "remove_silence_vad", lambda f: (f, None))
     monkeypatch.setattr(p, "transcribe", lambda f: {"segments": [seg("текст встречи", 0, 4)], "text": "x"})
     monkeypatch.setattr(p, "summarize", lambda t, pr: summarize_calls.__setitem__("n", 1))
     events = capture(p.process, str(src), "prompt")
@@ -1012,7 +1309,7 @@ def test_glossary_change_busts_transcribe_cache(monkeypatch, tmp_path):
         p = backend.Pipeline(out_dir=str(tmp_path / "v"), diarize=False, cache_dir=str(cache),
                              glossary=glossary)
         monkeypatch.setattr(p, "convert_to_mono", lambda f: f)
-        monkeypatch.setattr(p, "remove_silence_vad", lambda f: f)
+        monkeypatch.setattr(p, "remove_silence_vad", lambda f: (f, None))
         monkeypatch.setattr(p, "summarize", lambda t, pr: None)
         # non-empty glossary now flows through the `correct` stage's Stage-2 LLM
         # call; stub it out (real localhost:1234 would hit CI network timeouts) —
@@ -1036,11 +1333,12 @@ def test_cmd_process_forwards_glossary_to_pipeline(monkeypatch, tmp_path):
 
     monkeypatch.setattr(backend.Pipeline, "__init__", spy_init)
     monkeypatch.setattr(backend.Pipeline, "process",
-                        lambda self, a, p, keep_audio_in_obsidian=True: None)
+                        lambda self, a, p, keep_audio_in_obsidian=True, mic_file=None, system_file=None: None)
     args = types.SimpleNamespace(
         prompt_file=None, out_dir=str(tmp_path), engine="mlx",
         diarize=False, infile="x.wav", keep_audio=False, cache_dir=None,
-        language="ru", glossary="Иван Петров, Mindbox", summarize=True, template="", db=None)
+        language="ru", glossary="Иван Петров, Mindbox", summarize=True, template="", db=None,
+        mic=None, system=None, author_name="Автор")
     backend.cmd_process(args)
     assert captured["glossary"] == "Иван Петров, Mindbox"
 
@@ -1059,7 +1357,7 @@ def test_process_language_suffix_keeps_notes_separate(monkeypatch, tmp_path):
     def mk(lang):
         p = backend.Pipeline(out_dir=str(tmp_path / "v"), diarize=False, language=lang)
         monkeypatch.setattr(p, "convert_to_mono", lambda f: f)
-        monkeypatch.setattr(p, "remove_silence_vad", lambda f: f)
+        monkeypatch.setattr(p, "remove_silence_vad", lambda f: (f, None))
         monkeypatch.setattr(p, "transcribe", lambda f: {"segments": [seg("hi", 0, 2)], "text": "x"})
         monkeypatch.setattr(p, "summarize", lambda t, pr: None)
         return p
@@ -1635,11 +1933,11 @@ def _mock_pipe_diarized(monkeypatch, out_dir, formatted_transcript, inferred_spe
     """Like _mock_pipe but with diarization enabled and controllable speaker data."""
     pipe = backend.Pipeline(out_dir=out_dir, diarize=True)
     monkeypatch.setattr(pipe, "convert_to_mono", lambda f: f)
-    monkeypatch.setattr(pipe, "remove_silence_vad", lambda f: f)
+    monkeypatch.setattr(pipe, "remove_silence_vad", lambda f: (f, None))
     monkeypatch.setattr(pipe, "transcribe",
                         lambda f: {"segments": [seg("hi", 0, 2)], "text": "hi"})
     monkeypatch.setattr(pipe, "diarize", lambda f: [{"start": 0, "end": 2, "speaker": "SPEAKER_00"}])
-    monkeypatch.setattr(pipe, "combine", lambda segs, tl: formatted_transcript)
+    monkeypatch.setattr(pipe, "combine", lambda segs, tl: (formatted_transcript, {}))
     monkeypatch.setattr(pipe, "summarize", lambda t, p: "# Сводка\n\n" + "итог " * 30)
     monkeypatch.setattr(pipe, "generate_title", lambda t: "Тестовая встреча")
     monkeypatch.setattr(pipe, "infer_speaker_names", lambda t: inferred_speakers)
@@ -1714,7 +2012,7 @@ def test_process_no_summary_mode_skips_actions_call(monkeypatch, tmp_path):
     calls = {"n": 0}
     p = backend.Pipeline(out_dir=str(tmp_path / "v"), diarize=False, do_summary=False)
     monkeypatch.setattr(p, "convert_to_mono", lambda f: f)
-    monkeypatch.setattr(p, "remove_silence_vad", lambda f: f)
+    monkeypatch.setattr(p, "remove_silence_vad", lambda f: (f, None))
     monkeypatch.setattr(p, "transcribe", lambda f: {"segments": [seg("текст встречи", 0, 4)], "text": "x"})
     monkeypatch.setattr(p, "extract_actions", lambda t: calls.__setitem__("n", calls["n"] + 1))
     events = capture(p.process, str(src), "prompt")
@@ -1928,7 +2226,7 @@ def test_correct_stage_skipped_when_glossary_empty_byte_identical_no_llm_call(mo
     calls = {"n": 0}
     p = backend.Pipeline(out_dir=str(tmp_path / "v"), diarize=False, glossary="")
     monkeypatch.setattr(p, "convert_to_mono", lambda f: f)
-    monkeypatch.setattr(p, "remove_silence_vad", lambda f: f)
+    monkeypatch.setattr(p, "remove_silence_vad", lambda f: (f, None))
     monkeypatch.setattr(p, "transcribe", lambda f: {"segments": [seg("привет Онтон встреча", 0, 3)], "text": "x"})
     monkeypatch.setattr(p, "summarize", lambda t, pr: None)
     monkeypatch.setattr(p, "correct_glossary_llm",
@@ -1945,7 +2243,7 @@ def test_correct_stage_degrades_to_stage1_only_when_llm_down(monkeypatch, tmp_pa
     src = tmp_path / "in.wav"; src.write_bytes(b"x")
     p = backend.Pipeline(out_dir=str(tmp_path / "v"), diarize=False, glossary="Антон")
     monkeypatch.setattr(p, "convert_to_mono", lambda f: f)
-    monkeypatch.setattr(p, "remove_silence_vad", lambda f: f)
+    monkeypatch.setattr(p, "remove_silence_vad", lambda f: (f, None))
     monkeypatch.setattr(p, "transcribe", lambda f: {"segments": [seg("привет Онтон тут", 0, 3)], "text": "x"})
     monkeypatch.setattr(p, "summarize", lambda t, pr: None)
     monkeypatch.setattr(p, "correct_glossary_llm", lambda segs, terms: (None, 0))  # LM Studio down
@@ -1972,7 +2270,7 @@ def test_correct_stage_cache_honored_on_retry_skips_llm_recompute(monkeypatch, t
         p = backend.Pipeline(out_dir=str(tmp_path / "v"), diarize=False,
                               cache_dir=str(cache), glossary="Антон")
         monkeypatch.setattr(p, "convert_to_mono", lambda f: f)
-        monkeypatch.setattr(p, "remove_silence_vad", lambda f: f)
+        monkeypatch.setattr(p, "remove_silence_vad", lambda f: (f, None))
         monkeypatch.setattr(p, "transcribe", lambda f: {"segments": [seg("привет Онтон тут", 0, 3)], "text": "x"})
         monkeypatch.setattr(p, "summarize", lambda t, pr: None)
         return p
@@ -2093,7 +2391,7 @@ def test_correct_cache_recomputes_when_transcribe_output_changes_underneath_it(m
         p = backend.Pipeline(out_dir=str(tmp_path / "v"), diarize=False,
                               cache_dir=str(cache), glossary="Антон")
         monkeypatch.setattr(p, "convert_to_mono", lambda f: f)
-        monkeypatch.setattr(p, "remove_silence_vad", lambda f: f)
+        monkeypatch.setattr(p, "remove_silence_vad", lambda f: (f, None))
         monkeypatch.setattr(p, "summarize", lambda t, pr: None)
         return p
 

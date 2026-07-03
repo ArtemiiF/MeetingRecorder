@@ -531,7 +531,8 @@ def gate_llm_correction(original, corrected, terms):
 # ──────────────────────────────────────────────────────────────────────────
 class Pipeline:
     def __init__(self, out_dir, engine="mlx", diarize=True, cache_dir=None,
-                 language="ru", do_summary=True, template="", db_path=None, glossary=""):
+                 language="ru", do_summary=True, template="", db_path=None, glossary="",
+                 author_name="Автор"):
         self.TEMPLATE = template
         self.db_path = db_path
         self.OBSIDIAN_PATH = Path(out_dir)
@@ -542,6 +543,7 @@ class Pipeline:
         self.LANGUAGE = language          # "ru" | "en" | "auto"
         self.DO_SUMMARY = do_summary
         self.GLOSSARY = glossary          # comma/newline-separated terms biasing Whisper initial_prompt
+        self.AUTHOR_NAME = author_name    # display name seeded for the auto-detected mic-dominant speaker
         self.HF_TOKEN = os.environ.get("HF_TOKEN")
         # cache for resumable stages (heavy work — convert/transcribe/diarize).
         self.cache_dir = Path(cache_dir) if cache_dir else None
@@ -610,6 +612,11 @@ class Pipeline:
             return audio_file
 
     def remove_silence_vad(self, audio_file):
+        """Returns (vad_file, vad_chunks). vad_chunks is the raw speech-timestamp map
+        (samples @16kHz, pre-collapse) — persisted by the caller as vad_map.json so the
+        auto-«Я» author-detection stage can later re-derive the same collapse for
+        mic.wav/system.wav (see detect_author_speaker). None when VAD found nothing
+        or failed — the original (uncollapsed) audio_file is returned in that case."""
         try:
             import torch
             log("🔇 Удаляю тишину (Silero VAD)...")
@@ -624,15 +631,16 @@ class Pipeline:
             )
             if not ts:
                 log("⚠️ Речь не обнаружена VAD")
-                return audio_file
+                return audio_file, None
             speech = collect_chunks(ts, wav)
             vad_file = audio_file.replace(".wav", "_vad.wav")
             save_audio(vad_file, speech, sampling_rate=16000)
             log(f"✅ Тишина удалена: {len(wav)/16000:.1f}с → {len(speech)/16000:.1f}с")
-            return vad_file
+            vad_chunks = [{"start": int(t["start"]), "end": int(t["end"])} for t in ts]
+            return vad_file, vad_chunks
         except Exception as e:
             log(f"⚠️ VAD не сработал: {e}")
-            return audio_file
+            return audio_file, None
 
     # ── transcription ─────────────────────────────────────────────────────
     CONTEXT_PROMPT_RU = (
@@ -863,8 +871,12 @@ class Pipeline:
             return None
 
     def combine(self, segments, timeline):
+        """Returns (formatted, label_map) — label_map maps raw diarization labels
+        (SPEAKER_00, ...) to their friendly first-seen-order names, exposed so
+        detect_author_speaker can translate its raw-label winner into the same
+        friendly label used in `formatted`/`speakers`."""
         if not timeline:
-            return None
+            return None, {}
         # friendly labels: SPEAKER_00 → "Спикер 1" in first-seen order (renameable in UI)
         label_map = {}
 
@@ -893,7 +905,70 @@ class Pipeline:
                 buf.append(text)
         if buf:
             result.append(f"**[{friendly(current)}]**: {' '.join(buf)}")
-        return "\n\n".join(result) if result else None
+        return ("\n\n".join(result) if result else None), label_map
+
+    # ── auto-«Я»: detect which diarized speaker is the recording author ────────
+    def detect_author_speaker(self, mic_file, system_file, vad_chunks, timeline, label_map):
+        """Guess which diarization label is the author, from mic-vs-system RMS
+        dominance (the author's voice bleeds into mic but not into system audio).
+        Orchestration only (I/O + logging) — all decisions are delegated to the pure
+        helpers above. Returns a FRIENDLY label (via label_map) or None; never
+        mutates `speakers` itself — that merge happens in process()."""
+        def nonempty(p):
+            return bool(p) and Path(p).exists() and Path(p).stat().st_size > 44  # WAV header alone is 44 bytes
+
+        if not nonempty(mic_file) or not nonempty(system_file):
+            log("Авто-«Я»: mic/system дорожка недоступна — пропуск")
+            return None
+        raw_labels = {spk for _, _, spk in timeline}
+        if len(raw_labels) < 2:
+            log("Авто-«Я»: меньше 2 спикеров в диаризации — пропуск")
+            return None
+
+        # Same call cmd_mix made at mix-time (mic_delay=sys_delay=0 defaults) —
+        # deterministic given the same two files, see estimate_start_offset_ms.
+        mic_delay_ms, sys_delay_ms, _ = estimate_start_offset_ms(mic_file, system_file)
+
+        def full_track(path):
+            with wave.open(str(path), "rb") as w:
+                duration_s = w.getnframes() / float(w.getframerate())
+            return _read_mono_decimated(path, duration_s + 1.0, 16000)
+
+        try:
+            mic_raw = full_track(mic_file)
+            sys_raw = full_track(system_file)
+        except Exception as e:
+            log(f"Авто-«Я»: ошибка чтения WAV ({e}) — пропуск")
+            return None
+
+        if vad_chunks:
+            # Same chunk list used to collapse `mono`, shifted per-track by that
+            # track's own mix-time delay — lands mic/system in mono's exact
+            # collapsed timebase (see _shift_chunks docstring).
+            mic_chunks = _shift_chunks(vad_chunks, mic_delay_ms, 16000, len(mic_raw))
+            sys_chunks = _shift_chunks(vad_chunks, sys_delay_ms, 16000, len(sys_raw))
+            mic_collapsed = _collect_chunks_np(mic_chunks, mic_raw)
+            sys_collapsed = _collect_chunks_np(sys_chunks, sys_raw)
+        else:
+            # VAD was skipped/failed -> mono was never collapsed -> timeline is
+            # already wall-clock. Align the raw tracks with a plain leading-silence
+            # offset instead (no collapse needed).
+            import numpy as np
+            mic_pad = int(round(mic_delay_ms * 16000 / 1000))
+            sys_pad = int(round(sys_delay_ms * 16000 / 1000))
+            mic_collapsed = np.concatenate([np.zeros(mic_pad), mic_raw]) if mic_pad else mic_raw
+            sys_collapsed = np.concatenate([np.zeros(sys_pad), sys_raw]) if sys_pad else sys_raw
+
+        scores = compute_speaker_dominance(timeline, mic_collapsed, sys_collapsed, rate=16000)
+        for label, s in scores.items():
+            log(f"Авто-«Я»: {label} mic_ratio={s['mic_ratio']:.2f} длительность={s['duration_s']:.1f}с")
+        winner = pick_author_label(scores)
+        if not winner:
+            log("Авто-«Я»: неоднозначно/нет уверенного лидера — метка не проставлена")
+            return None
+        friendly = label_map.get(winner, winner)
+        log(f"Авто-«Я»: спикер «{friendly}» определён как автор (доминирование в mic)")
+        return friendly
 
     def add_timestamps(self, segments):
         out = []
@@ -1157,7 +1232,8 @@ class Pipeline:
         )
 
     # ── main entry ──────────────────────────────────────────────────────────
-    def process(self, audio_file, user_prompt, keep_audio_in_obsidian=True):
+    def process(self, audio_file, user_prompt, keep_audio_in_obsidian=True,
+                mic_file=None, system_file=None):
         self.OBSIDIAN_PATH.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")  # seconds → no same-minute collision
 
@@ -1187,12 +1263,23 @@ class Pipeline:
             except Exception as e:
                 log(f"⚠️ Не скопировал аудио в Obsidian: {e}")
         mono_cache = self._cache("mono.wav")
+        vad_map_cache = self._cache("vad_map.json")
         if mono_cache and mono_cache.exists():
             mono = str(mono_cache)
+            # existing caches from before this feature never wrote vad_map.json —
+            # vad_chunks stays None, auto-«Я» silently skips, nothing recomputes.
+            vad_chunks = None
+            if vad_map_cache and vad_map_cache.exists():
+                vad_chunks = (self._cache_read(vad_map_cache) or {}).get("chunks")
             stage_end("convert", "ok", "из кеша")
         else:
             mono = self.convert_to_mono(audio_file)
-            mono = self.remove_silence_vad(mono)
+            mono, vad_chunks = self.remove_silence_vad(mono)
+            if vad_map_cache:
+                try:
+                    self._cache_write(vad_map_cache, {"chunks": vad_chunks})
+                except Exception:
+                    pass
             if mono_cache:
                 try:
                     self._copy_atomic(mono, mono_cache)
@@ -1261,23 +1348,27 @@ class Pipeline:
 
         # ── 3. diarize (cache: diarize.json) ──────────────────────────────
         formatted = None
+        label_map = {}
+        auto_label = None
         dj = self._cache("diarize.json")
         if self.USE_DIARIZATION and segments:
             stage("diarize", "Определение спикеров")
             cached_d = self._cache_read(dj) if (dj and dj.exists()) else None
             if cached_d:
                 timeline = cached_d["timeline"]
-                formatted = self.combine(segments, timeline)
+                formatted, label_map = self.combine(segments, timeline)
                 stage_end("diarize", "ok", "из кеша")
             else:
                 timeline = self.diarize(mono)
                 if timeline:
                     if dj:
                         self._cache_write(dj, {"timeline": timeline})
-                    formatted = self.combine(segments, timeline)
+                    formatted, label_map = self.combine(segments, timeline)
                     stage_end("diarize", "ok")
                 else:
                     stage_end("diarize", "fail", "недоступна — спикеры по таймкодам")
+            if formatted and mic_file and system_file:
+                auto_label = self.detect_author_speaker(mic_file, system_file, vad_chunks, timeline, label_map)
         else:
             reason = "выключено" if not self.USE_DIARIZATION else "нет сегментов"
             stage_end("diarize", "skip", reason)
@@ -1318,6 +1409,11 @@ class Pipeline:
             stage_end("meta", "ok", title or f"{len(speakers)} имён")
         else:
             stage_end("meta", "skip", "нужен LLM")
+        # auto-«Я»: seed the mic-dominant speaker's display name, but never clobber an
+        # LLM-inferred real name for that same label — setdefault, not assignment.
+        # Fires even with DO_SUMMARY off, since this needs no LLM call.
+        if auto_label:
+            speakers.setdefault(auto_label, self.AUTHOR_NAME)
         # Build speakers display string for frontmatter:
         # - if LLM inferred names: use the inferred display names (dict values)
         # - if diarization ran but no names inferred: use the raw speaker labels
@@ -1377,9 +1473,11 @@ def cmd_process(args):
         prompt = "Сделай краткую структурированную сводку этой встречи в Markdown."
     pipe = Pipeline(out_dir=args.out_dir, engine=args.engine, diarize=args.diarize,
                     cache_dir=args.cache_dir, language=args.language, do_summary=args.summarize,
-                    template=args.template, db_path=args.db, glossary=args.glossary)
+                    template=args.template, db_path=args.db, glossary=args.glossary,
+                    author_name=args.author_name)
     try:
-        pipe.process(args.infile, prompt, keep_audio_in_obsidian=args.keep_audio)
+        pipe.process(args.infile, prompt, keep_audio_in_obsidian=args.keep_audio,
+                     mic_file=args.mic, system_file=args.system)
     except Exception as e:
         import traceback
         emit("error", msg=f"{e}")
@@ -1453,6 +1551,99 @@ def _read_mono_decimated(path, max_seconds, target_rate):
         samples = resample_poly(samples, frac.numerator, frac.denominator)
 
     return samples
+
+
+# Thresholds for auto-«Я» author-speaker detection below (§ pick_author_label).
+# HYPO defaults, not calibrated against real recordings — same documented status as
+# _XCORR_MIN_CONFIDENCE above. Every run (including no-ops) logs the computed
+# ratio/margin so real data exists to tune these later (see detect_author_speaker).
+_AUTHOR_MIN_RATIO = 0.65
+_AUTHOR_MIN_MARGIN = 0.15
+_AUTHOR_MIN_DURATION_S = 3.0
+
+
+def _shift_chunks(chunks, delay_ms, rate, max_len):
+    """Shift each {start,end} sample-index chunk by -delay_ms (in samples @ rate);
+    clip to [0, max_len]; drop chunks that become empty. Pure, no I/O.
+
+    Used to re-express VAD chunk boundaries — captured in the aligned mixed/mono
+    timeline — back into a single raw track's own (unaligned) sample-index space,
+    given that track's mix-time delay. `collect_chunks`-style concatenation of the
+    *same* chunk list (shifted per-track) as was used to collapse `mono` reproduces
+    mic/system arrays in mono's exact collapsed timebase (see detect_author_speaker)."""
+    shift = int(round(delay_ms * rate / 1000))
+    out = []
+    for ch in chunks:
+        start = max(0, min(ch["start"] - shift, max_len))
+        end = max(0, min(ch["end"] - shift, max_len))
+        if end > start:
+            out.append({"start": start, "end": end})
+    return out
+
+
+def _collect_chunks_np(chunks, samples):
+    """Concatenate the given {start,end} sample-index slices from `samples` in order.
+    Equivalent to silero-vad's own `collect_chunks`, but operating on a plain numpy
+    array — this module reads mic/system tracks via `_read_mono_decimated` (numpy),
+    not torch tensors, so reusing silero's tensor-only helper here would mean loading
+    the whole VAD model via torch.hub just to concatenate slices. Pure, no I/O."""
+    import numpy as np
+    if not chunks:
+        return np.array([], dtype=np.float64)
+    return np.concatenate([samples[c["start"]:c["end"]] for c in chunks])
+
+
+def _track_rms(samples, start_s, end_s, rate):
+    """RMS of samples[start_s*rate : end_s*rate]; 0.0 for an empty/out-of-range slice.
+    Pure, no I/O."""
+    import numpy as np
+    i0 = max(0, int(round(start_s * rate)))
+    i1 = max(0, int(round(end_s * rate)))
+    if i1 <= i0 or i0 >= len(samples):
+        return 0.0
+    seg = samples[i0:i1]
+    if seg.size == 0:
+        return 0.0
+    return float(np.sqrt(np.mean(np.square(seg))))
+
+
+def compute_speaker_dominance(timeline, mic_collapsed, sys_collapsed, rate=16000):
+    """Per raw diarization label: duration-weighted mean of mic_rms/(mic_rms+sys_rms)
+    across that label's segments, plus total duration. A segment silent on both
+    tracks contributes a neutral 0.5 ratio (no divide-by-zero) but still counts
+    toward duration. Pure, no I/O.
+    Returns {raw_label: {"mic_ratio": float, "duration_s": float}}."""
+    scores = {}
+    for start, end, label in timeline:
+        dur = end - start
+        if dur <= 0:
+            continue
+        mic_rms = _track_rms(mic_collapsed, start, end, rate)
+        sys_rms = _track_rms(sys_collapsed, start, end, rate)
+        total = mic_rms + sys_rms
+        ratio = 0.5 if total <= 0.0 else mic_rms / total
+        entry = scores.setdefault(label, {"mic_ratio": 0.0, "duration_s": 0.0})
+        new_duration = entry["duration_s"] + dur
+        entry["mic_ratio"] = (entry["mic_ratio"] * entry["duration_s"] + ratio * dur) / new_duration
+        entry["duration_s"] = new_duration
+    return scores
+
+
+def pick_author_label(scores, min_ratio=_AUTHOR_MIN_RATIO, min_margin=_AUTHOR_MIN_MARGIN,
+                       min_duration_s=_AUTHOR_MIN_DURATION_S):
+    """Winner-take-all with a confidence AND a margin gate: top scorer must clear
+    min_ratio, beat the runner-up by min_margin, and have >= min_duration_s of speech.
+    Any failure -> None (ambiguous / no signal). Pure, no I/O — caller logs the
+    outcome (see detect_author_speaker)."""
+    if not scores:
+        return None
+    ranked = sorted(scores.items(), key=lambda kv: kv[1]["mic_ratio"], reverse=True)
+    top_label, top = ranked[0]
+    if top["duration_s"] < min_duration_s or top["mic_ratio"] < min_ratio:
+        return None
+    if len(ranked) > 1 and (top["mic_ratio"] - ranked[1][1]["mic_ratio"]) < min_margin:
+        return None
+    return top_label
 
 
 def estimate_start_offset_ms(mic_path, system_path, max_offset_ms=3000, corr_window_s=15,
@@ -2331,6 +2522,9 @@ def main():
     p_proc.add_argument("--summarize", type=str2bool, default=True)
     p_proc.add_argument("--template", default="")
     p_proc.add_argument("--db", default=None)
+    p_proc.add_argument("--mic", default=None)  # mic.wav, for auto-«Я» author-speaker detection
+    p_proc.add_argument("--system", default=None)  # system.wav, ditto
+    p_proc.add_argument("--author-name", dest="author_name", default="Автор")
 
     p_hist = sub.add_parser("history")
     p_hist.add_argument("--out-dir", dest="out_dir", default=default_obsidian)

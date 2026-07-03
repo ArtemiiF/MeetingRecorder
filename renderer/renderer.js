@@ -333,6 +333,8 @@ window.api.onRecordEvent((ev) => {
     appendLog(ev.msg);
   } else if (ev.event === "recorded") {
     state.recordedFile = ev.file;
+    state.recordedMic = ev.mic;
+    state.recordedSystem = ev.system;
     state.hasRun = false; // new recording → hide retry/fresh until processed
     setProcessingUI(false);
     const parts = [];
@@ -472,6 +474,11 @@ async function startProcessing(fresh) {
     glossary: state.glossary,
     summarize: !$("noSummary").checked,
     template: (state.presets[state.currentPreset] || {}).name || "",
+    // auto-«Я»: only meaningful for the just-recorded mic/system pair — import mode
+    // has neither, so these stay undefined and the backend sees identical argv to today.
+    ...(state.mode === "record" ? {
+      micFile: state.recordedMic, systemFile: state.recordedSystem, authorName: state.authorName,
+    } : {}),
   });
   if (res && res.ok === false) {
     appendLog("❌ " + res.error);

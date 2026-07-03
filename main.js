@@ -437,7 +437,7 @@ function cacheDirFor(audioFile) {
 
 // processing pipeline
 ipcMain.handle("process-audio", async (_e, opts) => {
-  const { audioFile, prompt, diarize, outDir, engine, hfToken, fresh, language, glossary, summarize, template } = opts;
+  const { audioFile, prompt, diarize, outDir, engine, hfToken, fresh, language, glossary, summarize, template, micFile, systemFile, authorName } = opts;
   if (procProc) return { ok: false, error: "Обработка уже идёт" };
 
   const cacheDir = cacheDirFor(audioFile);
@@ -462,6 +462,10 @@ ipcMain.handle("process-audio", async (_e, opts) => {
     "--template", template || "",
     "--db", DB_PATH,
   ];
+  // record-mode-only auto-«Я» inputs (import mode never sends these — identical argv to today).
+  if (micFile) args.push("--mic", micFile);
+  if (systemFile) args.push("--system", systemFile);
+  if (authorName) args.push("--author-name", authorName);
   // UI-entered token wins over a shell env one; empty → backend skips diarization.
   const extraEnv = hfToken && hfToken.trim() ? { HF_TOKEN: hfToken.trim() } : {};
   let doneNote = null; // captured from the "done" event, used to auto-index on close

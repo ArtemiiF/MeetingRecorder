@@ -714,6 +714,37 @@ test("glossary is forwarded to processAudio when running", async () => {
   assert.equal(sent.glossary, "Иван Петров, Mindbox");
 });
 
+// ── auto-«Я»: micFile/systemFile/authorName plumbing ────────────────────────
+test("auto-«Я» inputs (micFile/systemFile/authorName) are forwarded to processAudio in record mode", async () => {
+  let sent = null;
+  const { window, $, handlers } = await boot({
+    getPresets: async () => ({
+      presets: [{ name: "P", prompt: "x" }], defaultOutDir: "/tmp", hfToken: "", language: "ru", authorName: "Алёна",
+    }),
+    processAudio: async (opts) => { sent = opts; return { ok: true }; },
+  });
+  await tick(window);
+  handlers.record({ event: "recorded", file: "/tmp/mixed.wav", mic: "/tmp/m.wav", system: "/tmp/s.wav", tracks: 2 });
+  $("runBtn").click();
+  await tick(window);
+  assert.ok(sent, "processAudio was not called");
+  assert.equal(sent.micFile, "/tmp/m.wav");
+  assert.equal(sent.systemFile, "/tmp/s.wav");
+  assert.equal(sent.authorName, "Алёна");
+});
+
+test("auto-«Я» inputs are absent when processing an imported file (History → Переобработать)", async () => {
+  let sent = null;
+  const { window, $ } = await boot({ processAudio: async (opts) => { sent = opts; return { ok: true }; } });
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  $("historyList").querySelector(".rail-item").click(); await tick(window);
+  $("noteView").querySelector("#nvReprocess").click(); await tick(window);
+  assert.ok(sent, "processAudio was not called");
+  assert.equal(sent.micFile, undefined);
+  assert.equal(sent.systemFile, undefined);
+  assert.equal(sent.authorName, undefined);
+});
+
 test("'это я' button fills speaker row input with authorName; Apply sends it through rename API", async () => {
   let renamed = null;
   const { window, $, handlers } = await boot({
