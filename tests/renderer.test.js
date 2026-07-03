@@ -846,22 +846,77 @@ test("Модели: per-row retry button only renders for needed (not cached, no
   assert.ok($("model-row-vad").querySelector(".pf-retry"), "needed row must offer a retry button");
 });
 
-test("Модели: 'Скачать все' click calls downloadModels and disables buttons until download-closed", async () => {
+test("Модели: 'Скачать недостающие' click calls downloadModels and disables buttons until download-closed", async () => {
   let called = null;
   const { window, $, handlers } = await boot({
     downloadModels: async (opts) => { called = opts; return { ok: true }; },
   });
   $("settingsOpen").click();
   await tick(window);
-  $("modelsDownloadAll").click();
+  $("modelsDownloadMissing").click();
   await tick(window);
   assert.deepEqual(called, {});
-  assert.equal($("modelsDownloadAll").disabled, true);
+  assert.equal($("modelsRefresh").disabled, true);
+  assert.equal($("modelsDownloadMissing").disabled, true);
   assert.equal($("model-row-vad").querySelector(".pf-retry").disabled, true);
 
   handlers.modelDownload({ event: "download-closed", code: 0, canceled: false });
   await tick(window);
-  assert.equal($("modelsDownloadAll").disabled, false);
+  assert.equal($("modelsRefresh").disabled, false);
+  assert.equal($("modelsDownloadMissing").disabled, false);
+});
+
+test("Модели: all models cached → no bulk download button, header stays 'Проверить'", async () => {
+  const { window, $ } = await boot({
+    getModels: async () => ([
+      { id: "whisper", label: "MLX Whisper (large-v3-turbo)", size_mb: 1500, needs_token: false, cached: true, locked: false },
+      { id: "vad", label: "Silero VAD", size_mb: 35, needs_token: false, cached: true, locked: false },
+    ]),
+  });
+  $("settingsOpen").click();
+  await tick(window);
+  assert.ok($("modelsDownloadMissing").classList.contains("hidden"), "nothing missing — bulk button must stay hidden");
+  assert.match($("modelsRefresh").textContent, /Проверить/);
+});
+
+test("Модели: only locked models remain uncached → no bulk download button either", async () => {
+  const { window, $ } = await boot({
+    getModels: async () => ([
+      { id: "whisper", label: "MLX Whisper (large-v3-turbo)", size_mb: 1500, needs_token: false, cached: true, locked: false },
+      { id: "diarization", label: "Диаризация (pyannote)", size_mb: 31, needs_token: true, cached: false, locked: true },
+    ]),
+  });
+  $("settingsOpen").click();
+  await tick(window);
+  assert.ok($("modelsDownloadMissing").classList.contains("hidden"), "locked-only rows must not trigger the bulk button");
+});
+
+test("Модели: some models missing → bulk download button shows with the missing count", async () => {
+  const { window, $ } = await boot({
+    getModels: async () => ([
+      { id: "whisper", label: "MLX Whisper (large-v3-turbo)", size_mb: 1500, needs_token: false, cached: false, locked: false },
+      { id: "vad", label: "Silero VAD", size_mb: 35, needs_token: false, cached: false, locked: false },
+      { id: "diarization", label: "Диаризация (pyannote)", size_mb: 31, needs_token: true, cached: false, locked: true },
+    ]),
+  });
+  $("settingsOpen").click();
+  await tick(window);
+  const bulkBtn = $("modelsDownloadMissing");
+  assert.ok(!bulkBtn.classList.contains("hidden"), "two missing, non-locked models — bulk button must show");
+  assert.match(bulkBtn.textContent, /2/);
+});
+
+test("Модели: during a download run, 'Проверить' + bulk + per-row retry buttons are all disabled", async () => {
+  const { window, $ } = await boot({
+    downloadModels: async () => new Promise(() => {}), // never resolves — simulates an in-flight download
+  });
+  $("settingsOpen").click();
+  await tick(window);
+  $("modelsDownloadMissing").click();
+  await tick(window);
+  assert.equal($("modelsRefresh").disabled, true);
+  assert.equal($("modelsDownloadMissing").disabled, true);
+  assert.equal($("model-row-vad").querySelector(".pf-retry").disabled, true);
 });
 
 test("Модели: per-row retry passes only that model's id", async () => {
@@ -897,10 +952,11 @@ test("Модели: failed download-models call surfaces the error and re-enable
   window.alert = (msg) => { alerted = msg; };
   $("settingsOpen").click();
   await tick(window);
-  $("modelsDownloadAll").click();
+  $("modelsDownloadMissing").click();
   await tick(window);
   assert.equal(alerted, "Мало места на диске");
-  assert.equal($("modelsDownloadAll").disabled, false);
+  assert.equal($("modelsRefresh").disabled, false);
+  assert.equal($("modelsDownloadMissing").disabled, false);
 });
 
 // ── main.js model-download child-process wiring ─────────────────────────────

@@ -159,18 +159,33 @@ function renderModelsList(items) {
     }
     wrap.appendChild(row);
   });
+
+  // Bulk "download missing" button only makes sense while something is actually
+  // missing (not cached, not locked-behind-a-token) — all-cached and all-locked
+  // states both hide it, matching the per-row retry's own visibility rule above.
+  const missing = items.filter((item) => !item.cached && !item.locked);
+  const bulkBtn = $("modelsDownloadMissing");
+  if (missing.length) {
+    bulkBtn.textContent = `⬇ Скачать недостающие (${missing.length})`;
+    bulkBtn.classList.remove("hidden");
+    bulkBtn.disabled = modelDlRunning;
+  } else {
+    bulkBtn.classList.add("hidden");
+  }
 }
 
 async function refreshModels() {
   const wrap = $("modelsList");
   wrap.innerHTML = '<p class="hint">Проверяю…</p>';
+  $("modelsDownloadMissing").classList.add("hidden");
   const items = await window.api.getModels();
   renderModelsList(items);
 }
 
 function setModelsDownloadUI(running) {
   modelDlRunning = running;
-  $("modelsDownloadAll").disabled = running;
+  $("modelsRefresh").disabled = running;
+  $("modelsDownloadMissing").disabled = running;
   document.querySelectorAll("#modelsList .pf-retry").forEach((b) => { b.disabled = running; });
 }
 
@@ -184,7 +199,8 @@ async function startModelDownload(only) {
     alert(res.error);
   }
 }
-$("modelsDownloadAll").addEventListener("click", () => startModelDownload());
+$("modelsRefresh").addEventListener("click", refreshModels);
+$("modelsDownloadMissing").addEventListener("click", () => startModelDownload());
 
 // Per-row live status while a download batch runs — ev.stage is "model:<id>"
 // (backend.py's stage/stage_end vocabulary, same as the pipeline's own stages).
