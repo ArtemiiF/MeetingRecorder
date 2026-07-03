@@ -1,41 +1,43 @@
-# HANDOFF — состояние на 2026-07-03 (поздний вечер)
+# HANDOFF — состояние на 2026-07-03 (ночь)
 
-Electron-приложение записи встреч: mic+system (AudioTee) / импорт → `backend.py` (JSON-stdout): mono/VAD → MLX Whisper → коррекция терминов → pyannote → LLM-сводка (LM Studio `:1234`) → `.md` в Obsidian. Архитектура и хранение — см. README.md. Три вида: 🎙 Запись · 📚 История · 🗂 PARA.
+Electron-приложение записи встреч: mic+system (AudioTee) / импорт → `backend.py` (JSON-stdout): mono/VAD → MLX Whisper → коррекция терминов → pyannote → LLM-сводка (LM Studio `:1234`) → `.md` в Obsidian. Архитектура и хранение — см. README.md. Четыре вида: 🎙 Запись · 📚 История · 🗂 PARA · 📖 Словарь.
 
-## Что доехало до main (сессия «добить хвосты» 2026-07-03, `main` = `c43c892`)
+## Что доехало до main (сессия 2026-07-03, `main` = `75414d0`)
 
-Четыре чанка, каждый своей веткой через критик-гейт:
+Одиннадцать чанков за день, каждый своей веткой через критик-гейт. Утро (см. git log): 4 минорки критика (`d8c33c8`+`554b4b1`), mix offset xcorr (`468ade2`), auto-«Я» из mic-дорожки (`385ae7d`), секция «Модели» в настройках (`c43c892`) + UX-правка кнопок «Проверить»/«Скачать недостающие» (`23437be`).
 
-- **4 минорки критик-ревью** (`d8c33c8` + `554b4b1`): cap 300 строк у `#paraReindexLog`; тест-замок на string-match degraded-бейджа backend.py↔main.js (реворд теперь валит тест); kill авто-индекс-процесса в `before-quit` + guard от respawn queued-рана при выходе (`quitting`-флаг); лог `optimize`-фейла FTS5 вместо молчаливого pass.
-- **Mix start-offset alignment** (`468ade2`): PCM кросс-корреляция mic/system в `cmd_mix` — `estimate_start_offset_ms` (scipy fft-correlate, окно 15 c, decimate до 4 кГц, поиск ±3 c), результат напрямую в `delays` → `build_mix_filter` → ffmpeg `adelay` позже стартовавшей дорожке (CLI-флаги `--mic-delay-ms`/`--sys-delay-ms` — ручной override, nonzero отключает авто-детект). Lazy-import scipy/numpy → no-shift при ImportError; порог уверенности `_XCORR_MIN_CONFIDENCE=0.15` → no-shift с логом. Гейт: авто-детект только когда CLI-делеи не заданы. Timestamp-подход НЕ использовать — уже пробовался и откачен (см. коммент main.js у spawn record: pyaudio startup jitter).
-- **Auto-«Я» из mic-дорожки** (`385ae7d`, разблокирован VAD time-warp): VAD chunk-карта сохраняется в `vad_map.json` (сайдкар в cache_dir, вне hash-валидации этапов); mic/system схлопываются той же картой в timeline диаризации (`_shift_chunks` + `_collect_chunks_np`, numpy-native — без torch.hub); per-сегмент RMS → `compute_speaker_dominance` (duration-weighted mic-ratio) → `pick_author_label` (min_ratio + margin + min_duration, ≥2 спикеров) → `speakers.setdefault(label, authorName)` в meta-этапе — LLM-имя и ручной rename не перетираются. Плюмбинг: `p_proc --mic/--system/--author-name`, renderer шлёт их только в record-режиме — import/transcript-only/diarize-off byte-identical прежнему поведению. Старые кеши без vad_map.json → скип с логом, без пересчёта.
+Вечер — вкладка Словарь + продиктованный бэклог владельца (митинг-заметка meeting-2026-07-03-123128):
 
-- **Секция «Модели» в настройках** (`c43c892`): инвентарь ML-моделей пайплайна (MLX Whisper large-v3-turbo ~1.5 ГБ, Silero VAD, pyannote diarization-3.1 + 2 суб-модели — LLM/embedding исключены, это LM Studio) со статусом ✅/⬇/🔒 per-model (чистая инспекция кеша, без сети) + кнопка «Скачать все». Backend: `models` / `download-models --only` (stage/stage_end-события, GatedRepoError per-model — один фейл не валит батч, lazy-импорты). main.js: отдельный слот `modelDlProc` + свой IPC-канал, взаимоисключение с `procProc` в обе стороны, kill в `before-quit`, cancel = SIGTERM (HF-кеш content-addressed → докачка при повторе; VAD partial-dir wipe-before-refetch). HF-токен только через env (не argv). `diskGuardVerdict` параметризован (refuseBytes/warnBytes; дефолты рекординга байт-в-байт), для скачивания порог 2/3 ГиБ по volume `~/.cache`.
+- **📖 Словарь — 4-я вкладка** (`c43af24`): глоссарий уехал из карточки Запись в свой top-level таб; `DEFAULT_GLOSSARY` (48 IT-терминов) подставляется при пустом словаре (in-memory, паттерн authorName; пустой = «дай дефолты» — решение владельца «заполним распространёнными»). Дубликат списка в тесте — golden value, править оба.
+- **Настройки-консолидация** (`72bb84f`): HF-токен, authorName и outDir («куда сохранять») уехали в settings overlay (секции «Личные данные», «Куда сохранять»). outDir авто-следует за vault (`<vault>/Meetings`) при создании vault, если не задан вручную (`outDirCustom`); ручной выбор всегда побеждает; без vault — прежний дефолт. Старые заметки не переносятся.
+- **Батч-импорт + индикатор записи** (`6af8fd0`): multi-select файлов → последовательная очередь (renderer-side, procProc один слот; статусы ⏳/🔵/🟢/🔴/⏹; фейл элемента → продолжаем, cancel → стоп всего батча; re-pick заменяет очередь); reprocessHistory = очередь-из-1. Пульсирующая красная точка на кнопке 🎙 в topnav — видна с любой вкладки, все 3 сайта state.recording (start/stop/mic-error).
+- **История-фиксы** (`439d25e`): сортировка по `stamp` (время записи; mtime телепортировал старые заметки наверх после rename спикеров), кап limit=200 снят (все заметки); календарь-фильтр был логически корректен — исправлены anchored-причины «не работает»: `color-scheme: dark` + `input[type=date]` в тему (пикеры были светлые); поиск словоформ — `ruStem` суффикс-стриппинг (проблема↔проблемы, миграция↔миграций; англ. термины не затронуты), без новых deps; «авто» удалён из языков записи (коэрция stored "auto"→"ru"), в фильтре истории «авто» остался для старых заметок.
+- **PARA-UX** (`0022d5b`): спиннер на разбираемой строке при «разобрать все»; root cause стирания разобранных — renderParaInboxView перезапрашивал inbox при каждом входе → `paraInboxLoaded`-флаг (fetch один раз; сброс при vault create/reset); разобранные серые+disabled и живут до «Обновить»/перезапуска; кнопка «Обновить» (⟳, disabled мид-батч); ручное «Разложить» тоже серит (не удаляет); дерево Хранилища collapsed по умолчанию.
+- **Сброс приложения** (`75414d0`): кнопка «Сбросить и настроить заново» (danger, секция «Сброс» в настройках) — confirm → ПИШЕТ свежий presets.json из example с `para.root=""` (НЕ unlink — критик-reject поймал воскрешение root из example-fallback; writeJsonAtomic) + saveToken(""), busy-guard по 4 процессам; заметки/записи/index.db не трогаются; после сброса init() + PARA re-render.
 
 ## Тесты
 
-`npm test` = JS `node --test` (98/98) + PY pytest (204/204). Всё замокано — живой e2e RAG/коррекции/auto-«Я» не гонялся; первый реальный запуск = smoke + калибровка порогов auto-«Я» (лог пишет per-label mic_ratio/duration — по нему тюнить `_AUTHOR_MIN_*`).
+`npm test` = JS `node --test` (134/134) + PY pytest (206/206). Всё замокано — живой e2e (RAG, коррекция, auto-«Я», скачивание моделей, батч-импорт, reset) не гонялся; первый реальный запуск = smoke.
 
-## Решения владельца (2026-06-30, действуют)
+## Решения владельца (действуют)
 
-- Live-транскрипт при записи — не нужен. Календарь — выкинут. Live smoke — сознательно пропущен.
-- Невалидная PARA-категория от LLM → `error`, не нормализация.
-- `reasoning_content` в тело заметки — никогда; для schema-валидируемого JSON salvage допустим.
+- 2026-06-30: live-транскрипт не нужен; календарь-интеграция выкинута; live smoke пропущен; невалидная PARA-категория → error; reasoning_content в заметку — никогда.
+- 2026-07-03 (митинг-заметка): шаблоны и языки остаются; «авто» из языков убрать; хранилище свёрнуто по умолчанию; пустой словарь = заполнить распространёнными терминами.
 
 ## Хвосты (TODO.md — источник правды)
 
-- Не-блокеры критик-гейтов 2026-07-03 (полный список — TODO.md): VAD-ветка auto-«Я» при nonzero delay клипует граничный chunk у нуля (fails safe); int8 для 8-бит WAV (латентно); download во время записи не исключён; ASSOC-допущения model-download проверить на первом холодном скачивании.
-- Отложено владельцем: см. TODO.md.
+- Не-блокеры критик-гейтов (полный список TODO.md): VAD-clip auto-«Я» при nonzero delay; int8 8-бит WAV; download-во-время-записи не исключён; ASSOC-допущения model-download; ruStem расширяет матчи на 1-3-буквенных запросах; renderRail O(n) без виртуализации (тысячи заметок); retry/fresh после батча действуют на последний элемент; ручной «Разложить» на ещё-не-обработанной строке может гоняться с батчем; optimistic paraInboxLoaded при упавшем fetch (recovery = «Обновить»); reset: saveToken до writeJsonAtomic (disk-full → токен стёрт, пресеты нет — консистентно с save-presets).
+- Калибровка HYPO-порогов auto-«Я» и xcorr по первому реальному прогону (лог пишет per-label mic_ratio/duration).
 
 ## Git / процесс
 
-- Remote `ArtemiiF/MeetingRecorder` (private, solo). `main` = origin/main = `c43c892`. Фича-ветки сессии можно прюнить.
-- Push в main разрешён владельцем **только через критик-гейт**: критик по `git diff origin/main...HEAD` → marker `printf 'verdict: approve\ndiff-sha256: %s\n'` где sha = `printf '%s' "$(git diff origin/main...HEAD)" | sha256sum` (именно `printf '%s'` — прямой pipe оставляет \n → mismatch) → push отдельной командой. Marker одноразовый, TTL 300 c.
+- Remote `ArtemiiF/MeetingRecorder` (private, solo). `main` = origin/main = `75414d0`. Фича-ветки спрюнены.
+- Push в main разрешён владельцем **только через критик-гейт**: критик по `git diff origin/main...HEAD` → marker `printf 'verdict: approve\ndiff-sha256: %s\n'` где sha = `printf '%s' "$(git diff origin/main...HEAD)" | sha256sum` (именно `printf '%s'` — прямой pipe оставляет \n → mismatch) → push отдельной командой. Marker одноразовый, TTL 300 c. Marker и push НЕ объединять в одну команду (hook проверяет до выполнения).
 - Agent-report'ы (`.claude/agent-reports/`) — untracked, в коммиты не включать.
 - Фиксы предсуществующих поломок — отдельным чанком от фичи.
 
 ## Окружение
 
-- macOS: `timeout` НЕТ (только `gtimeout`); pytest через `../venv/bin/python -m pytest tests/ -q`; venv: numpy 2.4.4, scipy 1.17.1.
+- macOS: `timeout` НЕТ (только `gtimeout`); pytest через `../venv/bin/python -m pytest tests/ -q`; venv: numpy 2.4.4, scipy 1.17.1. Bare `grep` в этой среде мангуется rtk-хуком — субагентам использовать `rtk proxy grep`.
 - LM Studio `:1234`: reasoning-модель (max_tokens ≥1500-2500) + embedding-модель для вектора; без неё keyword-only + warn.
-- Preflight-панель проверяет LM Studio / разрешения / ffmpeg / модель / HF-токен / embedding.
+- Preflight-панель: LM Studio / разрешения / ffmpeg / модель / HF-токен / embedding. Секция «Модели»: статус кеша + докачка (MLX Whisper ~1.5 ГБ, Silero VAD, pyannote 3.1 ×3).
