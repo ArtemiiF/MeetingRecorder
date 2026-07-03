@@ -173,6 +173,7 @@ select:focus, input:focus, textarea:focus { outline: none; border-color: var(--a
 .pf-dot.warn { background: #f5a623; }
 .pf-label { flex: 0 0 220px; }
 .pf-detail { color: var(--muted); }
+.pf-retry { margin-left: auto; }
 
 /* settings gear + modal */
 .settings-btn { margin-left: auto; background: transparent; border: none; color: var(--muted);

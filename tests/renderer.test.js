@@ -35,6 +35,13 @@ async function boot(apiOverrides = {}) {
     stopRecording: async () => ({ ok: true }),
     processAudio: async () => ({ ok: true }),
     cancelProcess: async () => ({ ok: true }),
+    getModels: async () => ([
+      { id: "whisper", label: "MLX Whisper (large-v3-turbo)", size_mb: 1500, needs_token: false, cached: true, locked: false },
+      { id: "vad", label: "Silero VAD", size_mb: 35, needs_token: false, cached: false, locked: false },
+      { id: "diarization", label: "Диаризация (pyannote)", size_mb: 31, needs_token: true, cached: false, locked: true },
+    ]),
+    downloadModels: async () => ({ ok: true }),
+    cancelModelDownload: async () => ({ ok: true }),
     paraExtract: async () => ({ content: "x" }),
     paraReindex: async () => ({ indexed: 0, skipped: 0, removed: 0 }),
     paraSearch: async (_root, _messages) => ({ found: false, answer: "Не нашёл по этому вопросу записей в заметках.", citations: [] }),
@@ -42,6 +49,7 @@ async function boot(apiOverrides = {}) {
     onRecordEvent: (cb) => { handlers.record = cb; },
     onProcessEvent: (cb) => { handlers.process = cb; },
     onParaReindexEvent: (cb) => { handlers.reindex = cb; },
+    onModelDownloadEvent: (cb) => { handlers.modelDownload = cb; },
   }, apiOverrides);
 
   window.eval(RENDERER);
@@ -810,4 +818,116 @@ test("PARA chat degraded badge: backend.py's log wording matches main.js's exact
     backendSrc.includes(marker),
     `backend.py no longer emits the exact string main.js matches on: ${JSON.stringify(marker)}`
   );
+});
+
+// ── settings "Модели" section (model inventory + pre-download) ─────────────
+test("Модели: renders one pf-row per model with cached/needed/locked status + detail text", async () => {
+  const { window, $ } = await boot();
+  $("settingsOpen").click();
+  await tick(window);
+  const whisper = $("model-row-whisper");
+  const vad = $("model-row-vad");
+  const diar = $("model-row-diarization");
+  assert.ok(whisper && vad && diar, "expected one row per model id");
+  assert.ok(whisper.querySelector(".pf-dot").classList.contains("ok"));
+  assert.match(whisper.querySelector(".pf-detail").textContent, /скачано/);
+  assert.ok(vad.querySelector(".pf-dot").classList.contains("warn"));
+  assert.match(vad.querySelector(".pf-detail").textContent, /нужно скачать \(~35 МБ\)/);
+  assert.ok(diar.querySelector(".pf-dot").classList.contains("bad"));
+  assert.match(diar.querySelector(".pf-detail").textContent, /нужен HF-токен/);
+});
+
+test("Модели: per-row retry button only renders for needed (not cached, not locked) rows", async () => {
+  const { window, $ } = await boot();
+  $("settingsOpen").click();
+  await tick(window);
+  assert.equal($("model-row-whisper").querySelector(".pf-retry"), null, "cached row must not offer retry");
+  assert.equal($("model-row-diarization").querySelector(".pf-retry"), null, "locked row must not offer retry");
+  assert.ok($("model-row-vad").querySelector(".pf-retry"), "needed row must offer a retry button");
+});
+
+test("Модели: 'Скачать все' click calls downloadModels and disables buttons until download-closed", async () => {
+  let called = null;
+  const { window, $, handlers } = await boot({
+    downloadModels: async (opts) => { called = opts; return { ok: true }; },
+  });
+  $("settingsOpen").click();
+  await tick(window);
+  $("modelsDownloadAll").click();
+  await tick(window);
+  assert.deepEqual(called, {});
+  assert.equal($("modelsDownloadAll").disabled, true);
+  assert.equal($("model-row-vad").querySelector(".pf-retry").disabled, true);
+
+  handlers.modelDownload({ event: "download-closed", code: 0, canceled: false });
+  await tick(window);
+  assert.equal($("modelsDownloadAll").disabled, false);
+});
+
+test("Модели: per-row retry passes only that model's id", async () => {
+  let called = null;
+  const { window, $ } = await boot({
+    downloadModels: async (opts) => { called = opts; return { ok: true }; },
+  });
+  $("settingsOpen").click();
+  await tick(window);
+  $("model-row-vad").querySelector(".pf-retry").click();
+  await tick(window);
+  assert.deepEqual(called, { only: ["vad"] });
+});
+
+test("Модели: stage/stage_end events update the row's dot + detail live", async () => {
+  const { window, $, handlers } = await boot();
+  $("settingsOpen").click();
+  await tick(window);
+  handlers.modelDownload({ event: "stage", stage: "model:vad", msg: "Скачиваю Silero VAD (~35 МБ)…" });
+  assert.ok($("model-row-vad").querySelector(".pf-dot").classList.contains("warn"));
+  assert.match($("model-row-vad").querySelector(".pf-detail").textContent, /скачивается/);
+
+  handlers.modelDownload({ event: "stage_end", stage: "model:vad", status: "ok", msg: "Скачано" });
+  assert.ok($("model-row-vad").querySelector(".pf-dot").classList.contains("ok"));
+  assert.match($("model-row-vad").querySelector(".pf-detail").textContent, /Скачано/);
+});
+
+test("Модели: failed download-models call surfaces the error and re-enables buttons", async () => {
+  const { window, $ } = await boot({
+    downloadModels: async () => ({ ok: false, error: "Мало места на диске" }),
+  });
+  let alerted = null;
+  window.alert = (msg) => { alerted = msg; };
+  $("settingsOpen").click();
+  await tick(window);
+  $("modelsDownloadAll").click();
+  await tick(window);
+  assert.equal(alerted, "Мало места на диске");
+  assert.equal($("modelsDownloadAll").disabled, false);
+});
+
+// ── main.js model-download child-process wiring ─────────────────────────────
+// main.js requires("electron") and can't be loaded headless under plain node --test
+// (same reason lib/mainutil.js was extracted) — source-text checks, same idiom as
+// the "PARA chat degraded badge" test above, cover what a jsdom renderer test can't:
+// the main-process IPC handlers themselves.
+test("main.js: cancel-model-download kills modelDlProc via the same SIGTERM pattern as cancel-process", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const cancelProcess = mainSrc.match(/ipcMain\.handle\("cancel-process"[\s\S]*?\n\}\);/);
+  const cancelModelDl = mainSrc.match(/ipcMain\.handle\("cancel-model-download"[\s\S]*?\n\}\);/);
+  assert.ok(cancelProcess, "cancel-process handler not found");
+  assert.ok(cancelModelDl, "cancel-model-download handler not found");
+  assert.match(cancelProcess[0], /procProc\.kill\("SIGTERM"\)/);
+  assert.match(cancelModelDl[0], /modelDlProc\.kill\("SIGTERM"\)/);
+});
+
+test("main.js: download-models and process-audio refuse to run while the other is active", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const downloadModels = mainSrc.match(/ipcMain\.handle\("download-models"[\s\S]*?\n\}\);/)[0];
+  const processAudio = mainSrc.match(/ipcMain\.handle\("process-audio"[\s\S]*?\n\}\);/)[0];
+  assert.match(downloadModels, /if \(procProc\)/);
+  assert.match(processAudio, /if \(modelDlProc\)/);
+});
+
+test("main.js: modelDlProc is killed in before-quit alongside the other tracked children", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const beforeQuit = mainSrc.match(/app\.on\("before-quit"[\s\S]*?\n\}\);/)[0];
+  assert.match(beforeQuit, /modelDlProc/);
 });

@@ -2471,11 +2471,129 @@ def cmd_search(root, db_path, query=None, embed_model=None, messages=None):
 def cmd_preflight():
     """Readiness checks the GUI shows before recording (cheap, no network from here)."""
     import shutil
-    model_dir = Path.home() / ".cache/huggingface/hub/models--mlx-community--whisper-large-v3-turbo"
     emit("preflight",
          ffmpeg=shutil.which("ffmpeg") is not None,
-         whisper_cached=model_dir.exists(),
+         whisper_cached=_WHISPER_MODEL_DIR.exists(),
          hf_token=bool(os.environ.get("HF_TOKEN")))
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Model inventory — settings "Модели" section (cache-inspection + on-demand
+# pre-download for the offline pipeline's ML models). LLM/embedding model are
+# LM Studio's concern and already surfaced separately by cmd_preflight above.
+# ──────────────────────────────────────────────────────────────────────────
+_WHISPER_REPO_ID = "mlx-community/whisper-large-v3-turbo"
+_WHISPER_MODEL_DIR = Path.home() / ".cache/huggingface/hub/models--mlx-community--whisper-large-v3-turbo"
+_VAD_JIT_PATH = Path.home() / ".cache/torch/hub/snakers4_silero-vad_master/src/silero_vad/data/silero_vad.jit"
+_VAD_REPO_DIR = Path.home() / ".cache/torch/hub/snakers4_silero-vad_master"
+# All three must be present for diarization to actually work — pyannote's own
+# config.yaml (read directly on this machine) declares the segmentation +
+# wespeaker sub-models the top pipeline repo pulls in.
+_PYANNOTE_REPO_IDS = [
+    "pyannote/speaker-diarization-3.1",
+    "pyannote/segmentation-3.0",
+    "pyannote/wespeaker-voxceleb-resnet34-LM",
+]
+
+
+def _hf_cache_dir(repo_id):
+    return Path.home() / ".cache/huggingface/hub" / ("models--" + repo_id.replace("/", "--"))
+
+
+# needs_token is a structural property of the model (pyannote's repos require
+# accepting gated-repo terms no matter what) — NOT whether a token happens to
+# be configured right now. Whether the row should show 🔒 (locked) is computed
+# per-call in cmd_models_status from the live HF_TOKEN env var, same source
+# cmd_preflight already reads.
+MODEL_SPECS = [
+    {"id": "whisper", "label": "MLX Whisper (large-v3-turbo)", "size_mb": 1500, "needs_token": False},
+    {"id": "vad", "label": "Silero VAD", "size_mb": 35, "needs_token": False},
+    {"id": "diarization", "label": "Диаризация (pyannote)", "size_mb": 31, "needs_token": True},
+]
+
+
+def _model_cached(model_id):
+    """Precise per-model cache check — a dir-only check would report "cached"
+    on a partial/interrupted download, so each model checks the specific file
+    (VAD) or full set of sub-repo dirs (diarization) it actually needs."""
+    if model_id == "whisper":
+        return _WHISPER_MODEL_DIR.exists()
+    if model_id == "vad":
+        return _VAD_JIT_PATH.exists()
+    if model_id == "diarization":
+        return all(_hf_cache_dir(r).exists() for r in _PYANNOTE_REPO_IDS)
+    return False
+
+
+def cmd_models_status():
+    """Cache-inspection ONLY — no network, mirrors cmd_preflight's contract.
+    Emits one `models` event with a list of per-model status dicts."""
+    has_token = bool(os.environ.get("HF_TOKEN"))
+    items = []
+    for spec in MODEL_SPECS:
+        cached = _model_cached(spec["id"])
+        locked = spec["needs_token"] and not cached and not has_token
+        items.append({**spec, "cached": cached, "locked": locked})
+    emit("models", items=items)
+
+
+def _download_model(model_id):
+    """Download one model's weights. Raises on failure (caller catches).
+    No fine-grained byte progress is available from huggingface_hub 1.10.2's
+    snapshot_download (tqdm_class override only) or torch.hub (single-zip
+    fetch, no progress hook) — coarse per-model stage/stage_end only,
+    matching this codebase's existing granularity (no byte-level bar anywhere)."""
+    if model_id == "whisper":
+        from huggingface_hub import snapshot_download
+        snapshot_download(repo_id=_WHISPER_REPO_ID)
+    elif model_id == "vad":
+        import torch
+        # Corrupt-dir edge case: a crash/SIGTERM mid-download can leave the repo
+        # dir present but the .jit file missing/truncated. torch.hub.load keys
+        # its cache-hit decision on dir existence, not content-completeness, so
+        # a corrupt partial dir would be silently treated as "already there."
+        # Dir-exists-but-file-missing ⇒ treat as corrupt, wipe and re-fetch.
+        if _VAD_REPO_DIR.exists() and not _VAD_JIT_PATH.exists():
+            import shutil
+            shutil.rmtree(_VAD_REPO_DIR, ignore_errors=True)
+        torch.hub.load(repo_or_dir="snakers4/silero-vad", model="silero_vad", force_reload=False)
+    elif model_id == "diarization":
+        from huggingface_hub import snapshot_download
+        hf_token = os.environ.get("HF_TOKEN")
+        if not hf_token:
+            raise RuntimeError("нужен HF-токен (переменная HF_TOKEN) — диаризация не скачана")
+        for repo_id in _PYANNOTE_REPO_IDS:
+            snapshot_download(repo_id=repo_id, token=hf_token)
+    else:
+        raise ValueError(f"неизвестная модель: {model_id}")
+
+
+def cmd_download_models(only=None):
+    """Download whatever's missing from MODEL_SPECS (or just `only`, a
+    comma-separated id list). One failing model must not abort the batch —
+    same pattern as diarize()/remove_silence_vad() not aborting the audio
+    pipeline (backend.py:614-643,838-871)."""
+    from huggingface_hub.errors import GatedRepoError
+
+    wanted = set(only.split(",")) if only else None
+    for spec in MODEL_SPECS:
+        model_id = spec["id"]
+        if wanted is not None and model_id not in wanted:
+            continue
+        stage_name = f"model:{model_id}"
+        stage(stage_name, f"Скачиваю {spec['label']} (~{spec['size_mb']} МБ)…")
+        try:
+            if _model_cached(model_id):
+                stage_end(stage_name, "skip", "уже скачано")
+                continue
+            _download_model(model_id)
+            stage_end(stage_name, "ok", "Скачано")
+        except GatedRepoError as e:
+            stage_end(stage_name, "fail",
+                      f"Токен есть, но доступ к репозиторию не выдан — прими условия на huggingface.co ({e})")
+        except Exception as e:
+            stage_end(stage_name, "fail", str(e))
+            # continue to the next model — one failure must not abort the batch
 
 
 def str2bool(v):
@@ -2490,6 +2608,10 @@ def main():
 
     sub.add_parser("devices")
     sub.add_parser("preflight")
+    sub.add_parser("models")
+
+    p_dlm = sub.add_parser("download-models")
+    p_dlm.add_argument("--only", default=None)  # comma-separated model ids; omit = all missing
 
     p_cls = sub.add_parser("classify")
     p_cls.add_argument("--note", required=True)
@@ -2551,6 +2673,10 @@ def main():
         emit("devices", devices=list_devices())
     elif args.cmd == "preflight":
         cmd_preflight()
+    elif args.cmd == "models":
+        cmd_models_status()
+    elif args.cmd == "download-models":
+        cmd_download_models(args.only)
     elif args.cmd == "classify":
         cmd_classify(args.note, args.existing)
     elif args.cmd == "extract":

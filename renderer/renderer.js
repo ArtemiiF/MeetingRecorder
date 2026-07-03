@@ -122,8 +122,97 @@ async function refreshPreflight() {
 }
 $("preflightRefresh").addEventListener("click", refreshPreflight);
 
+// ── models (settings "Модели" section: cache status + on-demand pre-download) ──
+// Additive, separate from the "Готовность" preflight section above — reuses its
+// pf-row/pf-dot/pf-detail CSS, but is its own independent maintenance action
+// (own IPC channel/process slot in main.js), not a preflight diagnostic.
+let modelDlRunning = false;
+
+function modelRowState(item) { return item.cached ? "ok" : item.locked ? "bad" : "warn"; }
+function modelRowIcon(item) { return item.cached ? "✅" : item.locked ? "🔒" : "⬇"; }
+function modelRowDetail(item) {
+  if (item.cached) return "скачано";
+  if (item.locked) return "нужен HF-токен";
+  return `нужно скачать (~${item.size_mb} МБ)`;
+}
+
+function renderModelsList(items) {
+  const wrap = $("modelsList");
+  wrap.innerHTML = "";
+  items.forEach((item) => {
+    const row = document.createElement("div");
+    row.className = "pf-row";
+    row.id = "model-row-" + item.id;
+    row.innerHTML =
+      `<span class="pf-dot ${modelRowState(item)}"></span>` +
+      `<span class="pf-label">${modelRowIcon(item)} ${item.label}</span>` +
+      `<span class="pf-detail">${modelRowDetail(item)}</span>`;
+    if (!item.cached && !item.locked) {
+      // per-row retry, mirrors the bulk/scoped precedent already used for retryBtn/freshBtn
+      const btn = document.createElement("button");
+      btn.className = "btn small pf-retry";
+      btn.textContent = "⬇";
+      btn.title = "Скачать " + item.label;
+      btn.disabled = modelDlRunning;
+      btn.addEventListener("click", () => startModelDownload([item.id]));
+      row.appendChild(btn);
+    }
+    wrap.appendChild(row);
+  });
+}
+
+async function refreshModels() {
+  const wrap = $("modelsList");
+  wrap.innerHTML = '<p class="hint">Проверяю…</p>';
+  const items = await window.api.getModels();
+  renderModelsList(items);
+}
+
+function setModelsDownloadUI(running) {
+  modelDlRunning = running;
+  $("modelsDownloadAll").disabled = running;
+  document.querySelectorAll("#modelsList .pf-retry").forEach((b) => { b.disabled = running; });
+}
+
+// only: array of model ids to (re)try, or omitted = whatever's missing and eligible.
+async function startModelDownload(only) {
+  if (modelDlRunning) return;
+  setModelsDownloadUI(true);
+  const res = await window.api.downloadModels(only ? { only } : {});
+  if (res && res.ok === false) {
+    setModelsDownloadUI(false);
+    alert(res.error);
+  }
+}
+$("modelsDownloadAll").addEventListener("click", () => startModelDownload());
+
+// Per-row live status while a download batch runs — ev.stage is "model:<id>"
+// (backend.py's stage/stage_end vocabulary, same as the pipeline's own stages).
+window.api.onModelDownloadEvent((ev) => {
+  const rowFor = (stageName) => (stageName ? $("model-row-" + stageName.replace(/^model:/, "")) : null);
+  if (ev.event === "stage") {
+    const row = rowFor(ev.stage);
+    if (row) {
+      row.querySelector(".pf-dot").className = "pf-dot warn";
+      row.querySelector(".pf-detail").textContent = "⏳ скачивается…";
+    }
+  } else if (ev.event === "stage_end") {
+    const row = rowFor(ev.stage);
+    if (row) {
+      const icon = ev.status === "ok" ? "✅ " : ev.status === "skip" ? "⏭ " : "⚠️ ";
+      row.querySelector(".pf-dot").className = "pf-dot " + (ev.status === "fail" ? "bad" : "ok");
+      row.querySelector(".pf-detail").textContent = icon + (ev.msg || "");
+    }
+  } else if (ev.event === "download-closed") {
+    setModelsDownloadUI(false);
+    refreshModels(); // re-check real cache state — converges cached/needed/locked either way
+  } else if (ev.event === "disk-warning") {
+    alert(ev.msg);
+  }
+});
+
 // settings / readiness modal
-function openSettings() { $("settingsOverlay").classList.remove("hidden"); refreshPreflight(); }
+function openSettings() { $("settingsOverlay").classList.remove("hidden"); refreshPreflight(); refreshModels(); }
 function closeSettings() { $("settingsOverlay").classList.add("hidden"); }
 $("settingsOpen").addEventListener("click", openSettings);
 $("settingsClose").addEventListener("click", closeSettings);

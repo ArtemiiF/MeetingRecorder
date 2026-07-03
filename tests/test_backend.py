@@ -409,6 +409,225 @@ def test_cmd_preflight_emits_checks():
     assert "whisper_cached" in ev and "hf_token" in ev
 
 
+# ── model inventory: cmd_models_status (settings "Модели" — cache-inspection ONLY, no network) ──
+def _set_model_paths(monkeypatch, tmp_path, *, whisper=False, vad=False, pyannote_ids=()):
+    """Point backend's model-cache constants at tmp_path so tests never touch the real
+    ~/.cache. whisper/vad: create the cached artifact iff True. pyannote_ids: which of
+    the 3 sub-repo dirs to pre-create (all three are required for diarization "cached").
+    Returns (whisper_dir, vad_jit, vad_repo_dir)."""
+    whisper_dir = tmp_path / "whisper_dir"
+    vad_repo = tmp_path / "vad_repo"
+    vad_jit = vad_repo / "silero_vad.jit"
+    monkeypatch.setattr(backend, "_WHISPER_MODEL_DIR", whisper_dir)
+    monkeypatch.setattr(backend, "_VAD_JIT_PATH", vad_jit)
+    monkeypatch.setattr(backend, "_VAD_REPO_DIR", vad_repo)
+    monkeypatch.setattr(backend, "_hf_cache_dir",
+                         lambda repo_id: tmp_path / "hf" / repo_id.replace("/", "--"))
+    if whisper:
+        whisper_dir.mkdir(parents=True, exist_ok=True)
+    if vad:
+        vad_jit.parent.mkdir(parents=True, exist_ok=True)
+        vad_jit.write_bytes(b"x")
+    for repo_id in pyannote_ids:
+        (tmp_path / "hf" / repo_id.replace("/", "--")).mkdir(parents=True, exist_ok=True)
+    return whisper_dir, vad_jit, vad_repo
+
+
+def test_cmd_models_status_all_cached_never_locked(monkeypatch, tmp_path):
+    _set_model_paths(monkeypatch, tmp_path, whisper=True, vad=True,
+                      pyannote_ids=backend._PYANNOTE_REPO_IDS)
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    ev = capture(backend.cmd_models_status)[0]
+    assert ev["event"] == "models"
+    by_id = {it["id"]: it for it in ev["items"]}
+    assert by_id["whisper"]["cached"] is True
+    assert by_id["vad"]["cached"] is True
+    assert by_id["diarization"]["cached"] is True
+    assert by_id["diarization"]["locked"] is False  # cached ⇒ never locked, token irrelevant now
+
+
+def test_cmd_models_status_none_cached_no_token_locks_diarization_only(monkeypatch, tmp_path):
+    _set_model_paths(monkeypatch, tmp_path)  # nothing created
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    ev = capture(backend.cmd_models_status)[0]
+    by_id = {it["id"]: it for it in ev["items"]}
+    assert by_id["whisper"] == {"id": "whisper", "label": "MLX Whisper (large-v3-turbo)",
+                                 "size_mb": 1500, "needs_token": False, "cached": False, "locked": False}
+    assert by_id["vad"]["cached"] is False and by_id["vad"]["locked"] is False
+    assert by_id["diarization"]["cached"] is False and by_id["diarization"]["locked"] is True
+
+
+def test_cmd_models_status_none_cached_with_token_unlocks_diarization(monkeypatch, tmp_path):
+    _set_model_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("HF_TOKEN", "hf_faketoken")
+    ev = capture(backend.cmd_models_status)[0]
+    by_id = {it["id"]: it for it in ev["items"]}
+    assert by_id["diarization"]["cached"] is False
+    assert by_id["diarization"]["locked"] is False  # token present ⇒ not locked, just needed
+
+
+def test_cmd_models_status_diarization_needs_all_three_subrepos(monkeypatch, tmp_path):
+    # only the top pipeline repo present, segmentation/wespeaker missing → still "needed",
+    # not "cached" — a partial-set check would wrongly report this as fully cached.
+    _set_model_paths(monkeypatch, tmp_path, pyannote_ids=["pyannote/speaker-diarization-3.1"])
+    monkeypatch.setenv("HF_TOKEN", "hf_faketoken")
+    ev = capture(backend.cmd_models_status)[0]
+    by_id = {it["id"]: it for it in ev["items"]}
+    assert by_id["diarization"]["cached"] is False
+
+
+# ── model inventory: cmd_download_models (mocked huggingface_hub/torch — never real network) ──
+def install_fake_hf_hub(monkeypatch, *, raise_for=None, raise_exc=None):
+    """raise_for: a repo_id (or iterable of repo_ids) whose snapshot_download call
+    raises raise_exc (default: a fake GatedRepoError). Everything else succeeds.
+    Returns (calls, FakeGatedRepoError) — calls['snapshot'] records every call."""
+    calls = {"snapshot": []}
+    fake = types.ModuleType("huggingface_hub")
+    fake_errors = types.ModuleType("huggingface_hub.errors")
+
+    class FakeGatedRepoError(Exception):
+        pass
+    fake_errors.GatedRepoError = FakeGatedRepoError
+
+    raise_set = {raise_for} if isinstance(raise_for, str) else set(raise_for or [])
+
+    def snapshot_download(repo_id, token=None, **kwargs):
+        calls["snapshot"].append({"repo_id": repo_id, "token": token})
+        if repo_id in raise_set:
+            raise raise_exc or FakeGatedRepoError(f"gated: {repo_id}")
+        return f"/fake/cache/{repo_id}"
+
+    fake.snapshot_download = snapshot_download
+    fake.errors = fake_errors
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake)
+    monkeypatch.setitem(sys.modules, "huggingface_hub.errors", fake_errors)
+    return calls, FakeGatedRepoError
+
+
+def install_fake_torch_hub(monkeypatch, *, raise_exc=None):
+    calls = {"load": []}
+    fake = types.ModuleType("torch")
+    fake_hub = types.ModuleType("torch.hub")
+
+    def load(repo_or_dir, model, **kwargs):
+        calls["load"].append({"repo_or_dir": repo_or_dir, "model": model})
+        if raise_exc:
+            raise raise_exc
+        return ("fake_model", ("get_speech_timestamps", "save_audio", "read_audio", None, "collect_chunks"))
+
+    fake_hub.load = load
+    fake.hub = fake_hub
+    monkeypatch.setitem(sys.modules, "torch", fake)
+    return calls
+
+
+def test_cmd_download_models_success_downloads_everything_missing(monkeypatch, tmp_path):
+    _set_model_paths(monkeypatch, tmp_path)  # nothing cached
+    monkeypatch.setenv("HF_TOKEN", "hf_faketoken")
+    hf_calls, _ = install_fake_hf_hub(monkeypatch)
+    torch_calls = install_fake_torch_hub(monkeypatch)
+
+    events = capture(backend.cmd_download_models)
+    ends = {e["stage"]: e for e in events if e["event"] == "stage_end"}
+    assert ends["model:whisper"]["status"] == "ok"
+    assert ends["model:vad"]["status"] == "ok"
+    assert ends["model:diarization"]["status"] == "ok"
+    assert [c["repo_id"] for c in hf_calls["snapshot"]] == [
+        backend._WHISPER_REPO_ID, *backend._PYANNOTE_REPO_IDS
+    ]
+    assert torch_calls["load"][0]["repo_or_dir"] == "snakers4/silero-vad"
+
+
+def test_cmd_download_models_skips_already_cached_model(monkeypatch, tmp_path):
+    _set_model_paths(monkeypatch, tmp_path, whisper=True)
+    monkeypatch.setenv("HF_TOKEN", "hf_faketoken")
+    hf_calls, _ = install_fake_hf_hub(monkeypatch)
+    install_fake_torch_hub(monkeypatch)
+
+    events = capture(backend.cmd_download_models)
+    ends = {e["stage"]: e for e in events if e["event"] == "stage_end"}
+    assert ends["model:whisper"]["status"] == "skip"
+    assert all(c["repo_id"] != backend._WHISPER_REPO_ID for c in hf_calls["snapshot"])
+
+
+def test_cmd_download_models_gated_repo_error_is_actionable_and_batch_continues(monkeypatch, tmp_path):
+    _set_model_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("HF_TOKEN", "hf_faketoken")
+    install_fake_hf_hub(monkeypatch, raise_for=backend._WHISPER_REPO_ID)
+    torch_calls = install_fake_torch_hub(monkeypatch)
+
+    events = capture(backend.cmd_download_models)
+    ends = {e["stage"]: e for e in events if e["event"] == "stage_end"}
+    assert ends["model:whisper"]["status"] == "fail"
+    assert "huggingface.co" in ends["model:whisper"]["msg"]
+    # one failing model must not abort the batch — vad still attempted right after it
+    assert ends["model:vad"]["status"] == "ok"
+    assert torch_calls["load"], "vad download was never attempted after whisper failed"
+
+
+def test_cmd_download_models_generic_exception_continues_batch(monkeypatch, tmp_path):
+    _set_model_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("HF_TOKEN", "hf_faketoken")
+    install_fake_hf_hub(monkeypatch, raise_for=backend._WHISPER_REPO_ID,
+                         raise_exc=ConnectionError("нет сети"))
+    install_fake_torch_hub(monkeypatch)
+
+    events = capture(backend.cmd_download_models)
+    ends = {e["stage"]: e for e in events if e["event"] == "stage_end"}
+    assert ends["model:whisper"]["status"] == "fail"
+    assert ends["model:whisper"]["msg"] == "нет сети"
+    assert ends["model:vad"]["status"] == "ok"
+    assert ends["model:diarization"]["status"] == "ok"
+
+
+def test_cmd_download_models_diarization_without_token_fails_without_touching_network(monkeypatch, tmp_path):
+    _set_model_paths(monkeypatch, tmp_path)
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    hf_calls, _ = install_fake_hf_hub(monkeypatch)
+    install_fake_torch_hub(monkeypatch)
+
+    events = capture(backend.cmd_download_models)
+    ends = {e["stage"]: e for e in events if e["event"] == "stage_end"}
+    assert ends["model:diarization"]["status"] == "fail"
+    assert "HF_TOKEN" in ends["model:diarization"]["msg"]
+    # never actually attempted a network call for the gated repos without a token
+    assert all(c["repo_id"] not in backend._PYANNOTE_REPO_IDS for c in hf_calls["snapshot"])
+    assert ends["model:whisper"]["status"] == "ok"
+    assert ends["model:vad"]["status"] == "ok"
+
+
+def test_cmd_download_models_only_filter_restricts_to_named_model(monkeypatch, tmp_path):
+    _set_model_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("HF_TOKEN", "hf_faketoken")
+    install_fake_hf_hub(monkeypatch)
+    install_fake_torch_hub(monkeypatch)
+
+    events = capture(backend.cmd_download_models, only="vad")
+    stages = {e["stage"] for e in events if e["event"] in ("stage", "stage_end")}
+    assert stages == {"model:vad"}
+
+
+def test_cmd_download_models_vad_corrupt_partial_dir_is_wiped_before_retry(monkeypatch, tmp_path):
+    # dir present (leftover from a killed prior attempt) but the .jit file missing —
+    # torch.hub.load's own cache check is dir-existence-only, so our download flow
+    # must wipe the corrupt dir itself before re-fetching (backend.py's _download_model).
+    whisper_dir, vad_jit, vad_repo = _set_model_paths(
+        monkeypatch, tmp_path, whisper=True, pyannote_ids=backend._PYANNOTE_REPO_IDS)
+    monkeypatch.setenv("HF_TOKEN", "hf_faketoken")
+    vad_repo.mkdir(parents=True, exist_ok=True)
+    (vad_repo / "leftover.txt").write_text("partial junk from a killed download")
+    assert vad_repo.exists() and not vad_jit.exists()
+
+    install_fake_hf_hub(monkeypatch)
+    torch_calls = install_fake_torch_hub(monkeypatch)
+
+    events = capture(backend.cmd_download_models)
+    ends = {e["stage"]: e for e in events if e["event"] == "stage_end"}
+    assert ends["model:vad"]["status"] == "ok"
+    assert not vad_repo.exists(), "corrupt partial dir should have been wiped before re-fetching"
+    assert torch_calls["load"]
+
+
 def test_set_title_injects_into_frontmatter(pipe):
     n = pipe.set_title("---\ntype: meeting\n---\n\n# Body", "Релиз v2")
     assert 'title: "Релиз v2"' in n

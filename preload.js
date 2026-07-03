@@ -11,6 +11,9 @@ contextBridge.exposeInMainWorld("api", {
   stopRecording: () => ipcRenderer.invoke("stop-recording"),
   processAudio: (opts) => ipcRenderer.invoke("process-audio", opts),
   cancelProcess: () => ipcRenderer.invoke("cancel-process"),
+  getModels: () => ipcRenderer.invoke("models"),
+  downloadModels: (opts) => ipcRenderer.invoke("download-models", opts),
+  cancelModelDownload: () => ipcRenderer.invoke("cancel-model-download"),
   reveal: (p) => ipcRenderer.invoke("reveal", p),
   renameSpeakers: (notePath, map) => ipcRenderer.invoke("rename-speakers", { notePath, map }),
   listHistory: (outDir) => ipcRenderer.invoke("list-history", outDir),
@@ -26,4 +29,5 @@ contextBridge.exposeInMainWorld("api", {
   onRecordEvent: (cb) => ipcRenderer.on("record-event", (_e, ev) => cb(ev)),
   onProcessEvent: (cb) => ipcRenderer.on("process-event", (_e, ev) => cb(ev)),
   onParaReindexEvent: (cb) => ipcRenderer.on("para-reindex-event", (_e, ev) => cb(ev)),
+  onModelDownloadEvent: (cb) => ipcRenderer.on("download-models-event", (_e, ev) => cb(ev)),
 });

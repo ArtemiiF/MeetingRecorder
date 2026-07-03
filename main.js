@@ -47,6 +47,8 @@ let recordProc = null; // live mic recording subprocess
 let procProc = null;   // live processing subprocess
 let autoIndexProc = null; // background auto-index subprocess (fires after a successful process run)
 let procCanceled = false; // set when the user cancels processing
+let modelDlProc = null;    // live model-download subprocess (settings "Модели" section)
+let modelDlCanceled = false; // set when the user cancels a model download
 let tee = null;        // AudioTee instance (system audio)
 let sysWav = null;     // WavWriter for system.wav
 let session = null;    // { dir, micPath, sysPath, mixedPath, micRecorded }
@@ -157,10 +159,12 @@ app.on("before-quit", async (e) => {
     }
     if (procProc) procProc.kill();
     if (autoIndexProc) autoIndexProc.kill();
+    if (modelDlProc) modelDlProc.kill();
     app.quit();
-  } else if (procProc || autoIndexProc) {
+  } else if (procProc || autoIndexProc || modelDlProc) {
     if (procProc) procProc.kill();
     if (autoIndexProc) autoIndexProc.kill();
+    if (modelDlProc) modelDlProc.kill();
   }
 });
 app.on("window-all-closed", () => {
@@ -439,6 +443,7 @@ function cacheDirFor(audioFile) {
 ipcMain.handle("process-audio", async (_e, opts) => {
   const { audioFile, prompt, diarize, outDir, engine, hfToken, fresh, language, glossary, summarize, template, micFile, systemFile, authorName } = opts;
   if (procProc) return { ok: false, error: "Обработка уже идёт" };
+  if (modelDlProc) return { ok: false, error: "Дождитесь окончания скачивания моделей" };
 
   const cacheDir = cacheDirFor(audioFile);
   if (fresh) {
@@ -494,6 +499,73 @@ ipcMain.handle("cancel-process", async () => {
   if (!procProc) return { ok: false, error: "Обработка не идёт" };
   procCanceled = true;
   procProc.kill("SIGTERM");
+  return { ok: true };
+});
+
+// ── model inventory / pre-download (settings "Модели" section) ─────────────
+// This is an independent, out-of-band maintenance action — NOT a pipeline stage
+// of a specific audio-processing run — so it gets its own child-process slot and
+// event channel rather than reusing procProc/process-event (that machinery is
+// hard-wired to the 7 pipeline-specific stage keys, see renderer.js STAGE_KEYS).
+// Threshold is sized for a ~1.6 GB cold-machine download batch (Whisper + VAD +
+// pyannote), not recording's ~350 MB/h headroom — diskGuardVerdict's own
+// defaults (used by start-recording above) stay untouched.
+const MODEL_DL_REFUSE_BYTES = 2 * 1024 * 1024 * 1024; // < 2 GiB free → refuse to start
+const MODEL_DL_WARN_BYTES = 3 * 1024 * 1024 * 1024;   // < 3 GiB free → start, but warn
+
+// Status only — cache inspection, no network (mirrors the "preflight" handler above).
+ipcMain.handle("models", async () => {
+  const token = loadToken();
+  const items = await new Promise((resolve) => {
+    let out = [];
+    runBackend(["models"], (ev) => { if (ev.event === "models") out = ev.items; },
+      () => resolve(out), token ? { HF_TOKEN: token } : {});
+  });
+  return items;
+});
+
+// Start a (re)download batch. opts.only: array of model ids, or omitted = all missing.
+// Mutually exclusive with procProc (and vice versa, see process-audio's guard above) —
+// refuse to run a model download while a recording/processing run is active.
+ipcMain.handle("download-models", async (_e, opts) => {
+  if (modelDlProc) return { ok: false, error: "Скачивание уже идёт" };
+  if (procProc) return { ok: false, error: "Дождитесь окончания обработки" };
+
+  // Disk guard: models download into ~/.cache, not TMP_DIR — check that volume.
+  let diskVerdict = { action: "ok", msg: null };
+  try {
+    const st = fs.statfsSync(os.homedir());
+    diskVerdict = diskGuardVerdict(st.bavail * st.bsize, MODEL_DL_REFUSE_BYTES, MODEL_DL_WARN_BYTES);
+  } catch {}
+  if (diskVerdict.action === "refuse") return { ok: false, error: diskVerdict.msg };
+
+  const only = opts && Array.isArray(opts.only) && opts.only.length ? opts.only : null;
+  const args = ["download-models"];
+  if (only) args.push("--only", only.join(","));
+
+  const token = loadToken();
+  modelDlCanceled = false;
+  modelDlProc = runBackend(
+    args,
+    (ev) => send("download-models-event", ev),
+    (code, stderr) => {
+      const canceled = modelDlCanceled;
+      send("download-models-event", { event: "download-closed", code, stderr, canceled });
+      modelDlProc = null;
+      modelDlCanceled = false;
+    },
+    token ? { HF_TOKEN: token } : {}
+  );
+  if (diskVerdict.action === "warn") send("download-models-event", { event: "disk-warning", msg: diskVerdict.msg });
+  return { ok: true };
+});
+
+// cancel an in-flight model download; HF hub's own resumable blob cache means a
+// re-click of "Скачать все" later just picks up where this left off (see backend.py).
+ipcMain.handle("cancel-model-download", async () => {
+  if (!modelDlProc) return { ok: false, error: "Скачивание не идёт" };
+  modelDlCanceled = true;
+  modelDlProc.kill("SIGTERM");
   return { ok: true };
 });
 

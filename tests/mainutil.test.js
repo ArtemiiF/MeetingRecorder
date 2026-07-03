@@ -158,6 +158,37 @@ test("diskGuardVerdict: plenty of free space is ok", () => {
   assert.equal(v.action, "ok");
 });
 
+// ── diskGuardVerdict: parameterized thresholds (model-download call site) ────
+// Defaults (no extra args) must keep producing today's exact recording-path
+// wording/behavior — asserted again here so a future signature change can't
+// silently break the existing call site without a red test.
+test("diskGuardVerdict: no threshold args behaves exactly like the original 1/3 GiB defaults", () => {
+  assert.deepEqual(diskGuardVerdict(500 * 1024 * 1024), {
+    action: "refuse", msg: "Мало места на диске: свободно 500 МБ, нужно ≥1 ГБ",
+  });
+  assert.equal(diskGuardVerdict(2.4 * GIB).action, "warn");
+  assert.equal(diskGuardVerdict(3 * GIB).action, "ok");
+});
+test("diskGuardVerdict: custom refuseBytes/warnBytes (download path, ~2/3 GiB)", () => {
+  const REFUSE = 2 * GIB, WARN = 3 * GIB;
+  const refused = diskGuardVerdict(1.5 * GIB, REFUSE, WARN);
+  assert.equal(refused.action, "refuse");
+  assert.match(refused.msg, /нужно ≥2 ГБ/);
+
+  const warned = diskGuardVerdict(2.5 * GIB, REFUSE, WARN);
+  assert.equal(warned.action, "warn");
+
+  const ok = diskGuardVerdict(4 * GIB, REFUSE, WARN);
+  assert.equal(ok.action, "ok");
+  assert.equal(ok.msg, null);
+});
+test("diskGuardVerdict: custom threshold refuse message reflects the given threshold, not the default", () => {
+  const v = diskGuardVerdict(100 * 1024 * 1024, 2 * GIB, 3 * GIB);
+  assert.equal(v.action, "refuse");
+  assert.match(v.msg, /нужно ≥2 ГБ/);
+  assert.doesNotMatch(v.msg, /≥1 ГБ/);
+});
+
 // ── rewriteNoteSpeakers ───────────────────────────────────────────────────────
 test("rewriteNoteSpeakers: rewrites body mentions", () => {
   const text = "---\ntype: meeting\n---\n\n**[Спикер 1]**: привет\n**[Спикер 2]**: пока";
