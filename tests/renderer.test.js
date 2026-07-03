@@ -1088,3 +1088,123 @@ test("main.js: modelDlProc is killed in before-quit alongside the other tracked 
   const beforeQuit = mainSrc.match(/app\.on\("before-quit"[\s\S]*?\n\}\);/)[0];
   assert.match(beforeQuit, /modelDlProc/);
 });
+
+// ── main.js pick-audio: multi-select ────────────────────────────────────────
+// The multiSelections dialog option itself isn't exercisable via jsdom (Electron's
+// `dialog` API isn't unit-testable without a live app) — a source-text check, same
+// idiom as the child-process wiring checks above, covers the actual handler code.
+test("main.js: pick-audio dialog allows multiSelections and returns the full filePaths array", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const pickAudio = mainSrc.match(/ipcMain\.handle\("pick-audio"[\s\S]*?\n\}\);/)[0];
+  assert.match(pickAudio, /multiSelections/);
+  assert.match(pickAudio, /res\.filePaths;/);
+  assert.doesNotMatch(pickAudio, /res\.filePaths\[0\]/);
+});
+
+// ── batch import (sequential queue) ─────────────────────────────────────────
+function goImportTab(window) {
+  window.document.querySelector('.tab[data-tab="import"]').click();
+}
+
+test("multi-file pick renders one queue row per file", async () => {
+  const { window, $ } = await boot({
+    pickAudio: async () => ["/tmp/a.wav", "/tmp/b.wav", "/tmp/c.wav"],
+  });
+  goImportTab(window);
+  $("pickBtn").click(); await tick(window);
+  const rows = $("importQueue").querySelectorAll(".queue-item");
+  assert.equal(rows.length, 3);
+  assert.equal($("pickedFile").textContent, "Выбрано файлов: 3");
+});
+
+test("batch import: item 2 starts only after item 1's done event (sequential, not parallel)", async () => {
+  const calls = [];
+  const { window, $, handlers } = await boot({
+    pickAudio: async () => ["/tmp/a.wav", "/tmp/b.wav"],
+    processAudio: async (opts) => { calls.push(opts.audioFile); return { ok: true }; },
+  });
+  goImportTab(window);
+  $("pickBtn").click(); await tick(window);
+  $("runBtn").click(); await tick(window);
+  assert.deepEqual(calls, ["/tmp/a.wav"]);                 // only item 1 started
+  let rows = $("importQueue").querySelectorAll(".queue-item");
+  assert.ok(rows[0].classList.contains("queue-running"));
+  handlers.process({ event: "done", note: "/n1.md", audio: "/tmp/a.wav", transcript: "t1", summary: "s1" });
+  await tick(window);
+  assert.deepEqual(calls, ["/tmp/a.wav", "/tmp/b.wav"]);   // item 2 auto-started
+  rows = $("importQueue").querySelectorAll(".queue-item");
+  assert.ok(rows[0].classList.contains("queue-done"));
+  assert.ok(rows[1].classList.contains("queue-running"));
+});
+
+test("batch import: per-item failure logs and continues to the next item", async () => {
+  const calls = [];
+  const { window, $, handlers } = await boot({
+    pickAudio: async () => ["/tmp/a.wav", "/tmp/b.wav"],
+    processAudio: async (opts) => { calls.push(opts.audioFile); return { ok: true }; },
+  });
+  goImportTab(window);
+  $("pickBtn").click(); await tick(window);
+  $("runBtn").click(); await tick(window);
+  handlers.process({ event: "error", msg: "boom" });
+  await tick(window);
+  assert.deepEqual(calls, ["/tmp/a.wav", "/tmp/b.wav"]);   // continued despite failure
+  const rows = $("importQueue").querySelectorAll(".queue-item");
+  assert.ok(rows[0].classList.contains("queue-failed"));
+  assert.ok(rows[1].classList.contains("queue-running"));
+});
+
+test("batch import: cancel halts the whole batch (remaining items stay unprocessed)", async () => {
+  const calls = [];
+  const { window, $, handlers } = await boot({
+    pickAudio: async () => ["/tmp/a.wav", "/tmp/b.wav"],
+    processAudio: async (opts) => { calls.push(opts.audioFile); return { ok: true }; },
+  });
+  goImportTab(window);
+  $("pickBtn").click(); await tick(window);
+  $("runBtn").click(); await tick(window);
+  $("stopBtn").click(); await tick(window);
+  handlers.process({ event: "process-closed", code: null, canceled: true });
+  await tick(window);
+  assert.deepEqual(calls, ["/tmp/a.wav"]);                 // item 2 never started
+  const rows = $("importQueue").querySelectorAll(".queue-item");
+  assert.ok(rows[0].classList.contains("queue-canceled"));
+  assert.ok(rows[1].classList.contains("queue-queued"));
+});
+
+test("reprocessHistory() still triggers an immediate single run (queue-of-1 regression guard)", async () => {
+  let calls = 0;
+  const { window, $ } = await boot({ processAudio: async () => { calls++; return { ok: true }; } });
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  $("historyList").querySelector(".rail-item").click(); await tick(window);
+  $("noteView").querySelector("#nvReprocess").click(); await tick(window);
+  assert.equal(calls, 1);
+  const rows = $("importQueue").querySelectorAll(".queue-item");
+  assert.equal(rows.length, 1);
+});
+
+// ── recording indicator (topnav badge, visible from any tab) ────────────────
+test("recording indicator appears on start, disappears on stop, and survives tab switches", async () => {
+  const { window, $ } = await boot();
+  assert.ok($("recIndicator").classList.contains("hidden"));
+  $("recBtn").click(); await tick(window);
+  assert.ok(!$("recIndicator").classList.contains("hidden"));
+  // this is the regression test for the actual reported bug: state.recording
+  // survives a tab switch, but the old per-view recording UI did not.
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  assert.ok(!$("recIndicator").classList.contains("hidden"));
+  window.document.querySelector('.topbtn[data-view="para"]').click(); await tick(window);
+  assert.ok(!$("recIndicator").classList.contains("hidden"));
+  window.document.querySelector('.topbtn[data-view="record"]').click(); await tick(window);
+  $("recBtn").click(); await tick(window); // stop
+  assert.ok($("recIndicator").classList.contains("hidden"));
+});
+
+test("recording indicator turns off on the mic-error path too", async () => {
+  const { window, $, handlers } = await boot();
+  $("recBtn").click(); await tick(window);
+  assert.ok(!$("recIndicator").classList.contains("hidden"));
+  handlers.record({ event: "error", msg: "mic disconnected" });
+  await tick(window);
+  assert.ok($("recIndicator").classList.contains("hidden"));
+});

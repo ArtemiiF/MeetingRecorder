@@ -283,10 +283,10 @@ ipcMain.handle("save-presets", async (_e, data) => {
 
 ipcMain.handle("pick-audio", async () => {
   const res = await dialog.showOpenDialog(mainWindow, {
-    properties: ["openFile"],
+    properties: ["openFile", "multiSelections"],
     filters: [{ name: "Audio", extensions: ["wav", "mp3", "m4a", "aac", "flac", "ogg", "mp4", "mov"] }],
   });
-  return res.canceled ? null : res.filePaths[0];
+  return res.canceled ? null : res.filePaths;
 });
 
 ipcMain.handle("pick-out-dir", async () => {

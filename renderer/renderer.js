@@ -7,7 +7,8 @@ const DEFAULT_GLOSSARY = "деплой, бэклог, спринт, ретро, 
 const state = {
   mode: "record",      // 'record' | 'import'
   recordedFile: null,  // path from a finished recording
-  importedFile: null,  // path from file picker
+  importQueue: [],     // [{ path, name, status }] status: 'queued'|'running'|'done'|'failed'|'canceled'
+  queueIndex: -1,       // index of the import-queue item currently running / last acted on
   recording: false,
   processing: false,
   hasRun: false,
@@ -370,13 +371,86 @@ $("pickOut").addEventListener("click", async () => {
   if (dir) { state.outDir = dir; state.outDirCustom = true; $("outDir").value = dir; persistPresets(); }
 });
 
-// ── import file ───────────────────────────────────────────────────────────────
+// ── import file(s) — sequential queue ───────────────────────────────────────
+// A single pick or a reprocessHistory() call is a queue of length 1 — same
+// code path as an N-file batch, so progress/result/retry logic isn't
+// duplicated for "single" vs "batch".
+const QUEUE_STATUS_ICON = { queued: "⏳", running: "🔵", done: "🟢", failed: "🔴", canceled: "⏹" };
+
+// Replaces the queue wholesale (repeated pick = replace, not append — simplest
+// mental model, matches today's single-pick "last pick wins" behavior).
+function setImportQueue(paths) {
+  state.importQueue = paths.map((p) => ({ path: p, name: p.split("/").pop(), status: "queued" }));
+  state.queueIndex = -1;
+  state.hasRun = false; // new source → hide retry/fresh until processed
+  renderImportQueue();
+  refreshRunBtn();
+}
+
+function renderImportQueue() {
+  const wrap = $("importQueue");
+  if (!state.importQueue.length) { wrap.innerHTML = ""; wrap.classList.add("hidden"); return; }
+  wrap.classList.remove("hidden");
+  wrap.innerHTML = state.importQueue.map((item) => {
+    const icon = QUEUE_STATUS_ICON[item.status] || "⏳";
+    return `<div class="queue-item queue-${item.status}">` +
+      `<span class="queue-icon">${icon}</span><span class="queue-name">${escapeHtml(item.name)}</span></div>`;
+  }).join("");
+}
+
+// true while a run in progress/last-acted belongs to the import queue (vs. record mode).
+function queueActive() {
+  return state.mode === "import" && state.queueIndex >= 0 && state.queueIndex < state.importQueue.length;
+}
+
+// Entry point wired to runBtn/retryBtn/freshBtn when mode==='import'. Starts
+// the item at queueIndex (or the first item, on a fresh queue).
+function startQueueRun(fresh) {
+  if (!state.importQueue.length) return;
+  if (state.queueIndex < 0 || state.queueIndex >= state.importQueue.length) state.queueIndex = 0;
+  const item = state.importQueue[state.queueIndex];
+  if (item) item.status = "running";
+  renderImportQueue();
+  startProcessing(fresh);
+}
+
+// Called from onProcessEvent's terminal branches (done / error / non-canceled
+// process-closed) when the just-finished run belongs to the import queue.
+// Marks the current item, then auto-advances to the next queued item — a
+// per-item failure logs and continues (mirrors the download-models precedent),
+// it does not abort the batch.
+function advanceQueue(itemStatus) {
+  if (!queueActive()) return;
+  const item = state.importQueue[state.queueIndex];
+  if (item) item.status = itemStatus;
+  const next = state.queueIndex + 1;
+  if (next < state.importQueue.length) {
+    state.queueIndex = next;
+    const nextItem = state.importQueue[state.queueIndex];
+    if (nextItem) nextItem.status = "running";
+    renderImportQueue();
+    startProcessing(false);
+  } else {
+    renderImportQueue();
+  }
+}
+
+// Cancel (stopBtn) halts the whole batch — the current item stops, the
+// remainder is left unprocessed with its status visible, no auto-advance.
+function markQueueItemCanceled() {
+  if (!queueActive()) return;
+  const item = state.importQueue[state.queueIndex];
+  if (item) item.status = "canceled";
+  renderImportQueue();
+}
+
 $("pickBtn").addEventListener("click", async () => {
-  const f = await window.api.pickAudio();
-  if (f) {
-    state.importedFile = f;
-    state.hasRun = false; // new source → hide retry/fresh until processed
-    $("pickedFile").textContent = f.split("/").pop();
+  const files = await window.api.pickAudio();
+  if (files && files.length) {
+    setImportQueue(files);
+    $("pickedFile").textContent = files.length === 1
+      ? files[0].split("/").pop()
+      : `Выбрано файлов: ${files.length}`;
     setProcessingUI(false);
     refreshRunBtn();
   }
@@ -392,6 +466,13 @@ function setSysStatus(text, kind) {
   el.className = "sys-status" + (kind ? " " + kind : "");
 }
 
+// Topnav badge — the only DOM region visible across all tabs (switchView()
+// only hides #view-*, not the sibling <nav>), so this is where a recording
+// stays visible even while the user is on История/PARA/Словарь.
+function setRecIndicator(on) {
+  $("recIndicator").classList.toggle("hidden", !on);
+}
+
 $("recBtn").addEventListener("click", async () => {
   if (!state.recording) {
     const micDevice = $("micDevice").value;
@@ -400,6 +481,7 @@ $("recBtn").addEventListener("click", async () => {
     if (!res.ok) { alert(res.error); return; }
     state.recording = true;
     state.recordedFile = null;
+    setRecIndicator(true);
     $("timer").textContent = "00:00";
     $("vuMic").style.width = "0%";
     $("vuSys").style.width = "0%";
@@ -409,6 +491,7 @@ $("recBtn").addEventListener("click", async () => {
     refreshRunBtn();
   } else {
     state.recording = false;
+    setRecIndicator(false);
     $("recBtn").textContent = "● Начать запись";
     $("recBtn").classList.remove("recording");
     $("timer").classList.remove("live");
@@ -458,6 +541,7 @@ window.api.onRecordEvent((ev) => {
   } else if (ev.event === "error") {
     setSysStatus("❌ Ошибка записи: " + ev.msg, "warn");
     state.recording = false;
+    setRecIndicator(false);
     $("recBtn").textContent = "● Начать запись";
     $("recBtn").classList.remove("recording");
     $("timer").classList.remove("live");
@@ -467,7 +551,10 @@ window.api.onRecordEvent((ev) => {
 
 // ── current audio source resolution ─────────────────────────────────────────
 function currentAudio() {
-  return state.mode === "record" ? state.recordedFile : state.importedFile;
+  if (state.mode === "record") return state.recordedFile;
+  const idx = state.queueIndex >= 0 ? state.queueIndex : 0;
+  const item = state.importQueue[idx];
+  return item ? item.path : null;
 }
 function refreshRunBtn() {
   $("runBtn").disabled = !currentAudio() || state.recording;
@@ -598,9 +685,17 @@ async function startProcessing(fresh) {
   }
 }
 
-$("runBtn").addEventListener("click", () => startProcessing(false));
-$("retryBtn").addEventListener("click", () => startProcessing(false));
-$("freshBtn").addEventListener("click", () => startProcessing(true));
+// import mode runs through the queue (queue-of-1 for a plain single pick);
+// record mode has no queue and starts directly, unchanged.
+$("runBtn").addEventListener("click", () => {
+  if (state.mode === "import") startQueueRun(false); else startProcessing(false);
+});
+$("retryBtn").addEventListener("click", () => {
+  if (state.mode === "import") startQueueRun(false); else startProcessing(false);
+});
+$("freshBtn").addEventListener("click", () => {
+  if (state.mode === "import") startQueueRun(true); else startProcessing(true);
+});
 $("stopBtn").addEventListener("click", async () => {
   $("stopBtn").disabled = true;
   await window.api.cancelProcess();
@@ -629,23 +724,29 @@ window.api.onProcessEvent((ev) => {
     runEnded = true;
     finishProcessing();
     refreshHistory();
+    advanceQueue("done");
   } else if (ev.event === "error") {
     appendLog("❌ " + ev.msg);
     markRunFailed();
     finishProcessing();
+    advanceQueue("failed");
   } else if (ev.event === "process-closed") {
+    let failedAdvance = false;
     if (ev.canceled) {
       appendLog("⏹ Остановлено — прогресс сохранён, нажми «↻ Повторить» чтобы продолжить");
       if (lastStage) setStageClass(lastStage, "skip");
       runEnded = true;
+      markQueueItemCanceled(); // cancel halts the whole batch — no auto-advance
     } else if (ev.code !== 0 && !runEnded) {
       if (ev.stderr) appendLog("[backend] " + ev.stderr.slice(-600));
       appendLog("❌ Обработка прервана (код " + ev.code + ")");
       markRunFailed();
+      failedAdvance = true;
     } else if (ev.code !== 0 && ev.stderr) {
       appendLog("[backend] " + ev.stderr.slice(-600));
     }
     finishProcessing();
+    if (failedAdvance) advanceQueue("failed");
   }
 });
 
@@ -749,10 +850,9 @@ function reprocessHistory(audio) {
   document.querySelectorAll(".tab").forEach((x) => x.classList.toggle("active", x.dataset.tab === "import"));
   $("pane-record").classList.add("hidden");
   $("pane-import").classList.remove("hidden");
-  state.importedFile = audio;
+  setImportQueue([audio]); // queue-of-1 — same path as an N-file batch
   $("pickedFile").textContent = audio.split("/").pop();
-  state.hasRun = false;
-  startProcessing(false);
+  startQueueRun();
 }
 
 // ── minimal, XSS-safe markdown renderer for the note viewer ───────────────────

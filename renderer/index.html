@@ -14,7 +14,7 @@
   </header>
 
   <nav class="topnav">
-    <button class="topbtn active" data-view="record">🎙 Запись</button>
+    <button class="topbtn active" data-view="record">🎙 Запись<span id="recIndicator" class="rec-dot hidden"></span></button>
     <button class="topbtn" data-view="history">📚 История</button>
     <button class="topbtn" data-view="para">🗂 PARA</button>
     <button class="topbtn" data-view="glossary">📖 Словарь</button>
@@ -47,6 +47,7 @@
       <div class="tabpane hidden" id="pane-import">
         <button id="pickBtn" class="btn">📂 Выбрать аудиофайл</button>
         <span id="pickedFile" class="filepath">не выбран</span>
+        <div id="importQueue" class="import-queue hidden"></div>
       </div>
     </section>
 
