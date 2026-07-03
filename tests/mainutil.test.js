@@ -8,6 +8,7 @@ const {
   buildWavHeader, WavWriter, rmsLevel, cacheKey,
   pairHistory, encodeTokenBlob, decodeTokenBlob, isStale,
   rewriteNoteSpeakers, isOutsideRoot, indexRunReducer, diskGuardVerdict,
+  resolveOutDirOnVaultChange,
 } = require("../lib/mainutil");
 
 // ── WAV header ──────────────────────────────────────────────────────────────
@@ -249,6 +250,17 @@ test("isOutsideRoot: no root configured → false (nothing to compare)", () => {
 });
 test("isOutsideRoot: no dir → false", () => {
   assert.equal(isOutsideRoot("", "/vault"), false);
+});
+
+// ── out-dir auto-follow (settings "Куда сохранять", Variant A) ──────────────
+test("resolveOutDirOnVaultChange: custom=false follows the vault's Meetings subfolder", () => {
+  assert.equal(resolveOutDirOnVaultChange("/old/out", false, "/vault"), path.join("/vault", "Meetings"));
+});
+test("resolveOutDirOnVaultChange: custom=true leaves outDir unchanged", () => {
+  assert.equal(resolveOutDirOnVaultChange("/old/out", true, "/vault"), "/old/out");
+});
+test("resolveOutDirOnVaultChange: no existing outDir adopts the vault's Meetings subfolder", () => {
+  assert.equal(resolveOutDirOnVaultChange("", false, "/vault"), path.join("/vault", "Meetings"));
 });
 
 test("indexRunReducer: trigger while idle starts immediately", () => {

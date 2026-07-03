@@ -16,6 +16,7 @@ const state = {
   presets: [],
   currentPreset: -1,
   outDir: "",
+  outDirCustom: false, // true once the user explicitly picked outDir — breaks vault auto-follow
   hfToken: "",
   language: "ru",
   authorName: "Автор",
@@ -255,6 +256,7 @@ async function init() {
   const data = await window.api.getPresets();
   state.presets = data.presets || [];
   state.outDir = data.defaultOutDir || "";
+  state.outDirCustom = !!data.outDirCustom;
   state.hfToken = data.hfToken || "";
   state.language = data.language || "ru";
   state.authorName = data.authorName || "Автор";
@@ -326,6 +328,7 @@ async function persistPresets() {
   await window.api.savePresets({
     presets: state.presets,
     defaultOutDir: state.outDir,
+    outDirCustom: state.outDirCustom,
     hfToken: state.hfToken,
     language: state.language,
     authorName: state.authorName,
@@ -364,7 +367,7 @@ function updateTokenWarn() {
 // ── output dir ───────────────────────────────────────────────────────────────
 $("pickOut").addEventListener("click", async () => {
   const dir = await window.api.pickOutDir();
-  if (dir) { state.outDir = dir; $("outDir").value = dir; persistPresets(); }
+  if (dir) { state.outDir = dir; state.outDirCustom = true; $("outDir").value = dir; persistPresets(); }
 });
 
 // ── import file ───────────────────────────────────────────────────────────────
@@ -1063,9 +1066,10 @@ $("paraCreate").addEventListener("click", async () => {
   if (!root) { alert("Сначала выбери папку"); return; }
   const folders = {};
   PARA_KEYS.forEach((k) => { folders[k] = $("paraF" + k).value.trim() || k; });
-  const res = await window.api.paraCreateVault({ root, folders });
+  const res = await window.api.paraCreateVault({ root, folders, outDir: state.outDir, outDirCustom: state.outDirCustom });
   if (res && res.ok === false) { alert("Не удалось создать: " + res.error); return; }
   state.para = { root, folders };
+  if (res && res.outDir) { state.outDir = res.outDir; $("outDir").value = state.outDir; }
   await persistPresets();
   renderPara();
 });

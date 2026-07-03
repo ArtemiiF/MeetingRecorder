@@ -673,6 +673,72 @@ test("changing authorName input persists with authorName in savePresets payload"
   assert.equal(saved.authorName, "Наталья");
 });
 
+// ── settings overlay: hfToken/authorName/outDir relocation + outDir auto-follow ──
+
+test("openSettings() populates hfToken/authorName/outDir from state and shows the overlay", async () => {
+  const { $, window } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/tmp/out", hfToken: "hf_x", language: "ru", authorName: "Ольга",
+    }),
+  });
+  await tick(window);
+  assert.equal($("settingsOverlay").classList.contains("hidden"), true, "overlay starts hidden");
+  $("settingsOpen").click();
+  await tick(window);
+  assert.equal($("settingsOverlay").classList.contains("hidden"), false);
+  assert.equal($("hfToken").value, "hf_x");
+  assert.equal($("authorName").value, "Ольга");
+  assert.equal($("outDir").value, "/tmp/out");
+});
+
+test("pickOut (now in settings) sets outDir, marks it custom, and persists outDirCustom=true", async () => {
+  let saved = null;
+  const { $, window } = await boot({
+    pickOutDir: async () => "/custom/path",
+    savePresets: async (data) => { saved = data; return true; },
+  });
+  await tick(window);
+  $("pickOut").click(); await tick(window);
+  assert.equal($("outDir").value, "/custom/path");
+  assert.ok(saved, "savePresets was not called");
+  assert.equal(saved.outDirCustom, true);
+});
+
+test("PARA: creating a vault forwards outDir/outDirCustom and applies the returned outDir (auto-follow)", async () => {
+  let sentArgs = null;
+  const { window, $ } = await boot({
+    pickOutDir: async () => "/tmp/vault",
+    paraCreateVault: async (args) => { sentArgs = args; return { ok: true, outDir: args.root + "/Meetings" }; },
+  });
+  window.document.querySelector('.topbtn[data-view="para"]').click();
+  await tick(window);
+  $("paraPick").click(); await tick(window);
+  $("paraCreate").click(); await tick(window);
+  assert.equal(sentArgs.outDir, "/tmp/out");   // default state.outDir from boot()'s getPresets mock
+  assert.equal(sentArgs.outDirCustom, false);  // default outDirCustom
+  assert.equal($("outDir").value, "/tmp/vault/Meetings");
+});
+
+test("PARA: creating a vault leaves a custom outDir untouched (mock mirrors the custom-protects rule)", async () => {
+  let sentArgs = null;
+  const { window, $ } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/manual/out", hfToken: "", language: "ru", outDirCustom: true,
+    }),
+    pickOutDir: async () => "/tmp/vault2",
+    paraCreateVault: async (args) => {
+      sentArgs = args;
+      return { ok: true, outDir: args.outDirCustom ? args.outDir : args.root + "/Meetings" };
+    },
+  });
+  window.document.querySelector('.topbtn[data-view="para"]').click();
+  await tick(window);
+  $("paraPick").click(); await tick(window);
+  $("paraCreate").click(); await tick(window);
+  assert.equal(sentArgs.outDirCustom, true);
+  assert.equal($("outDir").value, "/manual/out");
+});
+
 // ── glossary setting ──────────────────────────────────────────────────────────
 
 test("glossary loads from presets into state and the settings textarea", async () => {

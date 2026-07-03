@@ -8,6 +8,7 @@ const {
   WavWriter, rmsLevel, cacheKey, pairHistory,
   encodeTokenBlob, decodeTokenBlob, isStale,
   rewriteNoteSpeakers, isOutsideRoot, indexRunReducer, diskGuardVerdict,
+  resolveOutDirOnVaultChange,
 } = require("./lib/mainutil");
 
 // audiotee is ESM-only — load it lazily via dynamic import() from this CommonJS module.
@@ -611,10 +612,13 @@ ipcMain.handle("read-note", async (_e, notePath) => {
 // ── PARA ───────────────────────────────────────────────────────────────────
 const PARA_KEYS = ["projects", "areas", "resources", "archives"];
 
-ipcMain.handle("para-create-vault", async (_e, { root, folders }) => {
+// outDir/outDirCustom are optional — renderer sends the current settings so
+// the response can carry the auto-followed outDir back (renderer.js has no
+// require("path")/lib/mainutil access: contextIsolation, no nodeIntegration).
+ipcMain.handle("para-create-vault", async (_e, { root, folders, outDir, outDirCustom }) => {
   try {
     for (const k of PARA_KEYS) fs.mkdirSync(path.join(root, folders[k]), { recursive: true });
-    return { ok: true };
+    return { ok: true, outDir: resolveOutDirOnVaultChange(outDir, outDirCustom, root) };
   } catch (e) { return { ok: false, error: String((e && e.message) || e) }; }
 });
 

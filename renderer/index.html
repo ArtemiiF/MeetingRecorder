@@ -70,28 +70,12 @@
           </select>
         </label>
       </div>
-      <label>Ваше имя (для переименования спикеров)
-        <input type="text" id="authorName" placeholder="Автор" />
-      </label>
       <label class="check">
         <input type="checkbox" id="diarize" checked /> Определять спикеров (диаризация, медленнее)
       </label>
       <label class="check">
         <input type="checkbox" id="noSummary" /> Только транскрипт (без сводки LLM)
       </label>
-      <label style="margin-top:12px">HF-токен (для диаризации, хранится локально)
-        <input type="password" id="hfToken" placeholder="hf_…  — пусто: спикеров определит LLM" />
-      </label>
-      <p id="tokenWarn" class="warn-text" style="display:none">⚠️ Системный keychain недоступен — токен хранится в обратимом виде (base64), не зашифрован.</p>
-    </section>
-
-    <!-- OUTPUT -->
-    <section class="card">
-      <h2>3 · Куда сохранять</h2>
-      <div class="out-row">
-        <input type="text" id="outDir" readonly />
-        <button id="pickOut" class="btn small">Изменить</button>
-      </div>
     </section>
 
     <div class="run-row">
@@ -265,6 +249,26 @@
           <li><i>Опционально:</i> HF-токен для диаризации (имена спикеров). Без него — спикеры по таймкодам.</li>
           <li>Модель Whisper скачается автоматически при первой транскрипции (~1.5 ГБ).</li>
         </ol>
+      </section>
+
+      <section class="modal-sec">
+        <h3>Личные данные</h3>
+        <label>Ваше имя (для переименования спикеров)
+          <input type="text" id="authorName" placeholder="Автор" />
+        </label>
+        <label>HF-токен (для диаризации, хранится локально)
+          <input type="password" id="hfToken" placeholder="hf_…  — пусто: спикеров определит LLM" />
+        </label>
+        <p id="tokenWarn" class="warn-text" style="display:none">⚠️ Системный keychain недоступен — токен хранится в обратимом виде (base64), не зашифрован.</p>
+      </section>
+
+      <section class="modal-sec">
+        <h3>Куда сохранять</h3>
+        <div class="out-row">
+          <input type="text" id="outDir" readonly />
+          <button id="pickOut" class="btn small">Изменить</button>
+        </div>
+        <p class="hint">Если настроен PARA-vault — путь подстраивается под него автоматически (папка «Meetings» внутри vault). «Изменить» задаёт свой путь и отключает автоподстройку.</p>
       </section>
 
       <section class="modal-sec">
