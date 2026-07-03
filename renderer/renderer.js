@@ -791,10 +791,19 @@ $("paraTreeRefresh").addEventListener("click", renderParaTree);
 // Reset only by «Новый чат» button. Kept alive across pane switches.
 let chatMessages = [];
 
+// Cap: unlike the manual reindex button (which resets this box on click, see
+// logBox.textContent = "" below), the background auto-index trigger in main.js
+// has no renderer-side "run start" moment to hook a reset into — it can fire
+// many times over a long session, so bound the buffer instead of clearing it.
+const PARA_REINDEX_LOG_MAX_LINES = 300;
 function paraSearchLog(msg) {
   const box = $("paraReindexLog");
   const t = new Date().toLocaleTimeString();
   box.textContent += `[${t}] ${msg}\n`;
+  const lines = box.textContent.split("\n");
+  if (lines.length > PARA_REINDEX_LOG_MAX_LINES) {
+    box.textContent = lines.slice(lines.length - PARA_REINDEX_LOG_MAX_LINES).join("\n");
+  }
   box.scrollTop = box.scrollHeight;
 }
 

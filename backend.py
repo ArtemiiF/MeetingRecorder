@@ -1910,8 +1910,8 @@ def cmd_index(root, db_path, embed_model=None):
     try:
         conn.execute("INSERT INTO chunks_fts(chunks_fts) VALUES('optimize')")
         conn.commit()
-    except Exception:
-        pass
+    except Exception as e:
+        log(f"⚠️ FTS5 optimize не удался: {e}")
 
     conn.close()
     emit("indexed", indexed=indexed, skipped=skipped, removed=removed)

@@ -1068,6 +1068,49 @@ def test_cmd_index_removes_deleted_note(monkeypatch, tmp_path):
     conn.close()
 
 
+def test_cmd_index_logs_fts_optimize_failure(monkeypatch, tmp_path):
+    """FTS5 'optimize' failing must stay non-fatal (indexing still completes) but must
+    now be logged instead of silently swallowed by the bare `except Exception: pass`."""
+    vault = _make_fake_vault(tmp_path, [
+        ("note1.md", '---\ntitle: "Встреча"\ndate: "2026-01-01"\n---\n\nТекст заметки.\n'),
+    ])
+    db = str(tmp_path / "rag.db")
+
+    models_payload = {"data": [{"id": "text-embedding-all-minilm-v2"}]}
+    embed_payload = _make_embed_payload(n_vecs=1, dim=4)
+    install_fake_requests_rag(monkeypatch, get_payload=models_payload, embed_payload=embed_payload)
+
+    # sqlite3.Connection is an immutable C type — its methods can't be monkeypatched
+    # in place, so wrap the real connection instead and patch the connect() factory.
+    import sqlite3
+    real_connect = sqlite3.connect
+
+    class _FlakyConn:
+        def __init__(self, real_conn):
+            self._real = real_conn
+
+        def execute(self, sql, *a, **k):
+            if "optimize" in sql:
+                raise sqlite3.OperationalError("simulated optimize failure")
+            return self._real.execute(sql, *a, **k)
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+    monkeypatch.setattr(sqlite3, "connect", lambda *a, **k: _FlakyConn(real_connect(*a, **k)))
+
+    events = capture(backend.cmd_index, str(vault), db)
+
+    # Non-fatal: the run still finishes and reports its summary.
+    indexed_events = [e for e in events if e["event"] == "indexed"]
+    assert len(indexed_events) == 1
+
+    # But the failure must now surface as a log line, not disappear silently.
+    log_msgs = [e["msg"] for e in events if e["event"] == "log"]
+    assert any("optimize" in m.lower() for m in log_msgs), \
+        f"expected a log line mentioning the optimize failure, got: {log_msgs}"
+
+
 def test_cmd_search_short_circuit_no_matches(monkeypatch, tmp_path):
     """No FTS hits + best cosine < threshold → found=False, LLM NOT called."""
     vault = _make_fake_vault(tmp_path, [])

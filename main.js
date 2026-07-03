@@ -45,6 +45,7 @@ fs.mkdirSync(TMP_DIR, { recursive: true });
 let mainWindow = null;
 let recordProc = null; // live mic recording subprocess
 let procProc = null;   // live processing subprocess
+let autoIndexProc = null; // background auto-index subprocess (fires after a successful process run)
 let procCanceled = false; // set when the user cancels processing
 let tee = null;        // AudioTee instance (system audio)
 let sysWav = null;     // WavWriter for system.wav
@@ -152,9 +153,11 @@ app.on("before-quit", async (e) => {
       await waitFor(() => (session && (session.micRecorded || session.micErrored)) || recordProc === null, 30000);
     }
     if (procProc) procProc.kill();
+    if (autoIndexProc) autoIndexProc.kill();
     app.quit();
-  } else if (procProc) {
-    procProc.kill();
+  } else if (procProc || autoIndexProc) {
+    if (procProc) procProc.kill();
+    if (autoIndexProc) autoIndexProc.kill();
   }
 });
 app.on("window-all-closed", () => {
@@ -676,11 +679,12 @@ function readParaRoot() {
 }
 
 function startAutoIndex(root) {
-  runBackend(indexArgs(root),
+  autoIndexProc = runBackend(indexArgs(root),
     (ev) => {
       if (ev.event === "log" || ev.event === "error") send("para-reindex-event", ev);
     },
     () => {
+      autoIndexProc = null;
       const next = indexRunReducer(indexRunState, "complete");
       indexRunState = next.state;
       if (next.shouldStart) startAutoIndex(root);

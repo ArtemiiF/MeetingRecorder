@@ -41,7 +41,7 @@ async function boot(apiOverrides = {}) {
     reveal: () => {},
     onRecordEvent: (cb) => { handlers.record = cb; },
     onProcessEvent: (cb) => { handlers.process = cb; },
-    onParaReindexEvent: () => {},
+    onParaReindexEvent: (cb) => { handlers.reindex = cb; },
   }, apiOverrides);
 
   window.eval(RENDERER);
@@ -741,4 +741,42 @@ test("'это я' button fills speaker row input with authorName; Apply sends it
   $("applySpeakers").click(); await tick(window);
   assert.ok(renamed, "renameSpeakers was not called");
   assert.equal(renamed.map["Спикер 1"], "Алёна");
+});
+
+// ── PARA auto-index log buffer ──────────────────────────────────────────────
+test("PARA auto-index log: buffer is capped, not unbounded, across many background events", async () => {
+  const { $, handlers } = await boot();
+  // Simulate the background auto-index trigger (main.js startAutoIndex/triggerAutoIndex),
+  // which streams "log" events on the same onParaReindexEvent channel as the manual
+  // reindex button — but unlike the button click, it never resets logBox.textContent,
+  // so it can fire many times over a long session without any user-driven clear point.
+  const totalRuns = 500;
+  for (let i = 0; i < totalRuns; i++) {
+    handlers.reindex({ event: "log", msg: `run ${i}` });
+  }
+  const box = $("paraReindexLog");
+  const lines = box.textContent.split("\n").filter(Boolean);
+  assert.ok(lines.length < totalRuns, `expected the buffer to be capped, got ${lines.length} lines`);
+  assert.ok(lines.some((l) => l.endsWith(`run ${totalRuns - 1}`)), "latest log line was dropped");
+  assert.ok(!lines.some((l) => l.endsWith("run 0")), "oldest log line should have been evicted");
+});
+
+// ── PARA chat degraded badge ↔ backend log-line link ────────────────────────
+test("PARA chat degraded badge: backend.py's log wording matches main.js's exact-match marker", () => {
+  // The renderer's degraded badge (tested above via result.degraded) only ever gets set
+  // to true because main.js's para-search handler does an exact string match between
+  // backend.py's log() call in _rag_retrieve and its own DEGRADED_LOG_MSG constant. A
+  // reword on either side would silently stop the badge from ever appearing, with no
+  // error anywhere in the chain — this test fails loudly instead.
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const backendSrc = fs.readFileSync(path.join(__dirname, "../backend.py"), "utf8");
+
+  const m = mainSrc.match(/const DEGRADED_LOG_MSG = "([^"]+)"/);
+  assert.ok(m, "DEGRADED_LOG_MSG constant not found in main.js (renamed or reworded?)");
+  const marker = m[1];
+
+  assert.ok(
+    backendSrc.includes(marker),
+    `backend.py no longer emits the exact string main.js matches on: ${JSON.stringify(marker)}`
+  );
 });
