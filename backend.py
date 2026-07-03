@@ -1825,10 +1825,16 @@ def _reconcile(conn, out_dir):
     conn.commit()
 
 
-def _db_list(conn, limit=200):
-    rows = conn.execute(
-        f"SELECT {','.join(_DB_COLS)} FROM meetings ORDER BY mtime DESC LIMIT ?", (limit,)
-    ).fetchall()
+def _db_list(conn, limit=None):
+    # stamp = recording time (filename timestamp), not mtime — mtime is bumped by
+    # post-hoc edits (e.g. rename-speakers rewrites the note file), which would
+    # otherwise reshuffle the rail out of recording order. No LIMIT: owner wants
+    # every note in the vault, not just the most recent 200.
+    query = f"SELECT {','.join(_DB_COLS)} FROM meetings ORDER BY stamp DESC"
+    if limit:
+        rows = conn.execute(query + " LIMIT ?", (limit,)).fetchall()
+    else:
+        rows = conn.execute(query).fetchall()
     return [dict(zip(_DB_COLS, r)) for r in rows]
 
 

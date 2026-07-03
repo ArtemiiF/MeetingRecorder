@@ -324,6 +324,51 @@ test("history search filters the rail by title", async () => {
   assert.ok($("historyList").textContent.includes("Интервью Марина"));
 });
 
+test("history search matches a different word-form (проблема → проблемы)", async () => {
+  const { window, $ } = await boot({
+    listHistory: async () => [
+      { name: "2026-06-30-120401", title: "Проблемы миграций при деплое", language: "ru", note: "/a.md", audio: null },
+      { name: "2026-06-29-090000", title: "Планирование спринта", language: "ru", note: "/b.md", audio: null },
+    ],
+  });
+  window.document.querySelector('.topbtn[data-view="history"]').click();
+  await tick(window);
+  $("historySearch").value = "проблема";
+  $("historySearch").dispatchEvent(new window.Event("input"));
+  const shown = $("historyList").querySelectorAll(".rail-item");
+  assert.equal(shown.length, 1);
+  assert.ok($("historyList").textContent.includes("Проблемы миграций при деплое"));
+});
+
+test("history rail preserves backend-provided order (no client-side re-sort)", async () => {
+  const { window, $ } = await boot({
+    listHistory: async () => [
+      { name: "2026-03-20-100000", title: "Newest", language: "ru", note: "/c.md", audio: null },
+      { name: "2026-02-15-100000", title: "Middle", language: "ru", note: "/b.md", audio: null },
+      { name: "2026-01-01-100000", title: "Oldest", language: "ru", note: "/a.md", audio: null },
+    ],
+  });
+  window.document.querySelector('.topbtn[data-view="history"]').click();
+  await tick(window);
+  const titles = [...$("historyList").querySelectorAll(".rail-title")].map((e) => e.textContent);
+  assert.deepEqual(titles, ["Newest", "Middle", "Oldest"]);
+});
+
+test("language selector: #language has no «Авто» option, #historyLang keeps it", async () => {
+  const { $ } = await boot();
+  const languageValues = [...$("language").querySelectorAll("option")].map((o) => o.value);
+  assert.ok(!languageValues.includes("auto"));
+  const historyLangValues = [...$("historyLang").querySelectorAll("option")].map((o) => o.value);
+  assert.ok(historyLangValues.includes("auto"));
+});
+
+test("stored language 'auto' is coerced to 'ru' on load", async () => {
+  const { $ } = await boot({
+    getPresets: async () => ({ presets: [{ name: "P", prompt: "x" }], defaultOutDir: "/tmp/out", hfToken: "", language: "auto" }),
+  });
+  assert.equal($("language").value, "ru");
+});
+
 test("history language filter narrows the rail", async () => {
   const { window, $ } = await boot({
     listHistory: async () => [

@@ -1,5 +1,6 @@
 * { box-sizing: border-box; margin: 0; padding: 0; }
 :root {
+  color-scheme: dark;
   --bg: #111418; --card: #1a1f26; --card2: #232a33;
   --fg: #e6e9ed; --muted: #8a93a0; --line: #2c343f;
   --accent: #4c8bf5; --accent2: #3a6fd0; --danger: #e5484d; --ok: #3fb950;
@@ -121,7 +122,7 @@ main { max-width: 860px; margin: 0 auto; padding: 20px 24px 60px; }
   color: var(--muted); margin-bottom: 14px; font-weight: 600; }
 
 label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 6px; }
-select, input[type=text], textarea {
+select, input[type=text], input[type=date], textarea {
   width: 100%; background: var(--card2); color: var(--fg);
   border: 1px solid var(--line); border-radius: 8px; padding: 9px 11px;
   font-size: 14px; font-family: inherit;

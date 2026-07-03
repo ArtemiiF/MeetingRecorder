@@ -259,7 +259,9 @@ async function init() {
   state.outDir = data.defaultOutDir || "";
   state.outDirCustom = !!data.outDirCustom;
   state.hfToken = data.hfToken || "";
-  state.language = data.language || "ru";
+  // "auto" was removed from the #language <select> options (no matching <option> left
+  // to select) but old presets/settings files may still carry it — coerce to the default.
+  state.language = (data.language === "auto" ? "" : data.language) || "ru";
   state.authorName = data.authorName || "Автор";
   state.glossary = data.glossary || DEFAULT_GLOSSARY;
   state.para = data.para || null;
@@ -784,6 +786,35 @@ function populateTemplateFilter() {
   if (templates.includes(cur)) sel.value = cur;
 }
 
+// ── search: minimal Russian suffix-stripping ("poor man's stemmer") ────────────
+// Not a full morphological analyzer — strips one common inflectional ending
+// (longest match first) so e.g. "проблема" and "проблемы" collapse to the same
+// stem. Fixes the reported class of miss (query is a different case-ending of a
+// word that appears in the title) without pulling in a stemmer dependency.
+const RU_STEM_SUFFIXES = [
+  "ами", "ями",                                                   // instrumental plural
+  "ов", "ев", "ей", "ах", "ях", "ой", "ий", "ым", "ия",            // 2-letter endings
+  "а", "я", "ы", "и", "е", "о", "у", "ю",                          // 1-letter endings
+];
+function ruStem(word) {
+  if (word.length <= 3) return word; // too short to safely strip (acronyms, short tokens)
+  for (const suf of RU_STEM_SUFFIXES) {
+    if (word.length > suf.length + 2 && word.endsWith(suf)) return word.slice(0, -suf.length);
+  }
+  return word;
+}
+// true if any word in `haystack` shares a stem with `query`, or a word's stem starts
+// with the query's stem (keeps matching while the user is still typing).
+function textMatchesQuery(haystack, query) {
+  if (!query) return true;
+  const qStem = ruStem(query.toLowerCase());
+  const words = (haystack || "").toLowerCase().split(/[^a-zа-яё0-9]+/i).filter(Boolean);
+  return words.some((w) => {
+    const wStem = ruStem(w);
+    return wStem === qStem || wStem.startsWith(qStem);
+  });
+}
+
 // render the rail filtered by search (title/date) + language + template + date range.
 // dataset.idx points into the full historyItems so selection survives filtering.
 function renderRail() {
@@ -797,7 +828,7 @@ function renderRail() {
   if (!historyItems.length) { rail.innerHTML = '<p class="hint">Пока пусто.</p>'; return; }
   const shown = historyItems.filter((it) => {
     const d = (it.name || "").slice(0, 10); // stamp = YYYY-MM-DD-HHMMSS → ISO date sorts lexically
-    return (!q || (it.title || "").toLowerCase().includes(q) || (it.name || "").toLowerCase().includes(q)) &&
+    return (!q || textMatchesQuery(it.title || "", q) || textMatchesQuery(it.name || "", q)) &&
       (!lang || it.language === lang) &&
       (!tmpl || it.template === tmpl) &&
       (!from || d >= from) && (!to || d <= to);

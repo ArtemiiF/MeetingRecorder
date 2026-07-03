@@ -1,6 +1,7 @@
 """Tests for backend.py pure logic + mocked I/O boundaries."""
 import io
 import json
+import os
 import sys
 import types
 from pathlib import Path
@@ -353,6 +354,42 @@ def test_index_reconcile_add_then_drop(tmp_path):
     backend._reconcile(conn, str(out))
     assert backend._db_list(conn) == []
     conn.close()
+
+
+def test_db_list_orders_by_stamp_not_mtime(tmp_path):
+    # Owner complaint: rail order silently reshuffles after a post-hoc edit (e.g. speaker
+    # rename) bumps a note's mtime. Order must follow the recording-time `stamp`, not mtime.
+    out = tmp_path / "vault"; out.mkdir()
+    db = str(tmp_path / "i.db")
+    (out / "meeting-2026-01-01-100000.md").write_text(
+        '---\ntitle: "Old"\n---\n# x', encoding="utf-8")
+    (out / "meeting-2026-06-01-100000.md").write_text(
+        '---\ntitle: "New"\n---\n# x', encoding="utf-8")
+    conn = backend._db_connect(db)
+    backend._reconcile(conn, str(out))
+    # bump the OLD note's mtime to "now" (newer than the new note's mtime) — simulates a
+    # post-hoc edit like rename-speakers rewriting the file — then re-reconcile.
+    now = Path(out / "meeting-2026-01-01-100000.md").stat().st_mtime
+    os.utime(out / "meeting-2026-01-01-100000.md", (now + 1000, now + 1000))
+    backend._reconcile(conn, str(out))
+    items = backend._db_list(conn)
+    conn.close()
+    # despite the old note now having the newest mtime, stamp-DESC keeps it second.
+    assert [it["title"] for it in items] == ["New", "Old"]
+
+
+def test_db_list_has_no_cap(tmp_path):
+    out = tmp_path / "vault"; out.mkdir()
+    db = str(tmp_path / "i.db")
+    n = 210  # more than the old hardcoded limit=200
+    for i in range(n):
+        (out / f"meeting-2026-01-01-{i:06d}.md").write_text(
+            f'---\ntitle: "N{i}"\n---\n# x', encoding="utf-8")
+    conn = backend._db_connect(db)
+    backend._reconcile(conn, str(out))
+    items = backend._db_list(conn)
+    conn.close()
+    assert len(items) == n
 
 
 def test_db_connect_sets_busy_timeout(tmp_path):
