@@ -142,10 +142,13 @@ app.whenReady().then(() => {
 let quitting = false;
 app.on("before-quit", async (e) => {
   if (quitting) return;
+  // Set unconditionally (not just on the recordProc/tee branch below) so the
+  // auto-index respawn guard in startAutoIndex sees it on every quit path,
+  // including the synchronous procProc/autoIndexProc-only branch.
+  quitting = true;
   // mic.wav is finalized by python only after it sees "stop" — must await before exit
   if (recordProc || tee) {
     e.preventDefault();
-    quitting = true;
     if (tee) { try { await tee.stop(); } catch {} try { if (sysWav) sysWav.close(); } catch {} tee = null; sysWav = null; }
     if (recordProc) {
       try { recordProc.stdin.write("stop\n"); } catch { recordProc.kill(); }
@@ -687,7 +690,12 @@ function startAutoIndex(root) {
       autoIndexProc = null;
       const next = indexRunReducer(indexRunState, "complete");
       indexRunState = next.state;
-      if (next.shouldStart) startAutoIndex(root);
+      // Killing autoIndexProc in before-quit still lets this close callback fire
+      // (kill() is async) — without the quitting check, a queued trailing run
+      // would spawn a fresh, untracked child right as the app exits: the exact
+      // orphan the before-quit fix targets. indexRunReducer itself stays a pure
+      // state machine (see lib/mainutil.js) — the app-quit check belongs here.
+      if (next.shouldStart && !quitting) startAutoIndex(root);
     });
 }
 
