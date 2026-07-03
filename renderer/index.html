@@ -17,6 +17,7 @@
     <button class="topbtn active" data-view="record">🎙 Запись</button>
     <button class="topbtn" data-view="history">📚 История</button>
     <button class="topbtn" data-view="para">🗂 PARA</button>
+    <button class="topbtn" data-view="glossary">📖 Словарь</button>
   </nav>
 
   <main>
@@ -71,9 +72,6 @@
       </div>
       <label>Ваше имя (для переименования спикеров)
         <input type="text" id="authorName" placeholder="Автор" />
-      </label>
-      <label>Словарь терминов (имена, продукты — помогает распознаванию)
-        <textarea id="glossary" rows="3" spellcheck="false" placeholder="Иван Петров, Mindbox, ClickHouse"></textarea>
       </label>
       <label class="check">
         <input type="checkbox" id="diarize" checked /> Определять спикеров (диаризация, медленнее)
@@ -236,6 +234,16 @@
         </div>
         </div><!-- /para-main -->
       </div><!-- /para-layout -->
+    </div>
+
+    <!-- GLOSSARY VIEW -->
+    <div id="view-glossary" class="hidden">
+      <section class="card">
+        <h2>Словарь терминов</h2>
+        <label>Словарь терминов (имена, продукты — помогает распознаванию)
+          <textarea id="glossary" rows="3" spellcheck="false" placeholder="Иван Петров, Mindbox, ClickHouse"></textarea>
+        </label>
+      </section>
     </div>
   </main>
 

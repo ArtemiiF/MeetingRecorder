@@ -686,12 +686,22 @@ test("glossary loads from presets into state and the settings textarea", async (
   assert.equal($("glossary").value, "Иван Петров, Mindbox");
 });
 
-test("glossary defaults to '' when absent from presets", async () => {
+const DEFAULT_GLOSSARY = "деплой, бэклог, спринт, ретро, стендап, груминг, эстимейт, роадмап, хотфикс, багфикс, тикет, пул-реквест, коммит, мёрж, код-ревью, статус-митинг, инцидент, продакшн, стейджинг, онбординг, скоуп, дедлайн, чекпоинт, апдейт, апрув, фидбек, Kubernetes, Docker, GitLab, GitHub, Jira, Confluence, Slack, Zoom, AWS, Kafka, Redis, PostgreSQL, ClickHouse, Grafana, Prometheus, Terraform, CI/CD, API, SQL, DevOps, MVP, KPI, OKR";
+
+test("glossary pre-fills with the default term list when absent from presets", async () => {
   const { $, window } = await boot({
     getPresets: async () => ({ presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru" }),
   });
   await tick(window);
-  assert.equal($("glossary").value, "");
+  assert.equal($("glossary").value, DEFAULT_GLOSSARY);
+});
+
+test("glossary pre-fills with the default term list when presets has an empty string", async () => {
+  const { $, window } = await boot({
+    getPresets: async () => ({ presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru", glossary: "" }),
+  });
+  await tick(window);
+  assert.equal($("glossary").value, DEFAULT_GLOSSARY);
 });
 
 test("changing glossary input persists with glossary in savePresets payload", async () => {
@@ -703,6 +713,31 @@ test("changing glossary input persists with glossary in savePresets payload", as
   await tick(window);
   assert.ok(saved, "savePresets was not called");
   assert.equal(saved.glossary, "ClickHouse, Kubernetes");
+});
+
+test("changing glossary input persists correctly even while the Словарь tab is not active", async () => {
+  let saved = null;
+  const { $, window } = await boot({ savePresets: async (data) => { saved = data; return true; } });
+  await tick(window);
+  window.document.querySelector('.topbtn[data-view="history"]').click(); // navigate away from the glossary tab
+  assert.ok($("view-glossary").classList.contains("hidden"), "glossary view must be hidden after navigating away");
+  $("glossary").value = "ClickHouse, Kubernetes";
+  $("glossary").dispatchEvent(new window.Event("change"));
+  await tick(window);
+  assert.ok(saved, "savePresets was not called");
+  assert.equal(saved.glossary, "ClickHouse, Kubernetes");
+});
+
+test("view switching shows the Словарь tab and hides the other three views", async () => {
+  const { window, $ } = await boot();
+  window.document.querySelector('.topbtn[data-view="glossary"]').click();
+  assert.ok(!$("view-glossary").classList.contains("hidden"), "glossary view must be visible");
+  assert.ok($("view-record").classList.contains("hidden"));
+  assert.ok($("view-history").classList.contains("hidden"));
+  assert.ok($("view-para").classList.contains("hidden"));
+  window.document.querySelector('.topbtn[data-view="record"]').click();
+  assert.ok(!$("view-record").classList.contains("hidden"));
+  assert.ok($("view-glossary").classList.contains("hidden"), "glossary view must be hidden again");
 });
 
 test("glossary is forwarded to processAudio when running", async () => {

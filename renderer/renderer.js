@@ -1,5 +1,9 @@
 const $ = (id) => document.getElementById(id);
 
+// Pre-filled when the user has never set a glossary — biases Whisper/LLM correction
+// toward common eng/dev jargon without forcing anyone to type it in from scratch.
+const DEFAULT_GLOSSARY = "деплой, бэклог, спринт, ретро, стендап, груминг, эстимейт, роадмап, хотфикс, багфикс, тикет, пул-реквест, коммит, мёрж, код-ревью, статус-митинг, инцидент, продакшн, стейджинг, онбординг, скоуп, дедлайн, чекпоинт, апдейт, апрув, фидбек, Kubernetes, Docker, GitLab, GitHub, Jira, Confluence, Slack, Zoom, AWS, Kafka, Redis, PostgreSQL, ClickHouse, Grafana, Prometheus, Terraform, CI/CD, API, SQL, DevOps, MVP, KPI, OKR";
+
 const state = {
   mode: "record",      // 'record' | 'import'
   recordedFile: null,  // path from a finished recording
@@ -254,7 +258,7 @@ async function init() {
   state.hfToken = data.hfToken || "";
   state.language = data.language || "ru";
   state.authorName = data.authorName || "Автор";
-  state.glossary = data.glossary || "";
+  state.glossary = data.glossary || DEFAULT_GLOSSARY;
   state.para = data.para || null;
   state.secretEncrypted = data.secretEncrypted !== false;
   $("outDir").value = state.outDir;
@@ -645,7 +649,7 @@ window.api.onProcessEvent((ev) => {
 // ── top-level view switching ─────────────────────────────────────────────────
 function switchView(v) {
   document.querySelectorAll(".topbtn").forEach((b) => b.classList.toggle("active", b.dataset.view === v));
-  ["record", "history", "para"].forEach((id) => $("view-" + id).classList.toggle("hidden", id !== v));
+  ["record", "history", "para", "glossary"].forEach((id) => $("view-" + id).classList.toggle("hidden", id !== v));
   if (v === "history") refreshHistory();
   if (v === "para") renderPara();
 }
