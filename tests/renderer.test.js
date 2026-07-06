@@ -1100,6 +1100,128 @@ test("glossary is forwarded to processAudio when running", async () => {
   assert.equal(sent.glossary, "Иван Петров, Mindbox");
 });
 
+// ── glossary: chip list UX ───────────────────────────────────────────────────
+
+test("glossary chips render one chip per term from the loaded comma-joined string, with a counter", async () => {
+  const { $, window } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru",
+      glossary: "Иван Петров, Mindbox, ClickHouse",
+    }),
+  });
+  await tick(window);
+  const chips = Array.from($("glossaryChips").querySelectorAll(".chip-text")).map((el) => el.textContent);
+  assert.deepEqual(chips, ["Иван Петров", "Mindbox", "ClickHouse"]);
+  assert.equal($("glossaryCount").textContent, "3 терминов");
+});
+
+test("adding a term via the input appends a chip and persists the comma-joined string", async () => {
+  let saved = null;
+  const { $, window } = await boot({
+    getPresets: async () => ({ presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru", glossary: "Mindbox" }),
+    savePresets: async (data) => { saved = data; return true; },
+  });
+  await tick(window);
+  $("glossaryNewTerm").value = "Иван Петров";
+  $("glossaryAddBtn").click();
+  await tick(window);
+  const chips = Array.from($("glossaryChips").querySelectorAll(".chip-text")).map((el) => el.textContent);
+  assert.deepEqual(chips, ["Mindbox", "Иван Петров"]);
+  assert.equal($("glossaryCount").textContent, "2 терминов");
+  assert.equal($("glossaryNewTerm").value, "", "input clears after a successful add");
+  assert.equal($("glossary").value, "Mindbox, Иван Петров", "textarea stays in sync with chips");
+  assert.ok(saved, "savePresets was not called");
+  assert.equal(saved.glossary, "Mindbox, Иван Петров");
+});
+
+test("adding a case-insensitive duplicate term is rejected with a hint, no new chip", async () => {
+  const { $, window } = await boot({
+    getPresets: async () => ({ presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru", glossary: "Mindbox" }),
+  });
+  await tick(window);
+  $("glossaryNewTerm").value = "mindbox";
+  $("glossaryAddBtn").click();
+  await tick(window);
+  const chips = Array.from($("glossaryChips").querySelectorAll(".chip-text")).map((el) => el.textContent);
+  assert.deepEqual(chips, ["Mindbox"]);
+  assert.equal($("glossaryCount").textContent, "1 терминов");
+  assert.ok(!$("glossaryHint").classList.contains("hidden"), "hint must be shown for a duplicate");
+  assert.match($("glossaryHint").textContent, /уже есть в списке/);
+});
+
+test("removing a chip drops the term from state.glossary and persists", async () => {
+  let saved = null;
+  const { $, window } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru",
+      glossary: "Иван Петров, Mindbox, ClickHouse",
+    }),
+    savePresets: async (data) => { saved = data; return true; },
+  });
+  await tick(window);
+  $("glossaryChips").querySelector('.chip-remove[data-term="Mindbox"]').click();
+  await tick(window);
+  const chips = Array.from($("glossaryChips").querySelectorAll(".chip-text")).map((el) => el.textContent);
+  assert.deepEqual(chips, ["Иван Петров", "ClickHouse"]);
+  assert.equal($("glossaryCount").textContent, "2 терминов");
+  assert.equal($("glossary").value, "Иван Петров, ClickHouse");
+  assert.ok(saved, "savePresets was not called");
+  assert.equal(saved.glossary, "Иван Петров, ClickHouse");
+});
+
+test("«Дополнить распространёнными» merges DEFAULT_GLOSSARY terms not already present, preserving current order first", async () => {
+  let saved = null;
+  const { $, window } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru",
+      // "деплой" and "Kubernetes" already overlap the default list (case-insensitively);
+      // "Иван Петров" is a custom term absent from the defaults.
+      glossary: "Иван Петров, деплой, kubernetes",
+    }),
+    savePresets: async (data) => { saved = data; return true; },
+  });
+  await tick(window);
+  $("glossaryFillDefaults").click();
+  await tick(window);
+  const chips = Array.from($("glossaryChips").querySelectorAll(".chip-text")).map((el) => el.textContent);
+  const defaultCount = DEFAULT_GLOSSARY.split(",").length;
+  // current 3 terms kept first, in order; only the non-overlapping defaults appended after.
+  assert.deepEqual(chips.slice(0, 3), ["Иван Петров", "деплой", "kubernetes"]);
+  assert.equal(chips.length, 3 + (defaultCount - 2)); // -2 for "деплой"/"Kubernetes" overlap
+  assert.ok(!chips.slice(3).some((t) => t.toLowerCase() === "деплой" || t.toLowerCase() === "kubernetes"),
+    "overlapping default terms must not be duplicated");
+  assert.ok(!$("glossaryHint").classList.contains("hidden"));
+  assert.match($("glossaryHint").textContent, /Добавлено \d+ новых терминов/);
+  assert.ok(saved, "savePresets was not called");
+  assert.equal(saved.glossary, $("glossary").value);
+});
+
+test("«Дополнить распространёнными» is a no-op with a hint when every default term is already present", async () => {
+  const { $, window } = await boot({
+    getPresets: async () => ({ presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru", glossary: DEFAULT_GLOSSARY }),
+  });
+  await tick(window);
+  const before = $("glossary").value;
+  $("glossaryFillDefaults").click();
+  await tick(window);
+  assert.equal($("glossary").value, before, "glossary string must not change when nothing new to add");
+  assert.ok(!$("glossaryHint").classList.contains("hidden"));
+  assert.match($("glossaryHint").textContent, /уже есть в списке/);
+});
+
+test("editing the textarea (текстом mode) re-syncs the chip list", async () => {
+  const { $, window } = await boot({
+    getPresets: async () => ({ presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru", glossary: "Mindbox" }),
+  });
+  await tick(window);
+  $("glossary").value = "Mindbox, ClickHouse, Иван Петров";
+  $("glossary").dispatchEvent(new window.Event("change"));
+  await tick(window);
+  const chips = Array.from($("glossaryChips").querySelectorAll(".chip-text")).map((el) => el.textContent);
+  assert.deepEqual(chips, ["Mindbox", "ClickHouse", "Иван Петров"]);
+  assert.equal($("glossaryCount").textContent, "3 терминов");
+});
+
 // ── auto-«Я»: micFile/systemFile/authorName plumbing ────────────────────────
 test("auto-«Я» inputs (micFile/systemFile/authorName) are forwarded to processAudio in record mode", async () => {
   let sent = null;

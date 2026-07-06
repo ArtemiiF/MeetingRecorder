@@ -205,6 +205,23 @@ body.processing .history-row button { opacity: .4; pointer-events: none; }
 .timer { font-variant-numeric: tabular-nums; font-size: 22px; color: var(--muted); }
 .timer.live { color: var(--danger); }
 
+/* glossary: chip list */
+.glossary-toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+.glossary-count { color: var(--muted); font-size: 12px; }
+.chip-list { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+.chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  background: var(--card2); border: 1px solid var(--line); border-radius: 16px;
+  padding: 4px 4px 4px 12px; font-size: 13px; color: var(--fg);
+}
+.chip-remove {
+  background: transparent; border: none; color: var(--muted); cursor: pointer;
+  font-size: 15px; line-height: 1; padding: 3px 7px; border-radius: 50%; font-family: inherit;
+}
+.chip-remove:hover { background: var(--danger); color: #fff; }
+.glossary-add-row { display: flex; gap: 8px; }
+.glossary-add-row input { flex: 1; }
+
 .preset-row { display: flex; gap: 8px; margin-bottom: 12px; }
 .preset-row select { flex: 1; }
 .check { display: flex; align-items: center; gap: 8px; color: var(--fg);

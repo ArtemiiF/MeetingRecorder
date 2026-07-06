@@ -299,6 +299,7 @@ async function init() {
   $("language").value = state.language;
   $("authorName").value = state.authorName;
   $("glossary").value = state.glossary;
+  renderGlossaryChips();
   updateTokenWarn();
   renderPresets();
   if (state.presets.length) selectPreset(0);
@@ -386,8 +387,81 @@ $("authorName").addEventListener("change", (e) => {
 
 $("glossary").addEventListener("change", (e) => {
   state.glossary = e.target.value || "";
+  renderGlossaryChips();
   persistPresets();
 });
+
+// ── glossary: chip list (add / remove / merge defaults) ─────────────────────
+// Storage stays a single comma-joined string (state.glossary, mirrored into the
+// #glossary textarea for the "текстом" fallback and for backend._glossary_terms,
+// which splits on the same [,\n]+ pattern) — chips are just a view over it.
+function parseGlossaryTerms(str) {
+  return (str || "").split(/[,\n]+/).map((t) => t.trim()).filter(Boolean);
+}
+
+function setGlossaryTerms(terms) {
+  state.glossary = terms.join(", ");
+  $("glossary").value = state.glossary;
+  renderGlossaryChips();
+  persistPresets();
+}
+
+function showGlossaryHint(msg) {
+  const el = $("glossaryHint");
+  el.textContent = msg || "";
+  el.classList.toggle("hidden", !msg);
+}
+
+function renderGlossaryChips() {
+  const terms = parseGlossaryTerms(state.glossary);
+  const box = $("glossaryChips");
+  box.innerHTML = terms.length
+    ? terms.map((t) =>
+        `<span class="chip"><span class="chip-text">${escapeHtml(t)}</span>` +
+        `<button type="button" class="chip-remove" data-term="${escapeHtml(t)}" aria-label="Удалить">×</button></span>`
+      ).join("")
+    : '<p class="hint">Список пуст — добавь термин ниже.</p>';
+  box.querySelectorAll(".chip-remove").forEach((btn) =>
+    btn.addEventListener("click", () => removeGlossaryTerm(btn.dataset.term)));
+  $("glossaryCount").textContent = terms.length + " терминов";
+}
+
+function addGlossaryTerm() {
+  const input = $("glossaryNewTerm");
+  const raw = (input.value || "").trim();
+  if (!raw) return;
+  const terms = parseGlossaryTerms(state.glossary);
+  if (terms.some((t) => t.toLowerCase() === raw.toLowerCase())) {
+    showGlossaryHint(`«${raw}» уже есть в списке`);
+    return;
+  }
+  setGlossaryTerms(terms.concat(raw));
+  input.value = "";
+  showGlossaryHint("");
+}
+
+function removeGlossaryTerm(term) {
+  setGlossaryTerms(parseGlossaryTerms(state.glossary).filter((t) => t !== term));
+}
+
+function mergeDefaultGlossary() {
+  const current = parseGlossaryTerms(state.glossary);
+  const have = new Set(current.map((t) => t.toLowerCase()));
+  const toAdd = parseGlossaryTerms(DEFAULT_GLOSSARY).filter((t) => !have.has(t.toLowerCase()));
+  if (!toAdd.length) {
+    showGlossaryHint("Все распространённые термины уже есть в списке");
+    return;
+  }
+  setGlossaryTerms(current.concat(toAdd));
+  showGlossaryHint(`Добавлено ${toAdd.length} новых терминов`);
+}
+
+$("glossaryAddBtn").addEventListener("click", addGlossaryTerm);
+$("glossaryNewTerm").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); addGlossaryTerm(); }
+});
+$("glossaryFillDefaults").addEventListener("click", mergeDefaultGlossary);
+$("glossaryToggleText").addEventListener("click", () => $("glossaryTextWrap").classList.toggle("hidden"));
 
 function updateTokenWarn() {
   const warn = $("tokenWarn");

@@ -225,9 +225,27 @@
     <div id="view-glossary" class="hidden">
       <section class="card">
         <h2>Словарь терминов</h2>
-        <label>Словарь терминов (имена, продукты — помогает распознаванию)
-          <textarea id="glossary" rows="3" spellcheck="false" placeholder="Иван Петров, Mindbox, ClickHouse"></textarea>
-        </label>
+        <p class="hint">Имена, продукты и термины, которые помогают распознаванию речи.</p>
+
+        <div class="glossary-toolbar">
+          <span id="glossaryCount" class="glossary-count">0 терминов</span>
+          <button id="glossaryFillDefaults" class="btn small">Дополнить распространёнными</button>
+          <button id="glossaryToggleText" class="btn small ghost">Редактировать текстом</button>
+        </div>
+
+        <div id="glossaryChips" class="chip-list"></div>
+
+        <div class="glossary-add-row">
+          <input id="glossaryNewTerm" type="text" placeholder="Добавить термин…" />
+          <button id="glossaryAddBtn" class="btn small">Добавить</button>
+        </div>
+        <p id="glossaryHint" class="hint hidden"></p>
+
+        <div id="glossaryTextWrap" class="hidden">
+          <label>Текстом, через запятую
+            <textarea id="glossary" rows="3" spellcheck="false" placeholder="Иван Петров, Mindbox, ClickHouse"></textarea>
+          </label>
+        </div>
       </section>
     </div>
   </main>
