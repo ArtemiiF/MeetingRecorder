@@ -27,9 +27,11 @@ contextBridge.exposeInMainWorld("api", {
   paraReindex: (root) => ipcRenderer.invoke("para-reindex", { root }),
   paraSearch: (root, messages) => ipcRenderer.invoke("para-search", { root, messages }),
   cancelSearch: () => ipcRenderer.invoke("cancel-search"),
+  notifyRecordingState: (recording) => ipcRenderer.send("recording-state", recording),
 
   onRecordEvent: (cb) => ipcRenderer.on("record-event", (_e, ev) => cb(ev)),
   onProcessEvent: (cb) => ipcRenderer.on("process-event", (_e, ev) => cb(ev)),
   onParaReindexEvent: (cb) => ipcRenderer.on("para-reindex-event", (_e, ev) => cb(ev)),
   onModelDownloadEvent: (cb) => ipcRenderer.on("download-models-event", (_e, ev) => cb(ev)),
+  onTrayRecordToggle: (cb) => ipcRenderer.on("tray-record-toggle", () => cb()),
 });

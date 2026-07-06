@@ -8,7 +8,7 @@ const {
   buildWavHeader, WavWriter, rmsLevel, cacheKey,
   pairHistory, encodeTokenBlob, decodeTokenBlob, isStale,
   rewriteNoteSpeakers, isOutsideRoot, indexRunReducer, diskGuardVerdict,
-  resolveOutDirOnVaultChange,
+  resolveOutDirOnVaultChange, trayMenuTemplate,
 } = require("../lib/mainutil");
 
 // ── WAV header ──────────────────────────────────────────────────────────────
@@ -292,4 +292,35 @@ test("indexRunReducer: undefined state defaults to idle, trigger starts", () => 
   const r = indexRunReducer(undefined, "trigger");
   assert.equal(r.shouldStart, true);
   assert.deepEqual(r.state, { inFlight: true, queued: false });
+});
+
+// ── tray menu (macOS menu-bar icon) ──────────────────────────────────────────
+test("trayMenuTemplate: not recording → 'Начать запись' toggle label", () => {
+  const items = trayMenuTemplate({ recording: false });
+  const toggle = items.find((i) => i.id === "toggle-record");
+  assert.equal(toggle.label, "Начать запись");
+  assert.equal(toggle.enabled, true);
+});
+test("trayMenuTemplate: recording → 'Остановить запись' toggle label", () => {
+  const items = trayMenuTemplate({ recording: true });
+  const toggle = items.find((i) => i.id === "toggle-record");
+  assert.equal(toggle.label, "Остановить запись");
+});
+test("trayMenuTemplate: undefined state defaults to not-recording", () => {
+  const items = trayMenuTemplate(undefined);
+  assert.equal(items.find((i) => i.id === "toggle-record").label, "Начать запись");
+});
+test("trayMenuTemplate: has an 'open window' item and a trailing separator + quit item", () => {
+  const items = trayMenuTemplate({ recording: false });
+  assert.ok(items.find((i) => i.id === "open-window" && i.label === "Открыть Meeting Recorder"));
+  const quitIdx = items.findIndex((i) => i.id === "quit");
+  assert.ok(quitIdx > 0);
+  assert.equal(items[quitIdx].label, "Выйти");
+  assert.equal(items[quitIdx - 1].type, "separator");
+});
+test("trayMenuTemplate: exactly one toggle item regardless of recording state (no duplicated/disabled variants)", () => {
+  for (const recording of [true, false]) {
+    const items = trayMenuTemplate({ recording });
+    assert.equal(items.filter((i) => i.id === "toggle-record").length, 1);
+  }
 });

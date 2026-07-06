@@ -671,13 +671,16 @@ function setRecIndicator(on) {
   $("recIndicator").classList.toggle("hidden", !on);
 }
 
-$("recBtn").addEventListener("click", async () => {
+// Named (not an inline click-handler lambda) so the tray "Начать/Остановить запись"
+// menu item can invoke the exact same flow — no duplicated recording logic in main.js.
+async function toggleRecording() {
   if (!state.recording) {
     const micDevice = $("micDevice").value;
     setSysStatus("🔊 Системный звук: запуск…", "");
     const res = await window.api.startRecording({ micDevice });
     if (!res.ok) { alert(res.error); return; }
     state.recording = true;
+    window.api.notifyRecordingState(true); // syncs the tray menu label + REC title
     state.recordedFile = null;
     setRecIndicator(true);
     $("timer").textContent = "00:00";
@@ -689,6 +692,7 @@ $("recBtn").addEventListener("click", async () => {
     refreshRunBtn();
   } else {
     state.recording = false;
+    window.api.notifyRecordingState(false);
     setRecIndicator(false);
     $("recBtn").textContent = "● Начать запись";
     $("recBtn").classList.remove("recording");
@@ -698,7 +702,9 @@ $("recBtn").addEventListener("click", async () => {
     setSysStatus("⏳ Свожу дорожки…", "");
     await window.api.stopRecording();
   }
-});
+}
+$("recBtn").addEventListener("click", toggleRecording);
+window.api.onTrayRecordToggle(toggleRecording);
 
 function fmtTime(s) {
   const m = Math.floor(s / 60);
@@ -739,6 +745,7 @@ window.api.onRecordEvent((ev) => {
   } else if (ev.event === "error") {
     setSysStatus("❌ Ошибка записи: " + ev.msg, "warn");
     state.recording = false;
+    window.api.notifyRecordingState(false);
     setRecIndicator(false);
     $("recBtn").textContent = "● Начать запись";
     $("recBtn").classList.remove("recording");

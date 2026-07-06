@@ -1,4 +1,7 @@
-const { app, BrowserWindow, ipcMain, dialog, safeStorage, systemPreferences } = require("electron");
+const {
+  app, BrowserWindow, ipcMain, dialog, safeStorage, systemPreferences,
+  Menu, Tray, nativeImage,
+} = require("electron");
 const { spawn } = require("child_process");
 const path = require("path");
 const fs = require("fs");
@@ -8,7 +11,7 @@ const {
   WavWriter, rmsLevel, cacheKey, pairHistory,
   encodeTokenBlob, decodeTokenBlob, isStale,
   rewriteNoteSpeakers, isOutsideRoot, indexRunReducer, diskGuardVerdict,
-  resolveOutDirOnVaultChange,
+  resolveOutDirOnVaultChange, trayMenuTemplate,
 } = require("./lib/mainutil");
 
 // audiotee is ESM-only — load it lazily via dynamic import() from this CommonJS module.
@@ -44,6 +47,8 @@ const DEFAULT_OUT = path.join(os.homedir(), "Documents", "Obsidian", "Meetings")
 fs.mkdirSync(TMP_DIR, { recursive: true });
 
 let mainWindow = null;
+let tray = null;         // menu-bar Tray — module-level ref so GC doesn't kill it
+let isRecording = false; // mirrors renderer's state.recording, pushed over "recording-state"
 let recordProc = null; // live mic recording subprocess
 let procProc = null;   // live processing subprocess
 let autoIndexProc = null; // background auto-index subprocess (fires after a successful process run)
@@ -119,6 +124,27 @@ function createWindow() {
     },
   });
   mainWindow.loadFile(path.join(APP_DIR, "renderer", "index.html"));
+  // Close (red-button / Cmd+W) hides to the tray instead of quitting — recording
+  // survives, app stays reachable from the dock + tray. `quitting` is set by
+  // before-quit before this fires on a real quit path (Cmd+Q / tray "Выйти"),
+  // so that path falls through to a real close instead of being intercepted.
+  mainWindow.on("close", (e) => {
+    if (!quitting) {
+      e.preventDefault();
+      mainWindow.hide();
+    }
+  });
+}
+
+// Bring the window to front, creating it if it was never opened (or got destroyed).
+// Shared by the dock icon (activate), tray "Открыть", and tray record-toggle.
+function showWindow() {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.show();
+    mainWindow.focus();
+  } else {
+    createWindow();
+  }
 }
 
 // Delete tmp recording/cache dirs older than maxAgeMs (sensitive audio + unbounded growth).
@@ -139,9 +165,49 @@ function pruneTemp(maxAgeMs) {
   sweep(path.join(TMP_DIR, "cache"), null); // old per-audio cache dirs
 }
 
+// ── menu-bar tray ────────────────────────────────────────────────────────────
+// Template image (filename ends in "Template" → macOS auto-tints it for dark/light
+// menu bars using the alpha channel as the mask; the @2x file alongside it is picked
+// up automatically by nativeImage's retina-representation lookup — no explicit
+// setTemplateImage/resize call needed).
+function createTray() {
+  const icon = nativeImage.createFromPath(path.join(APP_DIR, "assets", "trayTemplate.png"));
+  tray = new Tray(icon);
+  tray.setToolTip("Meeting Recorder");
+  refreshTray();
+}
+
+// Rebuilds the context menu (toggle label follows isRecording) and the "REC"
+// title badge. Called once at tray creation and again whenever the renderer
+// pushes a recording-state change. trayMenuTemplate (lib/mainutil) is the pure,
+// testable descriptor builder — click handlers are wired here since Menu/Tray
+// aren't available headless.
+function refreshTray() {
+  if (!tray) return;
+  const items = trayMenuTemplate({ recording: isRecording }).map((d) => {
+    if (d.type === "separator") return { type: "separator" };
+    const item = { label: d.label, enabled: d.enabled !== false };
+    if (d.id === "toggle-record") {
+      item.click = () => {
+        // starting: bring the recording UX (VU meter/timer/mic-errors) into view first
+        if (!isRecording) showWindow();
+        send("tray-record-toggle");
+      };
+    } else if (d.id === "open-window") {
+      item.click = () => showWindow();
+    } else if (d.id === "quit") {
+      item.click = () => app.quit();
+    }
+    return item;
+  });
+  tray.setContextMenu(Menu.buildFromTemplate(items));
+  tray.setTitle(isRecording ? "REC" : "");
+}
+
 app.whenReady().then(() => {
   try { pruneTemp(7 * 24 * 3600 * 1000); } catch {}
   createWindow();
+  createTray();
 });
 
 let quitting = false;
@@ -176,7 +242,9 @@ app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
 });
 app.on("activate", () => {
-  if (BrowserWindow.getAllWindows().length === 0) createWindow();
+  // With close-hides-to-tray, getAllWindows() is rarely empty — dock-icon click
+  // should just re-show the existing (possibly hidden) window, not spawn a second one.
+  showWindow();
 });
 
 // ── IPC ────────────────────────────────────────────────────────────────────
@@ -461,6 +529,15 @@ ipcMain.handle("stop-recording", async () => {
     () => {}
   );
   return { ok: true };
+});
+
+// Fire-and-forget push from the renderer's 3 state.recording update sites
+// (start / stop / mic-error) — keeps the tray menu label + "REC" title in sync
+// even while the window is hidden. One-way notification, no response expected,
+// hence ipcMain.on (not .handle).
+ipcMain.on("recording-state", (_e, recording) => {
+  isRecording = !!recording;
+  refreshTray();
 });
 
 // Stable cache dir for an audio file (path+size+mtime) → resumable stages survive

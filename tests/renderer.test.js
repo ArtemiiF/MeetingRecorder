@@ -54,10 +54,12 @@ async function boot(apiOverrides = {}) {
     paraSearch: async (_root, _messages) => ({ found: false, answer: "Не нашёл по этому вопросу записей в заметках.", citations: [] }),
     cancelSearch: async () => ({ ok: true }),
     reveal: () => {},
+    notifyRecordingState: () => {},
     onRecordEvent: (cb) => { handlers.record = cb; },
     onProcessEvent: (cb) => { handlers.process = cb; },
     onParaReindexEvent: (cb) => { handlers.reindex = cb; },
     onModelDownloadEvent: (cb) => { handlers.modelDownload = cb; },
+    onTrayRecordToggle: (cb) => { handlers.trayRecordToggle = cb; },
   }, apiOverrides);
 
   window.eval(RENDERER);
@@ -1827,6 +1829,45 @@ test("recording indicator turns off on the mic-error path too", async () => {
   handlers.record({ event: "error", msg: "mic disconnected" });
   await tick(window);
   assert.ok($("recIndicator").classList.contains("hidden"));
+});
+
+// ── tray record-state sync (menu-bar icon, all 3 state.recording sites) ─────
+test("start recording pushes notifyRecordingState(true)", async () => {
+  const calls = [];
+  const { window, $ } = await boot({ notifyRecordingState: (r) => calls.push(r) });
+  $("recBtn").click(); await tick(window);
+  assert.deepEqual(calls, [true]);
+});
+
+test("stop recording (record button) pushes notifyRecordingState(false)", async () => {
+  const calls = [];
+  const { window, $ } = await boot({ notifyRecordingState: (r) => calls.push(r) });
+  $("recBtn").click(); await tick(window); // start
+  $("recBtn").click(); await tick(window); // stop
+  assert.deepEqual(calls, [true, false]);
+});
+
+test("mic-error path pushes notifyRecordingState(false)", async () => {
+  const calls = [];
+  const { window, $, handlers } = await boot({ notifyRecordingState: (r) => calls.push(r) });
+  $("recBtn").click(); await tick(window); // start
+  handlers.record({ event: "error", msg: "mic disconnected" });
+  await tick(window);
+  assert.deepEqual(calls, [true, false]);
+});
+
+test("tray-record-toggle subscription drives the exact same flow as clicking the record button", async () => {
+  let startCalls = 0;
+  const { window, $, handlers } = await boot({
+    startRecording: async () => { startCalls++; return { ok: true }; },
+  });
+  handlers.trayRecordToggle(); await tick(window); // start, via tray
+  assert.equal(startCalls, 1);
+  assert.ok(!$("recIndicator").classList.contains("hidden"));
+  assert.equal($("recBtn").textContent, "■ Остановить");
+  handlers.trayRecordToggle(); await tick(window); // stop, via tray
+  assert.ok($("recIndicator").classList.contains("hidden"));
+  assert.equal($("recBtn").textContent, "● Начать запись");
 });
 
 // ── app reset ("настроить заново") ──────────────────────────────────────────
