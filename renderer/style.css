@@ -252,6 +252,8 @@ body.processing .history-row button { opacity: .4; pointer-events: none; }
 .queue-item.queue-failed { color: #fff; border-color: var(--danger); background: var(--danger); }
 .queue-item.queue-canceled { opacity: .5; }
 .queue-name { word-break: break-all; }
+.queue-retry-btn { margin-left: auto; }
+body.processing .queue-item button { opacity: .4; pointer-events: none; }
 
 .stages { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
 .stage {

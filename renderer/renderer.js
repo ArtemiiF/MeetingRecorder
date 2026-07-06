@@ -576,25 +576,47 @@ $("pickOut").addEventListener("click", async () => {
 // duplicated for "single" vs "batch".
 const QUEUE_STATUS_ICON = { queued: "⏳", running: "🔵", done: "🟢", failed: "🔴", canceled: "⏹" };
 
+// Set only while a single failed row is being retried via its own ↻ (retryQueueItem),
+// as opposed to a batch run advancing position-by-position through startQueueRun/
+// advanceQueue. advanceQueue reads this to record the retried row's outcome in place
+// without cascading into later rows that already carry their own terminal status.
+let queueSingleRetry = false;
+
 // Replaces the queue wholesale (repeated pick = replace, not append — simplest
 // mental model, matches today's single-pick "last pick wins" behavior).
 function setImportQueue(paths) {
   state.importQueue = paths.map((p) => ({ path: p, name: p.split("/").pop(), status: "queued" }));
   state.queueIndex = -1;
   state.hasRun = false; // new source → hide retry/fresh until processed
+  queueSingleRetry = false;
   renderImportQueue();
   refreshRunBtn();
 }
 
 function renderImportQueue() {
   const wrap = $("importQueue");
-  if (!state.importQueue.length) { wrap.innerHTML = ""; wrap.classList.add("hidden"); return; }
+  wrap.innerHTML = "";
+  if (!state.importQueue.length) { wrap.classList.add("hidden"); return; }
   wrap.classList.remove("hidden");
-  wrap.innerHTML = state.importQueue.map((item) => {
+  state.importQueue.forEach((item, idx) => {
     const icon = QUEUE_STATUS_ICON[item.status] || "⏳";
-    return `<div class="queue-item queue-${item.status}">` +
-      `<span class="queue-icon">${icon}</span><span class="queue-name">${escapeHtml(item.name)}</span></div>`;
-  }).join("");
+    const row = document.createElement("div");
+    row.className = "queue-item queue-" + item.status;
+    row.innerHTML =
+      `<span class="queue-icon">${icon}</span><span class="queue-name">${escapeHtml(item.name)}</span>`;
+    if (item.status === "failed") {
+      // Per-failed-row retry, mirrors the models-list per-row retry precedent (pf-retry,
+      // above in this file). Closure over idx only — never the item's path/name — so no
+      // user/LLM string ever lands in an HTML attribute.
+      const btn = document.createElement("button");
+      btn.className = "btn small queue-retry-btn";
+      btn.textContent = "↻";
+      btn.title = "Повторить";
+      btn.addEventListener("click", () => retryQueueItem(idx));
+      row.appendChild(btn);
+    }
+    wrap.appendChild(row);
+  });
 }
 
 // true while a run in progress/last-acted belongs to the import queue (vs. record mode).
@@ -609,6 +631,7 @@ function startQueueRun(fresh) {
   if (state.queueIndex < 0 || state.queueIndex >= state.importQueue.length) state.queueIndex = 0;
   const item = state.importQueue[state.queueIndex];
   if (item) item.status = "running";
+  queueSingleRetry = false; // whole-queue entry point, not a single-row retry
   renderImportQueue();
   startProcessing(fresh);
 }
@@ -622,6 +645,14 @@ function advanceQueue(itemStatus) {
   if (!queueActive()) return;
   const item = state.importQueue[state.queueIndex];
   if (item) item.status = itemStatus;
+  if (queueSingleRetry) {
+    // A single failed-row retry, not a batch run — record the outcome and stop;
+    // later rows already carry their own terminal status and must not be
+    // silently reprocessed as a side effect of retrying an earlier one.
+    queueSingleRetry = false;
+    renderImportQueue();
+    return;
+  }
   const next = state.queueIndex + 1;
   if (next < state.importQueue.length) {
     state.queueIndex = next;
@@ -641,6 +672,21 @@ function markQueueItemCanceled() {
   const item = state.importQueue[state.queueIndex];
   if (item) item.status = "canceled";
   renderImportQueue();
+}
+
+// Per-row retry for one failed batch element (see renderImportQueue's ↻ button) —
+// reuses the exact single-slot startProcessing() path with fresh=false (resume
+// from cache, same ↻ semantics as retryBtn/freshBtn elsewhere), and is gated the
+// same way as every other run trigger so it can't clobber a run already underway.
+function retryQueueItem(idx) {
+  if (state.recording || state.processing) return; // don't hijack an active run
+  const item = state.importQueue[idx];
+  if (!item || item.status !== "failed") return;
+  state.queueIndex = idx;
+  item.status = "running";
+  queueSingleRetry = true;
+  renderImportQueue();
+  startProcessing(false);
 }
 
 $("pickBtn").addEventListener("click", async () => {

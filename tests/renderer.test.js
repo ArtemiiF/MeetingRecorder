@@ -1910,6 +1910,72 @@ test("batch import: cancel halts the whole batch (remaining items stay unprocess
   assert.ok(rows[1].classList.contains("queue-queued"));
 });
 
+test("batch import: retrying a failed middle element after the batch finishes reprocesses only that element", async () => {
+  const calls = [];
+  const { window, $, handlers } = await boot({
+    pickAudio: async () => ["/tmp/a.wav", "/tmp/b.wav", "/tmp/c.wav"],
+    processAudio: async (opts) => { calls.push({ file: opts.audioFile, fresh: opts.fresh }); return { ok: true }; },
+  });
+  goImportTab(window);
+  $("pickBtn").click(); await tick(window);
+  $("runBtn").click(); await tick(window); // item 1 (a) running
+  handlers.process({ event: "done", note: "/n1.md", audio: "/tmp/a.wav", transcript: "t1", summary: "s1" });
+  await tick(window); // item 2 (b) auto-started
+  handlers.process({ event: "error", msg: "boom" });
+  await tick(window); // item 2 (b) failed, item 3 (c) auto-started
+  handlers.process({ event: "done", note: "/n3.md", audio: "/tmp/c.wav", transcript: "t3", summary: "s3" });
+  await tick(window); // batch finished: a=done, b=failed, c=done
+
+  assert.deepEqual(calls.map((c) => c.file), ["/tmp/a.wav", "/tmp/b.wav", "/tmp/c.wav"]);
+  let rows = $("importQueue").querySelectorAll(".queue-item");
+  assert.ok(rows[0].classList.contains("queue-done"));
+  assert.ok(rows[1].classList.contains("queue-failed"));
+  assert.ok(rows[2].classList.contains("queue-done"));
+  assert.ok(!rows[0].querySelector(".queue-retry-btn"), "done rows get no retry button");
+  const retryBtn = rows[1].querySelector(".queue-retry-btn");
+  assert.ok(retryBtn, "the failed middle row must expose a retry button");
+  assert.ok(!rows[2].querySelector(".queue-retry-btn"), "done rows get no retry button");
+
+  retryBtn.click(); await tick(window);
+  assert.deepEqual(calls.map((c) => c.file), ["/tmp/a.wav", "/tmp/b.wav", "/tmp/c.wav", "/tmp/b.wav"],
+    "only the retried middle item reprocesses");
+  assert.equal(calls[3].fresh, false, "row retry resumes from cache (↻), it does not force a fresh recompute");
+  rows = $("importQueue").querySelectorAll(".queue-item");
+  assert.ok(rows[1].classList.contains("queue-running"), "retried row goes back to running while in flight");
+
+  handlers.process({ event: "done", note: "/n2.md", audio: "/tmp/b.wav", transcript: "t2", summary: "s2" });
+  await tick(window);
+  assert.deepEqual(calls.map((c) => c.file), ["/tmp/a.wav", "/tmp/b.wav", "/tmp/c.wav", "/tmp/b.wav"],
+    "completing the retry must not cascade into item 3, which already has a terminal status");
+  rows = $("importQueue").querySelectorAll(".queue-item");
+  assert.ok(rows[1].classList.contains("queue-done"), "retried row reflects its own new outcome");
+  assert.ok(rows[2].classList.contains("queue-done"), "item 3 keeps its original status, untouched by the retry");
+});
+
+test("batch import: per-row retry is blocked while another item in the batch is still processing", async () => {
+  const calls = [];
+  const { window, $, handlers } = await boot({
+    pickAudio: async () => ["/tmp/a.wav", "/tmp/b.wav"],
+    processAudio: async (opts) => { calls.push(opts.audioFile); return { ok: true }; },
+  });
+  goImportTab(window);
+  $("pickBtn").click(); await tick(window);
+  $("runBtn").click(); await tick(window); // item 1 (a) running
+  handlers.process({ event: "error", msg: "boom" });
+  await tick(window); // item 1 (a) failed, item 2 (b) auto-started — still processing
+
+  assert.deepEqual(calls, ["/tmp/a.wav", "/tmp/b.wav"]);
+  const rows = $("importQueue").querySelectorAll(".queue-item");
+  assert.ok(rows[0].classList.contains("queue-failed"));
+  assert.ok(rows[1].classList.contains("queue-running"));
+  const retryBtn = rows[0].querySelector(".queue-retry-btn");
+  assert.ok(retryBtn, "failed row still exposes a retry button while the rest of the batch continues");
+
+  retryBtn.click(); await tick(window); // must no-op — item 2 is still in flight
+  assert.deepEqual(calls, ["/tmp/a.wav", "/tmp/b.wav"], "retry must not start while another item is processing");
+  assert.ok(rows[0].classList.contains("queue-failed"), "the blocked row's status must stay untouched");
+});
+
 test("reprocessHistory() still triggers an immediate single run (queue-of-1 regression guard)", async () => {
   let calls = 0;
   const { window, $ } = await boot({ processAudio: async () => { calls++; return { ok: true }; } });
