@@ -418,11 +418,16 @@ function renderGlossaryChips() {
   box.innerHTML = terms.length
     ? terms.map((t) =>
         `<span class="chip"><span class="chip-text">${escapeHtml(t)}</span>` +
-        `<button type="button" class="chip-remove" data-term="${escapeHtml(t)}" aria-label="Удалить">×</button></span>`
+        `<button type="button" class="chip-remove" aria-label="Удалить">×</button></span>`
       ).join("")
     : '<p class="hint">Список пуст — добавь термин ниже.</p>';
-  box.querySelectorAll(".chip-remove").forEach((btn) =>
-    btn.addEventListener("click", () => removeGlossaryTerm(btn.dataset.term)));
+  // Term is captured via closure (index into `terms`, the same array that produced
+  // this innerHTML, in the same order) rather than round-tripped through a
+  // data-* attribute — a term containing a `"` would otherwise break out of the
+  // attribute (escapeHtml only escapes &<>, not quotes) and also desync removal,
+  // since the garbled attribute value would no longer match the original term.
+  box.querySelectorAll(".chip-remove").forEach((btn, i) =>
+    btn.addEventListener("click", () => removeGlossaryTerm(terms[i])));
   $("glossaryCount").textContent = terms.length + " терминов";
 }
 

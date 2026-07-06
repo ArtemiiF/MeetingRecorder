@@ -1159,7 +1159,9 @@ test("removing a chip drops the term from state.glossary and persists", async ()
     savePresets: async (data) => { saved = data; return true; },
   });
   await tick(window);
-  $("glossaryChips").querySelector('.chip-remove[data-term="Mindbox"]').click();
+  // "Mindbox" is the 2nd rendered chip (index 1: Иван Петров, Mindbox, ClickHouse) —
+  // removal is wired by index-into-terms closure, not a DOM attribute (see renderer.js).
+  $("glossaryChips").querySelectorAll(".chip-remove")[1].click();
   await tick(window);
   const chips = Array.from($("glossaryChips").querySelectorAll(".chip-text")).map((el) => el.textContent);
   assert.deepEqual(chips, ["Иван Петров", "ClickHouse"]);
@@ -1167,6 +1169,43 @@ test("removing a chip drops the term from state.glossary and persists", async ()
   assert.equal($("glossary").value, "Иван Петров, ClickHouse");
   assert.ok(saved, "savePresets was not called");
   assert.equal(saved.glossary, "Иван Петров, ClickHouse");
+});
+
+test("a term containing a double quote does not break out of an HTML attribute and can still be removed (regression: attribute-injection via data-term)", async () => {
+  let saved = null;
+  const injected = 'x" onmouseover="alert(1)';
+  const { $, window } = await boot({
+    getPresets: async () => ({ presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru", glossary: "Mindbox" }),
+    savePresets: async (data) => { saved = data; return true; },
+  });
+  await tick(window);
+  // Simulate the term arriving via a bulk "текстом" paste (presets file / textarea edit),
+  // not the single-term add box — matches how an attacker-controlled quote-containing
+  // string would actually reach the chip renderer (split is only on [,\n]+, quotes survive).
+  $("glossary").value = `Mindbox, ${injected}`;
+  $("glossary").dispatchEvent(new window.Event("change"));
+  await tick(window);
+
+  const chipTexts = Array.from($("glossaryChips").querySelectorAll(".chip-text")).map((el) => el.textContent);
+  assert.deepEqual(chipTexts, ["Mindbox", injected], "term renders intact as text content");
+
+  const removeButtons = $("glossaryChips").querySelectorAll(".chip-remove");
+  const injectedBtn = removeButtons[1];
+  // No attribute round-trip at all — data-term must not exist, and no onmouseover
+  // handler must have been attached by breaking out of a data-term="..." attribute.
+  assert.equal(injectedBtn.getAttribute("data-term"), null);
+  assert.equal(injectedBtn.getAttribute("onmouseover"), null);
+  assert.equal(injectedBtn.onmouseover, null);
+
+  // Removal must still match the exact original term (closure-captured, not
+  // round-tripped through a garbled attribute).
+  injectedBtn.click();
+  await tick(window);
+  const after = Array.from($("glossaryChips").querySelectorAll(".chip-text")).map((el) => el.textContent);
+  assert.deepEqual(after, ["Mindbox"]);
+  assert.equal($("glossary").value, "Mindbox");
+  assert.ok(saved, "savePresets was not called");
+  assert.equal(saved.glossary, "Mindbox");
 });
 
 test("«Дополнить распространёнными» merges DEFAULT_GLOSSARY terms not already present, preserving current order first", async () => {
