@@ -6,9 +6,15 @@ const DEFAULT_GLOSSARY = "деплой, бэклог, спринт, ретро, 
 
 const state = {
   mode: "record",      // 'record' | 'import'
-  recordedFile: null,  // path from a finished recording
   importQueue: [],     // [{ path, name, status }] status: 'queued'|'running'|'done'|'failed'|'canceled'
   queueIndex: -1,       // index of the import-queue item currently running / last acted on
+  // Persistent queue of finished recordings waiting to be processed (survives an app
+  // restart via main.js's pending.json manifest). [{ id, name, mixed, mic, system,
+  // tracks, status }] status: 'pending'|'running'|'done'|'failed'. This is the ONLY
+  // source of truth for a finished recording — there is no separate single-slot
+  // "current recording" field; record-mode processing always acts on an explicit
+  // pending item (per-row ▶ / "Обработать все"), never on "whatever finished last".
+  pendingRecordings: [],
   recording: false,
   processing: false,
   hasRun: false,
@@ -309,6 +315,12 @@ async function init() {
   renderPresets();
   if (state.presets.length) selectPreset(0);
   refreshHistory();
+
+  // Restore the persistent pending-recordings queue (survives an app restart —
+  // main.js reads it back from pending.json).
+  const pending = await window.api.listPendingRecordings();
+  state.pendingRecordings = (pending || []).map((r) => ({ ...r, status: "pending" }));
+  renderPendingRecordings();
 }
 
 function renderPresets() {
@@ -574,7 +586,7 @@ $("pickOut").addEventListener("click", async () => {
 // A single pick or a reprocessHistory() call is a queue of length 1 — same
 // code path as an N-file batch, so progress/result/retry logic isn't
 // duplicated for "single" vs "batch".
-const QUEUE_STATUS_ICON = { queued: "⏳", running: "🔵", done: "🟢", failed: "🔴", canceled: "⏹" };
+const QUEUE_STATUS_ICON = { queued: "⏳", pending: "⏳", running: "🔵", done: "🟢", failed: "🔴", canceled: "⏹" };
 
 // Set only while a single failed row is being retried via its own ↻ (retryQueueItem),
 // as opposed to a batch run advancing position-by-position through startQueueRun/
@@ -617,6 +629,112 @@ function renderImportQueue() {
     }
     wrap.appendChild(row);
   });
+}
+
+// ── pending recordings (persistent queue, survives an app restart) ──────────
+// The single source of truth for recordings: every finished recording lands here
+// (see the "recorded" handler below) and waits until a per-row ▶ or "Обработать все"
+// processes it. There is no separate single-slot record flow.
+let activePendingId = null;   // id of the pending recording the in-flight run belongs to, if any
+let pendingBatchRunning = false; // true while "Обработать все" is driving the queue
+
+function renderPendingRecordings() {
+  const wrap = $("pendingRecordings");
+  const list = state.pendingRecordings || [];
+  wrap.innerHTML = "";
+  wrap.classList.toggle("hidden", list.length === 0);
+  list.forEach((item, idx) => {
+    const icon = QUEUE_STATUS_ICON[item.status] || "⏳";
+    const row = document.createElement("div");
+    row.className = "queue-item queue-" + item.status;
+    row.innerHTML =
+      `<span class="queue-icon">${icon}</span><span class="queue-name">${escapeHtml(item.name)}</span>`;
+    const canProcess = item.status === "pending" || item.status === "failed";
+    // First trailing button gets queue-retry-btn's margin-left:auto (pushes this
+    // row's action button(s) to the right, same as renderImportQueue's ↻).
+    if (canProcess) {
+      // Closure over idx only (never the item's name/paths) — same rationale as
+      // renderImportQueue's retry button: no user/LLM string in an HTML attribute.
+      const playBtn = document.createElement("button");
+      playBtn.className = "btn small pending-play-btn queue-retry-btn";
+      playBtn.textContent = "▶";
+      playBtn.title = "Обработать";
+      playBtn.addEventListener("click", () => processPendingRecording(idx));
+      row.appendChild(playBtn);
+    }
+    const delBtn = document.createElement("button");
+    delBtn.className = "btn small ghost pending-del-btn" + (canProcess ? "" : " queue-retry-btn");
+    delBtn.textContent = "✕";
+    delBtn.title = "Удалить";
+    delBtn.addEventListener("click", () => deletePendingRecording(idx));
+    row.appendChild(delBtn);
+    wrap.appendChild(row);
+  });
+  const hasWork = list.some((it) => it.status === "pending" || it.status === "failed");
+  $("pendingProcessAll").classList.toggle("hidden", !hasWork);
+}
+
+function nextPendingWork() {
+  return (state.pendingRecordings || []).find((it) => it.status === "pending" || it.status === "failed");
+}
+
+function runPendingItem(item) {
+  item.status = "running";
+  renderPendingRecordings();
+  startProcessing(false, item);
+}
+
+// Per-row ▶ — gated the same way as retryQueueItem so it can't hijack an active run.
+function processPendingRecording(idx) {
+  if (state.recording || state.processing) return;
+  const item = state.pendingRecordings[idx];
+  if (!item || item.status === "running") return;
+  runPendingItem(item);
+}
+
+// "Удалить" — removes the manifest entry + its on-disk session dir. Never deletes
+// the row that's currently being processed (its outcome must land first).
+function deletePendingRecording(idx) {
+  const item = state.pendingRecordings[idx];
+  if (!item || item.status === "running") return;
+  state.pendingRecordings.splice(idx, 1);
+  renderPendingRecordings();
+  window.api.removePendingRecording(item.id);
+}
+
+// "Обработать все" — processes pending/failed rows one at a time through the single
+// procProc slot, mirroring startQueueRun/advanceQueue: a failed item continues the
+// batch, a success removes it (see finishPendingItem below).
+function startPendingBatch() {
+  if (state.recording || state.processing) return;
+  pendingBatchRunning = true;
+  continuePendingBatch();
+}
+function continuePendingBatch() {
+  if (!pendingBatchRunning) return;
+  const item = nextPendingWork();
+  if (!item) { pendingBatchRunning = false; return; }
+  runPendingItem(item);
+}
+$("pendingProcessAll").addEventListener("click", startPendingBatch);
+
+// Called from onProcessEvent's terminal branches when a run belonged to a pending
+// recording (activePendingId set). Returns true iff it did, so the caller knows
+// whether to continue a running batch.
+function finishPendingItem(outcome) {
+  if (activePendingId == null) return false;
+  const id = activePendingId;
+  activePendingId = null;
+  const idx = (state.pendingRecordings || []).findIndex((it) => it.id === id);
+  if (idx < 0) return false;
+  if (outcome === "done") {
+    state.pendingRecordings.splice(idx, 1);
+    window.api.removePendingRecording(id);
+  } else {
+    state.pendingRecordings[idx].status = "failed";
+  }
+  renderPendingRecordings();
+  return true;
 }
 
 // true while a run in progress/last-acted belongs to the import queue (vs. record mode).
@@ -722,17 +840,17 @@ function setRecIndicator(on) {
 // menu item can invoke the exact same flow — no duplicated recording logic in main.js.
 async function toggleRecording() {
   if (!state.recording) {
-    // recBtn is disabled (see setProcessingUI) while a batch/processing run is active,
-    // but the tray menu item calls this same function directly, bypassing that DOM gate —
-    // guard here too. Stopping (the `else` branch below) is never gated.
-    if (state.processing) return;
+    // Recording during processing is allowed (owner-approved — reverts commit
+    // 0a79d98's gate): finished recordings now pile up in the persistent pending
+    // queue instead of being lost, so there's no reason to block a new one while an
+    // older one processes. The hardware mutex in main.js's start-recording handler
+    // (`if (recordProc || tee) return`) still blocks two SIMULTANEOUS recordings.
     const micDevice = $("micDevice").value;
     setSysStatus("🔊 Системный звук: запуск…", "");
     const res = await window.api.startRecording({ micDevice });
     if (!res.ok) { alert(res.error); return; }
     state.recording = true;
     window.api.notifyRecordingState(true); // syncs the tray menu label + REC title
-    state.recordedFile = null;
     setRecIndicator(true);
     $("timer").textContent = "00:00";
     $("vuMic").style.width = "0%";
@@ -782,17 +900,29 @@ window.api.onRecordEvent((ev) => {
     setSysStatus(ev.msg, "warn");
     appendLog(ev.msg);
   } else if (ev.event === "recorded") {
-    state.recordedFile = ev.file;
-    state.recordedMic = ev.mic;
-    state.recordedSystem = ev.system;
-    state.hasRun = false; // new recording → hide retry/fresh until processed
-    setProcessingUI(false);
+    // A finished recording ONLY joins the persistent pending queue — there is no
+    // single-slot fallback anymore. This handler must never touch state.processing,
+    // stopBtn/spinner, or any other run's log/result area: a recording finishing
+    // (possibly a SECOND one, started while an earlier recording is still being
+    // processed — recording-during-processing is allowed) must never disturb an
+    // unrelated in-flight run. Removed per critic finding: the old dual-path
+    // (single-slot recordedFile/recordedId reconciled via activePendingId) let this
+    // handler's unconditional setProcessingUI(false) tear down a live run's UI and,
+    // worse, let a subsequent re-click reassign activePendingId to the WRONG
+    // recording, causing finishPendingItem to delete an unprocessed recording while
+    // the actually-finished one lingered pending forever.
+    if (ev.id) {
+      state.pendingRecordings.push({
+        id: ev.id, name: ev.name || `Запись ${ev.id}`,
+        mixed: ev.file, mic: ev.mic, system: ev.system, tracks: ev.tracks,
+        status: "pending",
+      });
+      renderPendingRecordings();
+    }
     const parts = [];
     if (ev.mic) parts.push("микрофон");
     if (ev.system) parts.push("системный звук");
     setSysStatus(`✅ Запись готова (${parts.join(" + ") || "—"})`, "ok");
-    appendLog(`Запись готова: ${ev.tracks} дорожк${ev.tracks === 1 ? "а" : "и"}`);
-    refreshRunBtn();
   } else if (ev.event === "error") {
     setSysStatus("❌ Ошибка записи: " + ev.msg, "warn");
     state.recording = false;
@@ -806,8 +936,13 @@ window.api.onRecordEvent((ev) => {
 });
 
 // ── current audio source resolution ─────────────────────────────────────────
+// Record mode has no single-slot "current recording" — every finished recording is
+// a row in state.pendingRecordings, processed explicitly via its own ▶ / "Обработать
+// все" (see startProcessing's `item` param). The shared runBtn/retryBtn/freshBtn row
+// below stays exclusively an import-mode affordance; it simply has nothing to act on
+// while on the record tab.
 function currentAudio() {
-  if (state.mode === "record") return state.recordedFile;
+  if (state.mode === "record") return null;
   const idx = state.queueIndex >= 0 ? state.queueIndex : 0;
   const item = state.importQueue[idx];
   return item ? item.path : null;
@@ -893,9 +1028,9 @@ function setProcessingUI(running) {
   $("runBtn").style.display = running ? "none" : "";
   $("stopBtn").style.display = running ? "" : "none";
   $("procSpinner").style.display = running ? "" : "none";
-  // Block starting a new recording mid-batch/processing; never disable it while a
-  // recording is already active — stopping must always stay available.
-  $("recBtn").disabled = running && !state.recording;
+  // recBtn is intentionally never disabled here (owner-approved gate revert, see
+  // toggleRecording) — it must only ever reflect whether a recording is actually in
+  // progress (its own label/class), never the processing state.
   const showRetry = !running && !!currentAudio() && state.hasRun;
   $("retryBtn").style.display = showRetry ? "" : "none";
   $("freshBtn").style.display = showRetry ? "" : "none";
@@ -907,8 +1042,11 @@ function finishProcessing() {
 }
 
 // fresh=true clears the cache (full recompute); otherwise resume from cached stages.
-async function startProcessing(fresh) {
-  const audioFile = currentAudio();
+// item: an explicit entry from state.pendingRecordings (per-row ▶ / "Обработать все")
+// — the ONLY way record-mode audio gets processed (there is no single-slot fallback;
+// import mode leaves item undefined and drives audioFile from currentAudio() as before).
+async function startProcessing(fresh, item) {
+  const audioFile = item ? item.mixed : currentAudio();
   if (!audioFile) return;
   $("progressCard").style.display = "";
   $("resultCard").style.display = "none";
@@ -917,8 +1055,12 @@ async function startProcessing(fresh) {
   runEnded = false;
   pinned = false;
   showStageLogs(STAGE_KEYS[0], false);
-  state.hasRun = true;
+  if (!item) state.hasRun = true; // hasRun/retry/fresh stay an import-mode-only concept
   setProcessingUI(true);
+  // activePendingId is set ONLY by an explicit item — never inferred from "whatever
+  // recording finished most recently" (that inference was the dual-path bug: a second
+  // recording finishing mid-run could silently reassign it to the wrong id).
+  activePendingId = item ? item.id : null;
 
   const res = await window.api.processAudio({
     audioFile,
@@ -932,11 +1074,10 @@ async function startProcessing(fresh) {
     glossary: state.glossary,
     summarize: !$("noSummary").checked,
     template: (state.presets[state.currentPreset] || {}).name || "",
-    // auto-«Я»: only meaningful for the just-recorded mic/system pair — import mode
-    // has neither, so these stay undefined and the backend sees identical argv to today.
-    ...(state.mode === "record" ? {
-      micFile: state.recordedMic, systemFile: state.recordedSystem, authorName: state.authorName,
-    } : {}),
+    // auto-«Я»: only meaningful for a record-sourced mic/system pair — import mode
+    // never passes an item, so these stay undefined and the backend sees identical
+    // argv to today.
+    ...(item ? { micFile: item.mic, systemFile: item.system, authorName: state.authorName } : {}),
   });
   if (res && res.ok === false) {
     appendLog("❌ " + res.error);
@@ -985,11 +1126,13 @@ window.api.onProcessEvent((ev) => {
     finishProcessing();
     refreshHistory();
     advanceQueue("done");
+    if (finishPendingItem("done") && pendingBatchRunning) continuePendingBatch();
   } else if (ev.event === "error") {
     appendLog("❌ " + ev.msg);
     markRunFailed();
     finishProcessing();
     advanceQueue("failed");
+    if (finishPendingItem("failed") && pendingBatchRunning) continuePendingBatch();
   } else if (ev.event === "process-closed") {
     let failedAdvance = false;
     if (ev.canceled) {
@@ -997,6 +1140,8 @@ window.api.onProcessEvent((ev) => {
       if (lastStage) setStageClass(lastStage, "skip");
       runEnded = true;
       markQueueItemCanceled(); // cancel halts the whole batch — no auto-advance
+      finishPendingItem("failed"); // no pending status for "canceled" — mark failed, retry via ▶
+      pendingBatchRunning = false; // cancel halts a running batch too, same as the import queue
     } else if (ev.code !== 0 && !runEnded) {
       if (ev.stderr) appendLog("[backend] " + ev.stderr.slice(-600));
       appendLog("❌ Обработка прервана (код " + ev.code + ")");
@@ -1006,7 +1151,10 @@ window.api.onProcessEvent((ev) => {
       appendLog("[backend] " + ev.stderr.slice(-600));
     }
     finishProcessing();
-    if (failedAdvance) advanceQueue("failed");
+    if (failedAdvance) {
+      advanceQueue("failed");
+      if (finishPendingItem("failed") && pendingBatchRunning) continuePendingBatch();
+    }
   }
 });
 

@@ -43,8 +43,14 @@ const PRESETS_EXAMPLE = path.join(APP_DIR, "presets.example.json");
 const DB_PATH = path.join(APP_DIR, "index.db"); // derived SQLite index (gitignored)
 const TMP_DIR = path.join(os.tmpdir(), "meeting-recorder");
 const DEFAULT_OUT = path.join(os.homedir(), "Documents", "Obsidian", "Meetings");
+// Recordings live outside TMP_DIR (not swept by pruneTemp) so they survive an app
+// restart — mixed/mic/system WAVs pile up here until processed. PENDING_FILE tracks
+// which ones are still waiting (see loadPendingManifest/savePendingManifest below).
+const RECORDINGS_DIR = path.join(APP_DIR, "recordings");
+const PENDING_FILE = path.join(RECORDINGS_DIR, "pending.json");
 
 fs.mkdirSync(TMP_DIR, { recursive: true });
+fs.mkdirSync(RECORDINGS_DIR, { recursive: true });
 
 let mainWindow = null;
 let tray = null;         // menu-bar Tray — module-level ref so GC doesn't kill it
@@ -161,7 +167,11 @@ function pruneTemp(maxAgeMs) {
       } catch {}
     }
   };
-  sweep(TMP_DIR, "cache");                 // old rec-* session dirs
+  // Recording session dirs now live under RECORDINGS_DIR (permanent, tracked in
+  // PENDING_FILE) — this sweep only touches TMP_DIR, so it never deletes a pending
+  // recording. The "rec-*" skip-cache branch is a safety net for pre-migration
+  // leftovers under the old TMP_DIR location.
+  sweep(TMP_DIR, "cache");                 // stray/legacy rec-* dirs, if any
   sweep(path.join(TMP_DIR, "cache"), null); // old per-audio cache dirs
 }
 
@@ -301,6 +311,21 @@ function writeJsonAtomic(file, obj) {
   fs.renameSync(tmp, file);
 }
 
+// Pending-recordings manifest ({ recordings: [{ id, name, stamp, dir, mixed, mic,
+// system, tracks }] }) — recordings that finished capture but haven't been processed
+// yet, so the queue survives an app restart.
+function loadPendingManifest() {
+  try {
+    const data = JSON.parse(fs.readFileSync(PENDING_FILE, "utf-8"));
+    return Array.isArray(data.recordings) ? data.recordings : [];
+  } catch {
+    return [];
+  }
+}
+function savePendingManifest(recordings) {
+  writeJsonAtomic(PENDING_FILE, { recordings });
+}
+
 // HF token is a secret → kept out of presets.json, encrypted via OS keychain (safeStorage).
 const SECRET_FILE = path.join(APP_DIR, ".secret");
 function saveToken(token) {
@@ -405,22 +430,32 @@ ipcMain.handle("pick-out-dir", async () => {
 ipcMain.handle("start-recording", async (_e, opts) => {
   if (recordProc || tee) return { ok: false, error: "Запись уже идёт" };
 
-  // Disk guard: session dirs live under TMP_DIR — check that volume's free space
-  // before committing to a recording. statfs failures (unsupported FS, etc.)
-  // don't block recording — the guard degrades to "ok" silently.
+  // Disk guard: session dirs live under RECORDINGS_DIR (permanent — see PENDING_FILE
+  // above) — check that volume's free space before committing to a recording. statfs
+  // failures (unsupported FS, etc.) don't block recording — the guard degrades to
+  // "ok" silently.
   let diskVerdict = { action: "ok", msg: null };
   try {
-    const st = fs.statfsSync(TMP_DIR);
+    const st = fs.statfsSync(RECORDINGS_DIR);
     diskVerdict = diskGuardVerdict(st.bavail * st.bsize);
   } catch {}
   if (diskVerdict.action === "refuse") return { ok: false, error: diskVerdict.msg };
 
   const micDevice = opts && opts.micDevice;
-  const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-  const dir = path.join(TMP_DIR, `rec-${stamp}`);
+  const displayStamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+  // Second-resolution timestamps collide if two recordings start within the same
+  // second — start-recording's own recordProc/tee guard only blocks a SECOND
+  // SIMULTANEOUS recording, not two that start back-to-back within one second.
+  // A short random suffix keeps `stamp` (used for both the session dir name and
+  // the pending-recordings manifest id — they must stay equal to each other)
+  // unique per recording; displayStamp (no suffix) is the human-readable name.
+  const stamp = `${displayStamp}-${Math.random().toString(36).slice(2, 6)}`;
+  const dir = path.join(RECORDINGS_DIR, `rec-${stamp}`);
   fs.mkdirSync(dir, { recursive: true });
   session = {
     dir,
+    stamp,
+    displayStamp,
     micPath: path.join(dir, "mic.wav"),
     sysPath: path.join(dir, "system.wav"),
     mixedPath: path.join(dir, "mixed.wav"),
@@ -516,8 +551,21 @@ ipcMain.handle("stop-recording", async () => {
     args,
     (ev) => {
       if (ev.event === "mixed") {
+        // Recording finished capture — persist it to the pending-recordings manifest
+        // (survives an app restart) before telling the renderer, so the queue and the
+        // notification can never disagree about what's waiting to be processed.
+        const id = session.stamp;
+        const name = `Запись ${session.displayStamp}`;
+        const manifest = loadPendingManifest();
+        manifest.push({
+          id, name, stamp: session.stamp, dir: session.dir,
+          mixed: ev.file, mic: micOk ? session.micPath : null, system: sysOk ? session.sysPath : null,
+          tracks: ev.tracks,
+        });
+        savePendingManifest(manifest);
         send("record-event", {
           event: "recorded",
+          id, name,
           file: ev.file,
           mic: micOk ? session.micPath : null,
           system: sysOk ? session.sysPath : null,
@@ -541,6 +589,29 @@ ipcMain.handle("stop-recording", async () => {
 ipcMain.on("recording-state", (_e, recording) => {
   isRecording = !!recording;
   refreshTray();
+});
+
+// List recordings still waiting to be processed. Drops (and persists the drop of)
+// any entry whose mixed file vanished from disk (manual deletion outside the app,
+// etc.) so the renderer never offers to process something that no longer exists.
+ipcMain.handle("list-pending-recordings", async () => {
+  const manifest = loadPendingManifest();
+  const surviving = manifest.filter((r) => r.mixed && fs.existsSync(r.mixed));
+  if (surviving.length !== manifest.length) savePendingManifest(surviving);
+  return surviving;
+});
+
+// Remove one pending recording: delete its permanent session dir + drop the
+// manifest entry. Used both for an explicit user delete and after a pending
+// recording has been processed successfully.
+ipcMain.handle("remove-pending-recording", async (_e, id) => {
+  const manifest = loadPendingManifest();
+  const idx = manifest.findIndex((r) => r.id === id);
+  if (idx < 0) return { ok: false, error: "Запись не найдена" };
+  const [entry] = manifest.splice(idx, 1);
+  try { if (entry.dir) fs.rmSync(entry.dir, { recursive: true, force: true }); } catch {}
+  savePendingManifest(manifest);
+  return { ok: true };
 });
 
 // Stable cache dir for an audio file (path+size+mtime) → resumable stages survive

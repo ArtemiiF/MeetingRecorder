@@ -10,6 +10,8 @@ contextBridge.exposeInMainWorld("api", {
   pickOutDir: () => ipcRenderer.invoke("pick-out-dir"),
   startRecording: (opts) => ipcRenderer.invoke("start-recording", opts),
   stopRecording: () => ipcRenderer.invoke("stop-recording"),
+  listPendingRecordings: () => ipcRenderer.invoke("list-pending-recordings"),
+  removePendingRecording: (id) => ipcRenderer.invoke("remove-pending-recording", id),
   processAudio: (opts) => ipcRenderer.invoke("process-audio", opts),
   cancelProcess: () => ipcRenderer.invoke("cancel-process"),
   getModels: () => ipcRenderer.invoke("models"),
