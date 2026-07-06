@@ -1,8 +1,19 @@
-# HANDOFF — состояние на 2026-07-06
+# HANDOFF — состояние на 2026-07-06 (вечер)
 
 Electron-приложение записи встреч: mic+system (AudioTee) / импорт → `backend.py` (JSON-stdout): mono/VAD → MLX Whisper → коррекция терминов → pyannote → LLM-сводка (LM Studio `:1234`) → `.md` в Obsidian. Архитектура и хранение — см. README.md. Четыре вида: 🎙 Запись · 📚 История · 🗂 PARA · 📖 Словарь.
 
-## Что доехало до main (сессия 2026-07-06, `main` = `ef42c2d`) — словарь
+## Что доехало до main (сессия 2026-07-06 вечер) — хвосты TODO
+
+Четыре кода-чанка, каждый своей веткой через критик-гейт (все approve):
+
+- **backend-минорки** (`7c8da45`): cap Whisper `initial_prompt` — `_build_initial_prompt()`: бюджет 224 токена (эвристика ceil(chars/3), без токенизатора), контекст никогда не режется, глоссарий дропается с хвоста списка (user-термины в голове выживают), контекст ≥ бюджета → глоссарий целиком в дроп; 8-бит WAV int8→uint8 + центрирование −128 (PCM-8 unsigned по спеке); autouse-фикстура стабит и `requests.get` (503). `_glossary_prompt` остался (жив только тестом) — см. TODO.
+- **renderer-минорки** (`0a79d98`): suggest-эвикшн `slice(-CAP)` (новые выживают); комментарий glossaryDismissed; `toggleRecording` no-op на старт при `state.processing` (кнопка+tray), stop не блокируется; `paraInboxLoaded` после успешного fetch (упавший — ретрай при входе); PARA row-кнопки глобально disabled на «разобрать все» + re-enable недошедших при cancel.
+- **main.js-минорки** (`365e6a1`): `download-models` отказывает при `recordProc || tee` («Дождитесь окончания записи»); reset-app: `writeJsonAtomic` ДО `saveToken("")` — disk-full больше не стирает токен без сброса пресетов. Обратный гейт (старт записи при активном скачивании) НЕ добавлен — продуктовое решение за владельцем (TODO).
+- **батч retry per-element** (`cfcce85`): row-↻ на 🔴-строках очереди после батча; `retryQueueItem(idx)` реюзает один слот `startProcessing(false)` (resume, не fresh); флаг `queueSingleRetry` гасит авто-каскад `advanceQueue` (иначе перепрогон терминальных после ретрая середины); гейт `state.recording || state.processing`; рендер очереди переписан на createElement + closure-by-index (chip-паттерн, имена файлов не в атрибутах).
+
+Минорки критиков этой пачки — TODO.md секция «2026-07-06, вечер». Что закрыто — TODO.md секция «Закрыто».
+
+## Предыдущая сессия (2026-07-06 день) — словарь
 
 Три чанка, каждый своей веткой через критик-гейт:
 
@@ -33,7 +44,7 @@ Electron-приложение записи встреч: mic+system (AudioTee) /
 
 ## Тесты
 
-`npm test` = JS `node --test` (156/156) + PY pytest (219/219). Всё замокано — живой e2e (RAG, коррекция, auto-«Я», скачивание моделей, батч-импорт, reset, suggest-стадия) не гонялся; первый реальный запуск = smoke.
+`npm test` = JS `node --test` (174/174) + PY pytest (222/222). Всё замокано — живой e2e (RAG, коррекция, auto-«Я», скачивание моделей, батч-импорт + row-retry, reset, suggest-стадия, tray) не гонялся; первый реальный запуск = smoke.
 
 ## Решения владельца (действуют)
 
@@ -42,12 +53,12 @@ Electron-приложение записи встреч: mic+system (AudioTee) /
 
 ## Хвосты (TODO.md — источник правды)
 
-- Не-блокеры критик-гейтов (полный список TODO.md): VAD-clip auto-«Я» при nonzero delay; int8 8-бит WAV; download-во-время-записи не исключён; ASSOC-допущения model-download; ruStem расширяет матчи на 1-3-буквенных запросах; renderRail O(n) без виртуализации (тысячи заметок); retry/fresh после батча действуют на последний элемент; ручной «Разложить» на ещё-не-обработанной строке может гоняться с батчем; optimistic paraInboxLoaded при упавшем fetch (recovery = «Обновить»); reset: saveToken до writeJsonAtomic (disk-full → токен стёрт, пресеты нет — консистентно с save-presets).
+- Осталось открытым (полный список TODO.md): VAD-clip auto-«Я» при nonzero delay (+интеграционный тест при калибровке); ASSOC-допущения model-download; ruStem на 1-3-буквенных запросах; renderRail O(n) без виртуализации; chat degraded-бейдж string-match; свежие минорки критиков (осиротевший `_glossary_prompt`, тихий catch PARA-inbox, re-enable не в finally, PARA reverse race, батч retry↔cancel краевые, обратный гейт download→запись — продуктовое решение).
 - Калибровка HYPO-порогов auto-«Я» и xcorr по первому реальному прогону (лог пишет per-label mic_ratio/duration).
 
 ## Git / процесс
 
-- Remote `ArtemiiF/MeetingRecorder` (private, solo). `main` = origin/main = `75414d0`. Фича-ветки спрюнены.
+- Remote `ArtemiiF/MeetingRecorder` (private, solo). `main` = origin/main = docs-коммит поверх `cfcce85`. Фича-ветки спрюнены.
 - Push в main разрешён владельцем **только через критик-гейт**: критик по `git diff origin/main...HEAD` → marker `printf 'verdict: approve\ndiff-sha256: %s\n'` где sha = `printf '%s' "$(git diff origin/main...HEAD)" | sha256sum` (именно `printf '%s'` — прямой pipe оставляет \n → mismatch) → push отдельной командой. Marker одноразовый, TTL 300 c. Marker и push НЕ объединять в одну команду (hook проверяет до выполнения).
 - Agent-report'ы (`.claude/agent-reports/`) — untracked, в коммиты не включать.
 - Фиксы предсуществующих поломок — отдельным чанком от фичи.
