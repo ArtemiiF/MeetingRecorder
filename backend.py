@@ -694,6 +694,44 @@ class Pipeline:
             return None
         return "Термины: " + ", ".join(terms) + "."
 
+    # Whisper's `initial_prompt` window holds only the LAST ~224 tokens of the
+    # string — anything earlier is silently dropped by the decoder. Token count
+    # is estimated with a conservative chars/3 heuristic (no tokenizer dependency
+    # pulled in just for this): real BPE tokenizers average ~4 chars/token for
+    # English and fewer for Cyrillic, so chars/3 over-counts tokens and errs
+    # toward dropping too much glossary rather than risking silent eviction of
+    # the context prompt.
+    _INITIAL_PROMPT_TOKEN_BUDGET = 224
+
+    @staticmethod
+    def _estimate_tokens(text):
+        if not text:
+            return 0
+        return -(-len(text) // 3)  # ceil(len/3) without importing math
+
+    def _build_initial_prompt(self):
+        """Compose Whisper's initial_prompt from the context prompt + glossary,
+        capped to _INITIAL_PROMPT_TOKEN_BUDGET tokens so nothing is silently
+        evicted. Context prompt has priority and is never truncated; if it alone
+        already meets/exceeds the budget, the glossary is dropped entirely.
+        Otherwise glossary terms are dropped from the END of the list (glossary
+        is user-terms-first by chip-UX merge order) until the combined prompt
+        fits."""
+        context = self._context_prompt()
+        terms = self._glossary_terms()
+        if not terms:
+            return context
+        if context and self._estimate_tokens(context) >= self._INITIAL_PROMPT_TOKEN_BUDGET:
+            return context
+        kept = list(terms)
+        while kept:
+            glossary_prompt = "Термины: " + ", ".join(kept) + "."
+            candidate = f"{context} {glossary_prompt}" if context else glossary_prompt
+            if self._estimate_tokens(candidate) <= self._INITIAL_PROMPT_TOKEN_BUDGET:
+                return candidate
+            kept.pop()
+        return context
+
     def _glossary_cache_suffix(self):
         # cache key must change whenever the glossary changes (or stale transcripts
         # would be served) — canonicalized so cosmetic separator differences that
@@ -708,10 +746,7 @@ class Pipeline:
     def transcribe(self, mono_audio):
         result = None
         lang = self._whisper_lang()
-        prompt = self._context_prompt()
-        glossary_prompt = self._glossary_prompt()
-        if glossary_prompt:
-            prompt = f"{prompt} {glossary_prompt}" if prompt else glossary_prompt
+        prompt = self._build_initial_prompt()
         if self.TRANSCRIPTION_ENGINE == "mlx":
             try:
                 import mlx_whisper
@@ -1630,10 +1665,16 @@ def _read_mono_decimated(path, max_seconds, target_rate):
         n_frames = min(w.getnframes(), int(max_seconds * rate))
         raw = w.readframes(n_frames)
 
-    dtype = {1: np.int8, 2: np.int16, 4: np.int32}.get(sampwidth)
+    # PCM-8 is unsigned (0..255) per the WAV spec, unlike PCM-16/32 which are
+    # signed — read it as uint8 and center on 128 so it lands on the same
+    # zero-centered convention int16/int32 already have (downstream math here
+    # — cross-correlation, RMS — assumes zero-centered samples).
+    dtype = {1: np.uint8, 2: np.int16, 4: np.int32}.get(sampwidth)
     if dtype is None:
         raise ValueError(f"unsupported sample width: {sampwidth}")
     samples = np.frombuffer(raw, dtype=dtype).astype(np.float64)
+    if dtype is np.uint8:
+        samples -= 128.0
     if channels > 1:
         samples = samples.reshape(-1, channels).mean(axis=1)
 

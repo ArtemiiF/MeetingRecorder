@@ -84,7 +84,13 @@ def _no_real_lmstudio_by_default(monkeypatch):
     running on :1234 on a dev machine, which would make tests slow/non-deterministic.
     Default every test to a safe non-200 stub; a test that wants a specific
     canned LLM response calls install_fake_requests(monkeypatch, ...) itself,
-    which simply overwrites this default for that one test."""
+    which simply overwrites this default for that one test.
+
+    Stubs both `.post` and `.get` — `_rag_discover_embed_model` calls
+    `requests.get`, which this fake module previously lacked entirely, so any
+    RAG test relying on the *default* stub (rather than installing its own
+    fake) saw an AttributeError swallowed by that function's `except Exception`
+    into a silent None instead of an explicit non-200 response."""
     fake = types.ModuleType("requests")
 
     class _DefaultResp:
@@ -93,6 +99,7 @@ def _no_real_lmstudio_by_default(monkeypatch):
             return {}
 
     fake.post = lambda *a, **k: _DefaultResp()
+    fake.get = lambda *a, **k: _DefaultResp()
     monkeypatch.setitem(sys.modules, "requests", fake)
 
 
@@ -865,6 +872,24 @@ def test_cmd_mix_ignores_empty_files(tmp_path):
     assert any(e["event"] == "mixed" and e["tracks"] == 1 for e in events)
 
 
+# ── _read_mono_decimated (WAV bit-depth handling) ───────────────────────────
+def test_read_mono_decimated_8bit_wav_is_unsigned_and_centered(tmp_path):
+    # PCM-8 is unsigned per the WAV spec (0..255, silence == 128), unlike
+    # PCM-16/32 which are signed — reading it as int8 would wrap the top half
+    # of the range into large negative numbers instead of centering it. Write
+    # raw min/silence/max/silence samples and check they decode to the
+    # zero-centered floats downstream math (cross-correlation, RMS) expects.
+    import wave as wavemod
+    path = tmp_path / "8bit.wav"
+    with wavemod.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(1)
+        w.setframerate(8000)
+        w.writeframes(bytes([0, 128, 255, 128]))
+    samples = backend._read_mono_decimated(path, max_seconds=1.0, target_rate=8000)
+    assert list(samples) == [-128.0, 0.0, 127.0, 0.0]
+
+
 # ── _normalized_xcorr_peak (pure helper, synthetic arrays) ─────────────────────
 def test_normalized_xcorr_peak_recovers_positive_shift():
     import numpy as np
@@ -1543,6 +1568,33 @@ def test_glossary_alone_used_when_language_auto(monkeypatch, tmp_path):
                          glossary="Kubernetes")
     p.transcribe("mono.wav")
     assert calls["kwargs"]["initial_prompt"] == "Термины: Kubernetes."
+
+
+def test_glossary_truncated_when_initial_prompt_over_budget(monkeypatch, tmp_path):
+    # 60 long terms comfortably overflow the ~224-token budget once combined with
+    # the RU context prompt (~115 tokens on its own) — the tail must be dropped,
+    # the context prompt must survive intact.
+    terms = [f"ОченьДлинныйТерминНомер{i:03d}" for i in range(60)]
+    calls = install_fake_mlx_whisper(monkeypatch)
+    p = backend.Pipeline(out_dir=str(tmp_path / "v"), diarize=False, language="ru",
+                         glossary=", ".join(terms))
+    p.transcribe("mono.wav")
+    prompt = calls["kwargs"]["initial_prompt"]
+    assert backend.Pipeline.CONTEXT_PROMPT_RU in prompt   # context never truncated
+    assert terms[0] in prompt                              # kept — front of the list
+    assert terms[-1] not in prompt                          # dropped — tail of the list
+    assert backend.Pipeline._estimate_tokens(prompt) <= backend.Pipeline._INITIAL_PROMPT_TOKEN_BUDGET
+
+
+def test_glossary_dropped_entirely_when_context_alone_meets_budget(monkeypatch, tmp_path):
+    # If the context prompt alone already meets/exceeds the budget there is no
+    # room left for glossary — keep the context untouched (never silently
+    # truncate user-authored text) and drop the whole glossary instead.
+    p = backend.Pipeline(out_dir=str(tmp_path / "v"), diarize=False, language="ru",
+                         glossary="Кто-то, Что-то, Ещё-термин")
+    monkeypatch.setattr(backend.Pipeline, "_INITIAL_PROMPT_TOKEN_BUDGET",
+                         backend.Pipeline._estimate_tokens(backend.Pipeline.CONTEXT_PROMPT_RU))
+    assert p._build_initial_prompt() == backend.Pipeline.CONTEXT_PROMPT_RU
 
 
 def test_glossary_blank_terms_ignored():
