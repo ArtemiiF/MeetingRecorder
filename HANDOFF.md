@@ -2,6 +2,16 @@
 
 Electron-приложение записи встреч: mic+system (AudioTee) / импорт → `backend.py` (JSON-stdout): mono/VAD → MLX Whisper → коррекция терминов → pyannote → LLM-сводка (LM Studio `:1234`) → `.md` в Obsidian. Архитектура и хранение — см. README.md. Четыре вида: 🎙 Запись · 📚 История · 🗂 PARA · 📖 Словарь.
 
+## Фича: персист-очередь записей (`68aac2d`, ветка feat-pending-recordings)
+
+Запись → стоп → снова запись, не обрабатывая → записи копятся и ждут (раньше single-slot `recordedFile` перезаписывался — вторая запись теряла первую из UI).
+
+- **Единый источник правды** `state.pendingRecordings` — весь single-slot record-путь (`recordedFile`/`recordedMic`/`recordedSystem`/`recordedId`) удалён; `recorded`-хендлер ТОЛЬКО append + render (не трогает `state.processing`/`setProcessingUI`/log — иначе завершение записи рвало бы live-run соседней обработки, это был blocker критика, унифицировано и залочено тестом).
+- **Персист через перезапуск**: аудио пишется сразу в `APP_DIR/recordings/<id>/` (постоянно, НЕ подметаемый TMP_DIR; кеш-резюме остаётся в TMP_DIR), манифест `recordings/pending.json` (writeJsonAtomic). На старте `list-pending-recordings` восстанавливает очередь и дропает записи с пропавшими файлами. IPC `remove-pending-recording` (delete dir + entry) для ✕ и после успешной обработки.
+- **Обработка**: per-row ▶ / «Обработать все» через единственный слот procProc (mirror import-очереди); успех → remove из манифеста (уже в Истории), фейл → остаётся для retry.
+- **Ревёрт гейта `0a79d98`** (по решению владельца): запись разрешена во время обработки — recBtn не disabled от `state.processing`, `toggleRecording` без early-return. Хардварный мьютекс (2 записи разом, main.js) + download×запись — на месте. id = `<displayStamp>-<rand4>` (dir и manifest id равны, коллизии по секунде исключены).
+- Минор (TODO): sync reject-путь processAudio оставляет строку `running` при desync main↔renderer (low-reach).
+
 ## Что доехало до main (сессия 2026-07-06 вечер) — хвосты TODO
 
 Четыре кода-чанка, каждый своей веткой через критик-гейт (все approve):
@@ -44,7 +54,7 @@ Electron-приложение записи встреч: mic+system (AudioTee) /
 
 ## Тесты
 
-`npm test` = JS `node --test` (174/174) + PY pytest (222/222). Всё замокано — живой e2e (RAG, коррекция, auto-«Я», скачивание моделей, батч-импорт + row-retry, reset, suggest-стадия, tray) не гонялся; первый реальный запуск = smoke.
+`npm test` = JS `node --test` (189/189) + PY pytest (222/222). Всё замокано — живой e2e (RAG, коррекция, auto-«Я», скачивание моделей, батч-импорт + row-retry, reset, suggest-стадия, tray, персист-очередь записей + запись-во-время-обработки) не гонялся; первый реальный запуск = smoke.
 
 ## Решения владельца (действуют)
 
@@ -58,7 +68,7 @@ Electron-приложение записи встреч: mic+system (AudioTee) /
 
 ## Git / процесс
 
-- Remote `ArtemiiF/MeetingRecorder` (private, solo). `main` = origin/main = docs-коммит поверх `cfcce85`. Фича-ветки спрюнены.
+- Remote `ArtemiiF/MeetingRecorder` (private, solo). `main` = origin/main = docs-коммит поверх `68aac2d` (фича pending-recordings). Фича-ветки спрюнены.
 - Push в main разрешён владельцем **только через критик-гейт**: критик по `git diff origin/main...HEAD` → marker `printf 'verdict: approve\ndiff-sha256: %s\n'` где sha = `printf '%s' "$(git diff origin/main...HEAD)" | sha256sum` (именно `printf '%s'` — прямой pipe оставляет \n → mismatch) → push отдельной командой. Marker одноразовый, TTL 300 c. Marker и push НЕ объединять в одну команду (hook проверяет до выполнения).
 - Agent-report'ы (`.claude/agent-reports/`) — untracked, в коммиты не включать.
 - Фиксы предсуществующих поломок — отдельным чанком от фичи.

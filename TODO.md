@@ -1,5 +1,8 @@
 # TODO
 
+## Не-блокеры критик-гейтов (2026-07-06, фича pending-recordings)
+- Синхронный reject-путь `processAudio` (`{ok:false}` «Обработка уже идёт» при renderer `state.processing=false` — desync main↔renderer) зовёт `finishProcessing`, но НЕ `finishPendingItem` → строка застревает `status:running` (ни reprocess, ни delete). Low-reach (гейты `state.recording||state.processing` закрывают почти все окна), предсуществующая форма. Обернуть reject в `finishPendingItem` при случае.
+
 ## Не-блокеры критик-гейтов (2026-07-06, вечер — хвосты)
 - backend: `_glossary_prompt` осиротел в прод-пути (`transcribe` зовёт `_build_initial_prompt`; единственный вызов — тест) + формат «Термины: …» продублирован в `_build_initial_prompt` — DRY-дрейф при смене формата. Слить при случае.
 - PARA inbox: catch в `refreshParaInbox` полностью тихий — упавший fetch не даёт пользователю сигнала (inbox пустой/стейл без объяснения); ретрай при следующем входе есть.
@@ -17,8 +20,11 @@
 - История: renderRail рендерит все заметки O(n) без виртуализации — деградация на тысячах заметок (кап снят по решению владельца).
 - Чат: degraded-бейдж по-прежнему на string-match backend↔main.js (тест-замок есть с 2026-07-03).
 
+## Фича 2026-07-06 (ветка feat-pending-recordings, `68aac2d`)
+Персист-очередь записей: запись → стоп → записи копятся в `state.pendingRecordings` (единый источник правды, single-slot удалён), ждут обработки; переживают перезапуск (аудио в `APP_DIR/recordings/<id>/`, манифест `pending.json` atomic; на старте `list-pending-recordings` восстанавливает, дропает пропавшие файлы). Обработка per-row ▶ / «Обработать все» (один слот procProc); успех → `remove-pending-recording`, фейл → остаётся. **Ревёрт гейта `0a79d98`** (по решению владельца): запись разрешена во время обработки — recBtn больше не disabled от `state.processing`, `toggleRecording` не делает early-return; хардварный мьютекс (2 записи разом) + download×запись остаются. id = `<displayStamp>-<rand4>` (dir==manifest id, коллизии по секунде исключены).
+
 ## Закрыто 2026-07-06 (вечер, ветки todo-*)
-initial_prompt cap (контекст приоритетен, глоссарий режется с хвоста, эвристика ceil(chars/3)) · int8→uint8 8-бит WAV + центрирование · `.get` в autouse-фикстуре · suggest-эвикшн (новые выживают) · комментарий glossaryDismissed · recBtn-гейт мид-батч · paraInboxLoaded после fetch · PARA row-disable на батч · download×запись взаимоисключение · reset: пресеты до saveToken · батч retry per-element (row-↻ на 🔴, без каскада).
+initial_prompt cap (контекст приоритетен, глоссарий режется с хвоста, эвристика ceil(chars/3)) · int8→uint8 8-бит WAV + центрирование · `.get` в autouse-фикстуре · suggest-эвикшн (новые выживают) · комментарий glossaryDismissed · recBtn-гейт мид-батч (позже ревёрнут фичей pending-recordings) · paraInboxLoaded после fetch · PARA row-disable на батч · download×запись взаимоисключение · reset: пресеты до saveToken · батч retry per-element (row-↻ на 🔴, без каскада).
 
 ## Отложено по решению владельца (2026-06-30)
 - Live-транскрипт во время записи — не нужен (VU-индикатора достаточно).
