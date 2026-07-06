@@ -23,7 +23,7 @@ const state = {
   authorName: "Автор",
   glossary: "",
   glossarySuggestions: [], // pending candidates from the "suggest" pipeline stage — accept/dismiss
-  glossaryDismissed: [],   // dismissed candidates (lowercased) — never re-suggested
+  glossaryDismissed: [],   // dismissed candidates (original case; compared lowercased) — never re-suggested
   para: null, // { root, folders: {projects, areas, resources, archives} }
 };
 
@@ -479,7 +479,8 @@ $("glossaryToggleText").addEventListener("click", () => $("glossaryTextWrap").cl
 // The backend's "suggest" pipeline stage extracts candidate terms from the final
 // transcript; on each process-complete they land here for the user to accept
 // (→ glossary chips) or dismiss (→ glossaryDismissed, never re-suggested).
-// Pending list is capped at 100 so a long run of processing can't grow it forever.
+// Pending list is capped at 100 so a long run of processing can't grow it forever —
+// the newest arrivals survive and the oldest pending entries are evicted first.
 const GLOSSARY_SUGGEST_CAP = 100;
 
 function mergeGlossarySuggestions(newTerms) {
@@ -497,7 +498,7 @@ function mergeGlossarySuggestions(newTerms) {
     havePending.add(low);
     merged.push(term);
   });
-  state.glossarySuggestions = merged.slice(0, GLOSSARY_SUGGEST_CAP);
+  state.glossarySuggestions = merged.slice(-GLOSSARY_SUGGEST_CAP);
   renderGlossarySuggestions();
   persistPresets();
 }
@@ -675,6 +676,10 @@ function setRecIndicator(on) {
 // menu item can invoke the exact same flow — no duplicated recording logic in main.js.
 async function toggleRecording() {
   if (!state.recording) {
+    // recBtn is disabled (see setProcessingUI) while a batch/processing run is active,
+    // but the tray menu item calls this same function directly, bypassing that DOM gate —
+    // guard here too. Stopping (the `else` branch below) is never gated.
+    if (state.processing) return;
     const micDevice = $("micDevice").value;
     setSysStatus("🔊 Системный звук: запуск…", "");
     const res = await window.api.startRecording({ micDevice });
@@ -842,6 +847,9 @@ function setProcessingUI(running) {
   $("runBtn").style.display = running ? "none" : "";
   $("stopBtn").style.display = running ? "" : "none";
   $("procSpinner").style.display = running ? "" : "none";
+  // Block starting a new recording mid-batch/processing; never disable it while a
+  // recording is already active — stopping must always stay available.
+  $("recBtn").disabled = running && !state.recording;
   const showRetry = !running && !!currentAudio() && state.hasRun;
   $("retryBtn").style.display = showRetry ? "" : "none";
   $("freshBtn").style.display = showRetry ? "" : "none";
@@ -1195,7 +1203,7 @@ function renderParaInboxView() {
   $("paraWork").style.display = configured ? "" : "none";
   if (configured) {
     $("paraVaultPath").textContent = "Vault: " + state.para.root;
-    if (!paraInboxLoaded) { paraInboxLoaded = true; refreshParaInbox(); }
+    if (!paraInboxLoaded) refreshParaInbox(); // sets paraInboxLoaded itself, only on success
   }
 }
 
@@ -1459,7 +1467,14 @@ $("paraChangeVault").addEventListener("click", () => {
 $("paraInboxRefresh").addEventListener("click", refreshParaInbox);
 
 async function refreshParaInbox() {
-  paraInboxItems = await window.api.listHistory(state.outDir); // unfiled = still in Meetings dir
+  let items;
+  try {
+    items = await window.api.listHistory(state.outDir); // unfiled = still in Meetings dir
+  } catch (e) {
+    return; // fetch failed — paraInboxLoaded stays false so the next tab entry retries
+  }
+  paraInboxItems = items;
+  paraInboxLoaded = true;
   const box = $("paraInbox");
   box.innerHTML = "";
   if (!paraInboxItems.length) { box.innerHTML = '<p class="hint">Все заметки разобраны.</p>'; return; }
@@ -1507,6 +1522,12 @@ $("paraClassifyAll").addEventListener("click", async () => {
   cancelBtn.disabled = false;
   cancelBtn.classList.remove("hidden");
   $("paraInboxRefresh").disabled = true; // mid-batch refresh would detach the loop's captured rows
+  // setRowProcessing only disables the row the loop is currently on — a manual "Разложить"
+  // on any row further down the queue would still race the loop reaching it. Disable every
+  // row's action button up front, same pattern as the "Обновить" disable above.
+  rows.forEach((row) => {
+    if (!row.classList.contains("filed")) row.querySelector(".para-file-btn").disabled = true;
+  });
   log.textContent = "";
   log.classList.remove("hidden");
   paraLog(`Старт: ${rows.length} заметок.`);
@@ -1563,6 +1584,9 @@ $("paraClassifyAll").addEventListener("click", async () => {
   btn.textContent = "🗂 Разобрать все (LLM)";
   cancelBtn.classList.add("hidden");
   $("paraInboxRefresh").disabled = false;
+  rows.forEach((row) => {
+    if (!row.classList.contains("filed")) row.querySelector(".para-file-btn").disabled = false;
+  });
 });
 
 // Toggles the per-row spinner + a transient disable on this row's own controls while

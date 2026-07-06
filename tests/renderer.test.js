@@ -596,6 +596,88 @@ test("PARA: «Обновить» is disabled while classify-all batch is running
   assert.equal($("paraInboxRefresh").disabled, false);
 });
 
+test("PARA: a failed first fetch doesn't set paraInboxLoaded, so the next tab entry retries (not just «Обновить»)", async () => {
+  let listHistoryCalls = 0;
+  let failNext = false;
+  const { window, $ } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru",
+      para: { root: "/v", folders: { projects: "Projects", areas: "Areas", resources: "Resources", archives: "Archives" } },
+    }),
+    listHistory: async () => {
+      listHistoryCalls++;
+      if (failNext) throw new Error("boom");
+      return [{ name: "2026-01-01", title: "T", note: "/n.md", audio: null }];
+    },
+  });
+  listHistoryCalls = 0; // discard init()'s own refreshHistory() fetch — unrelated to PARA
+  failNext = true;
+  window.document.querySelector('.topbtn[data-view="para"]').click();
+  await tick(window);
+  assert.equal(listHistoryCalls, 1);
+  assert.equal($("paraInbox").querySelectorAll(".para-row").length, 0);
+
+  failNext = false;
+  window.document.querySelector('.topbtn[data-view="para"]').click(); // re-entry after the failure
+  await tick(window);
+  assert.equal(listHistoryCalls, 2, "must retry — the failed fetch must not have set paraInboxLoaded");
+  assert.equal($("paraInbox").querySelectorAll(".para-row").length, 1);
+});
+
+test("PARA classify-all: every row's file-btn is disabled up front, including rows the loop hasn't reached yet", async () => {
+  const { window, $ } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru",
+      para: { root: "/v", folders: { projects: "Projects", areas: "Areas", resources: "Resources", archives: "Archives" } },
+    }),
+    listHistory: async () => [
+      { name: "2026-01-01", title: "T1", note: "/n1.md", audio: null },
+      { name: "2026-01-02", title: "T2", note: "/n2.md", audio: null },
+    ],
+    paraClassify: async () => ({ category: "projects", project: "P" }),
+    paraFile: async () => ({ ok: true }),
+  });
+  window.document.querySelector('.topbtn[data-view="para"]').click();
+  await tick(window);
+  const rows = $("paraInbox").querySelectorAll(".para-row");
+  assert.equal(rows.length, 2);
+  $("paraClassifyAll").click();
+  // Synchronous prefix disables every row's file-btn before the first await — including
+  // row[1], which the loop hasn't reached yet (this is the actual race fix: a manual
+  // "Разложить" on it used to be possible while only row[0] was disabled).
+  assert.ok(rows[0].querySelector(".para-file-btn").disabled);
+  assert.ok(rows[1].querySelector(".para-file-btn").disabled, "not-yet-processed row must be disabled too");
+  rows[1].querySelector(".para-file-btn").click(); // disabled — jsdom no-ops the click
+  await tick(window); await tick(window); await tick(window); await tick(window);
+  assert.ok(rows[0].classList.contains("filed"));
+  assert.ok(rows[1].classList.contains("filed"), "manual click while disabled never fired — the loop filed it instead");
+});
+
+test("PARA classify-all: canceling mid-batch re-enables the not-yet-reached row's file-btn (not stuck disabled)", async () => {
+  const { window, $ } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru",
+      para: { root: "/v", folders: { projects: "Projects", areas: "Areas", resources: "Resources", archives: "Archives" } },
+    }),
+    listHistory: async () => [
+      { name: "2026-01-01", title: "T1", note: "/n1.md", audio: null },
+      { name: "2026-01-02", title: "T2", note: "/n2.md", audio: null },
+    ],
+    paraClassify: async () => ({ category: "projects", project: "P" }),
+    paraFile: async () => ({ ok: true }),
+  });
+  window.document.querySelector('.topbtn[data-view="para"]').click();
+  await tick(window);
+  const rows = $("paraInbox").querySelectorAll(".para-row");
+  $("paraClassifyAll").click();
+  assert.ok(rows[1].querySelector(".para-file-btn").disabled);
+  $("paraClassifyCancel").click(); // requested before the loop reaches row 1
+  await tick(window); await tick(window); await tick(window); await tick(window);
+  assert.ok(rows[0].classList.contains("filed"));
+  assert.ok(!rows[1].classList.contains("filed"), "row 2 was never reached — batch was canceled first");
+  assert.equal(rows[1].querySelector(".para-file-btn").disabled, false, "must be re-enabled, not left disabled forever");
+});
+
 test("PARA search sub-tab is enabled and switching to it shows #para-pane-search", async () => {
   const { window, $ } = await boot();
   window.document.querySelector('.topbtn[data-view="para"]').click();
@@ -1409,6 +1491,33 @@ test("a suggestion containing a double quote renders safely and can still be acc
   assert.equal(saved.glossary, `Mindbox, ${injected}`);
 });
 
+test("suggestion inbox at cap: newest terms survive, oldest pending entries are evicted (not the reverse)", async () => {
+  const { $, window, handlers } = await boot({
+    getPresets: async () => ({ presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru", glossary: "Mindbox" }),
+  });
+  await tick(window);
+  const oldTerms = Array.from({ length: 100 }, (_, i) => `old-${i}`);
+  handlers.process({ event: "done", note: "/n.md", audio: "/a.wav", transcript: "t", summary: "s",
+    suggestions: oldTerms });
+  await tick(window);
+  let pending = Array.from($("glossarySuggestChips").querySelectorAll(".chip-text")).map((el) => el.textContent);
+  assert.equal(pending.length, 100);
+  assert.equal(pending[0], "old-0");
+
+  // One more "done" brings 3 brand-new terms in — at 103 total, the cap must evict
+  // the 3 oldest pending entries, not silently drop the new arrivals.
+  handlers.process({ event: "done", note: "/n2.md", audio: "/a2.wav", transcript: "t2", summary: "s2",
+    suggestions: ["new-1", "new-2", "new-3"] });
+  await tick(window);
+  pending = Array.from($("glossarySuggestChips").querySelectorAll(".chip-text")).map((el) => el.textContent);
+  assert.equal(pending.length, 100);
+  assert.ok(!pending.includes("old-0"), "oldest pending entry must be evicted");
+  assert.ok(!pending.includes("old-1"));
+  assert.ok(!pending.includes("old-2"));
+  assert.ok(pending.includes("old-3"), "old-3..old-99 survive");
+  assert.deepEqual(pending.slice(-3), ["new-1", "new-2", "new-3"], "new terms survive at the tail");
+});
+
 // ── auto-«Я»: micFile/systemFile/authorName plumbing ────────────────────────
 test("auto-«Я» inputs (micFile/systemFile/authorName) are forwarded to processAudio in record mode", async () => {
   let sent = null;
@@ -1803,6 +1912,36 @@ test("reprocessHistory() still triggers an immediate single run (queue-of-1 regr
   assert.equal(calls, 1);
   const rows = $("importQueue").querySelectorAll(".queue-item");
   assert.equal(rows.length, 1);
+});
+
+test("recording is gated while a batch import is running, and re-enabled once the batch finishes", async () => {
+  let startCalls = 0;
+  const { window, $, handlers } = await boot({
+    pickAudio: async () => ["/tmp/a.wav", "/tmp/b.wav"],
+    processAudio: async () => ({ ok: true }),
+    startRecording: async () => { startCalls++; return { ok: true }; },
+  });
+  goImportTab(window);
+  $("pickBtn").click(); await tick(window);
+  $("runBtn").click(); await tick(window); // item 1 running
+  assert.equal($("recBtn").disabled, true, "recBtn must be disabled mid-batch");
+  $("recBtn").click(); await tick(window); // disabled button — jsdom no-ops the click
+  assert.equal(startCalls, 0);
+  assert.ok($("recIndicator").classList.contains("hidden"));
+  // The tray menu item calls toggleRecording() directly, bypassing the DOM disabled
+  // attribute — the state.processing guard inside the function must still block it.
+  handlers.trayRecordToggle(); await tick(window);
+  assert.equal(startCalls, 0);
+
+  handlers.process({ event: "done", note: "/n1.md", audio: "/tmp/a.wav", transcript: "t1", summary: "s1" });
+  await tick(window); // item 2 auto-started, batch still running
+  assert.equal($("recBtn").disabled, true);
+
+  handlers.process({ event: "done", note: "/n2.md", audio: "/tmp/b.wav", transcript: "t2", summary: "s2" });
+  await tick(window); // batch fully finished
+  assert.equal($("recBtn").disabled, false);
+  $("recBtn").click(); await tick(window);
+  assert.equal(startCalls, 1, "recording can start once the batch has finished");
 });
 
 // ── recording indicator (topnav badge, visible from any tab) ────────────────
