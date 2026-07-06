@@ -372,7 +372,6 @@ ipcMain.handle("reset-app", async () => {
   if (recordProc || tee || procProc || modelDlProc) {
     return { ok: false, error: "Нельзя сбросить настройки во время записи или обработки" };
   }
-  saveToken("");
   let fresh;
   try {
     fresh = JSON.parse(fs.readFileSync(PRESETS_EXAMPLE, "utf-8"));
@@ -381,7 +380,11 @@ ipcMain.handle("reset-app", async () => {
   }
   if (fresh.para) fresh.para.root = "";
   else fresh.para = { root: "", folders: {} };
+  // Write the fresh presets BEFORE clearing the token: writeJsonAtomic can throw
+  // (disk full, permissions). If it does, bail out here with the old token still
+  // intact instead of leaving a wiped token next to untouched (stale) presets.
   writeJsonAtomic(PRESETS_FILE, fresh);
+  saveToken("");
   return loadPresetsData();
 });
 
@@ -644,6 +647,7 @@ ipcMain.handle("models", async () => {
 ipcMain.handle("download-models", async (_e, opts) => {
   if (modelDlProc) return { ok: false, error: "Скачивание уже идёт" };
   if (procProc) return { ok: false, error: "Дождитесь окончания обработки" };
+  if (recordProc || tee) return { ok: false, error: "Дождитесь окончания записи" };
 
   // Disk guard: models download into ~/.cache, not TMP_DIR — check that volume.
   let diskVerdict = { action: "ok", msg: null };

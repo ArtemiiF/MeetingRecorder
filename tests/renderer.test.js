@@ -1778,6 +1778,13 @@ test("main.js: download-models and process-audio refuse to run while the other i
   assert.match(processAudio, /if \(modelDlProc\)/);
 });
 
+test("main.js: download-models also refuses while a recording is active (recordProc or tee) — CPU/network contention with live capture", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const downloadModels = mainSrc.match(/ipcMain\.handle\("download-models"[\s\S]*?\n\}\);/)[0];
+  assert.match(downloadModels, /if \(recordProc \|\| tee\)/,
+    "download-models must refuse while recordProc/tee are set, same as reset-app's busy guard");
+});
+
 test("main.js: modelDlProc is killed in before-quit alongside the other tracked children", () => {
   const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
   const beforeQuit = mainSrc.match(/app\.on\("before-quit"[\s\S]*?\n\}\);/)[0];
@@ -2132,4 +2139,18 @@ test("main.js: reset-app persists a fresh presets.json with para.root='' (surviv
   assert.match(resetApp, /\.para\.root = ""/);
   assert.doesNotMatch(resetApp, /fs\.unlinkSync\(PRESETS_FILE\)/,
     "must not merely delete presets.json and lean on fallback resurrection");
+});
+
+test("main.js: reset-app writes the fresh presets before clearing the token (a presets-write failure must not wipe the token)", () => {
+  // writeJsonAtomic can throw (disk full, permissions) — if saveToken("") ran first,
+  // a throw here would leave the token wiped while the stale presets survive on disk.
+  // Ordering must be: write fresh presets, THEN clear the token.
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const resetApp = mainSrc.match(/ipcMain\.handle\("reset-app"[\s\S]*?\n\}\);/)[0];
+  const writeIdx = resetApp.indexOf("writeJsonAtomic(PRESETS_FILE,");
+  const tokenIdx = resetApp.indexOf('saveToken("")');
+  assert.ok(writeIdx > -1, "writeJsonAtomic(PRESETS_FILE, ...) not found in reset-app");
+  assert.ok(tokenIdx > -1, 'saveToken("") not found in reset-app');
+  assert.ok(writeIdx < tokenIdx,
+    "writeJsonAtomic must run before saveToken(\"\") so a presets-write failure aborts before the token is cleared");
 });
