@@ -1,5 +1,11 @@
 # TODO
 
+## Не-блокеры критик-гейтов (2026-07-06, словарь)
+- Whisper `initial_prompt`: контекст + глоссарий конкатенируются без капа (`backend.py` `transcribe`/`_glossary_prompt`), Whisper держит только последние ~224 токена — при дефолтных 106 терминах хвост глоссария вытесняет контекст-промпт. Капнуть/приоритизировать термины при случае.
+- Autouse-фикстура `_no_real_lmstudio_by_default` (tests/test_backend.py) стабит только `requests.post`; `requests.get` (`_rag_discover_embed_model`) под дефолтным стабом даёт AttributeError→None. Латентно: RAG-тесты ставят свой fake поверх. Добавить `.get` в дефолтный стаб при случае.
+- Inbox предложений: cap-100 держит старейшие, новые молча дропаются (`merged.slice(0, CAP)`) — эвикшн наоборот для UX.
+- `renderer.js` комментарий у `glossaryDismissed` говорит «lowercased», хранится original-case (все сравнения lowercase — функционально ок, комментарий врёт).
+
 ## Не-блокеры критик-гейтов (2026-07-03)
 - Auto-«Я», VAD-ветка при nonzero delay: `_shift_chunks` клипует граничный chunk у нуля — дрейф схлопнутой дорожки от timeline ≤ delay на этой границе (fails safe: эвристика с порогами). Добавить nonzero-delay интеграционный тест при калибровке порогов на реальной записи.
 - `_read_mono_decimated` (backend.py): 8-бит WAV читается как np.int8, по спеке PCM-8 unsigned — латентно (приложение пишет только 16-бит), поправить dtype-карту при случае.

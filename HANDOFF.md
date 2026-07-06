@@ -1,8 +1,22 @@
-# HANDOFF — состояние на 2026-07-03 (ночь)
+# HANDOFF — состояние на 2026-07-06
 
 Electron-приложение записи встреч: mic+system (AudioTee) / импорт → `backend.py` (JSON-stdout): mono/VAD → MLX Whisper → коррекция терминов → pyannote → LLM-сводка (LM Studio `:1234`) → `.md` в Obsidian. Архитектура и хранение — см. README.md. Четыре вида: 🎙 Запись · 📚 История · 🗂 PARA · 📖 Словарь.
 
-## Что доехало до main (сессия 2026-07-03, `main` = `75414d0`)
+## Что доехало до main (сессия 2026-07-06, `main` = `ef42c2d`) — словарь
+
+Три чанка, каждый своей веткой через критик-гейт:
+
+- **DEFAULT_GLOSSARY 49→106** (`8f93a7a`): распространённые IT/бизнес-термины (продукт/аналитика/dev/инфра/AI). Golden-дубликат в tests/renderer.test.js обновлён синхронно (tripwire сохранён). Хвост: 106 терминов не влезают в ~224-токенное окно Whisper initial_prompt — см. TODO.
+- **Чипы-UX вкладки Словарь** (`cdf21f2`+`b28d276`): textarea → чип-лист (добавить input/Enter, удалить ×, счётчик «N терминов»), кнопка «Дополнить распространёнными» (case-insensitive мёрж дефолтов, текущий порядок первым), textarea остался скрытым «текстом»-тоглом (двусторонний sync). Критик-reject пойман и исправлен: `data-term`-атрибут с user-строкой (escapeHtml не экранирует `"` → attribute-injection + сломанное удаление) → слушатели через closure-by-index, атрибут удалён; regression-тест с кавычкой в термине. Паттерн обязателен для всех новых чипов: никаких user/LLM-строк в HTML-атрибутах.
+- **Авто-пополнение «Предложения»** (`ef42c2d`): новый pipeline-stage `suggest` после summary (всегда, независимо от do_summary; LM недоступен → `[]` + warn, не 🔴); LLM-извлечение кандидатов из транскрипта с жёсткими код-гейтами (substring по транскрипту против инвенций, дедуп через `_term_or_declined_form`, len>2, cap 20); кеш `suggest-{lang}{glossary-suffix}.json` + input_hash транскрипта; suggestions едут в `done`-payload (main.js не менялся — форвардит verbatim). Renderer: presets-поля `glossarySuggestions` (pending, cap 100) / `glossaryDismissed` (никогда не пере-предлагать), секция «Предложения» с ✚/✕/«Принять все». Autouse-фикстура в pytest стабит requests→503 (LM Studio на машине живой — полнопайплайновые тесты больше не бьют в него).
+
+Минорки критика этой сессии — в TODO.md (секция 2026-07-06).
+
+## Push-гейт из чужого cwd (важно для следующих сессий)
+
+Сессия шла из `/Users/filanovskii/SupersetWorkspace` — PreToolUse-hook `auto-critic.sh` исполняется в cwd сессии, там нет `origin` → precheck fail-closed ДО чтения маркера (bypass-строка не помогает). Владелец разрешил обход: временный ref `git -C <session-cwd> update-ref refs/remotes/origin/main HEAD` → marker с `bypass: owner-accepted-risk` → push → `update-ref -d`. Правильный фикс — запускать сессию из каталога репо; harness-gap хука (не резолвит репо из команды) не чинился.
+
+## Предыдущая сессия (2026-07-03, `main` был `75414d0`)
 
 Одиннадцать чанков за день, каждый своей веткой через критик-гейт. Утро (см. git log): 4 минорки критика (`d8c33c8`+`554b4b1`), mix offset xcorr (`468ade2`), auto-«Я» из mic-дорожки (`385ae7d`), секция «Модели» в настройках (`c43c892`) + UX-правка кнопок «Проверить»/«Скачать недостающие» (`23437be`).
 
@@ -17,7 +31,7 @@ Electron-приложение записи встреч: mic+system (AudioTee) /
 
 ## Тесты
 
-`npm test` = JS `node --test` (134/134) + PY pytest (206/206). Всё замокано — живой e2e (RAG, коррекция, auto-«Я», скачивание моделей, батч-импорт, reset) не гонялся; первый реальный запуск = smoke.
+`npm test` = JS `node --test` (156/156) + PY pytest (219/219). Всё замокано — живой e2e (RAG, коррекция, auto-«Я», скачивание моделей, батч-импорт, reset, suggest-стадия) не гонялся; первый реальный запуск = smoke.
 
 ## Решения владельца (действуют)
 
