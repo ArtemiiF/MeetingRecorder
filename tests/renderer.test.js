@@ -1261,6 +1261,152 @@ test("editing the textarea (текстом mode) re-syncs the chip list", async 
   assert.equal($("glossaryCount").textContent, "3 терминов");
 });
 
+// ── glossary: «Предложения» inbox (auto-suggested terms from processing) ────
+test("glossarySuggestions/glossaryDismissed load from presets, and a process-complete 'done' event merges new suggestions in", async () => {
+  const { $, window, handlers } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru", glossary: "Mindbox",
+      glossarySuggestions: ["ClickHouse"], glossaryDismissed: ["Kafka"],
+    }),
+  });
+  await tick(window);
+  assert.ok(!$("glossarySuggestSection").classList.contains("hidden"));
+  let chips = Array.from($("glossarySuggestChips").querySelectorAll(".chip-text")).map((el) => el.textContent);
+  assert.deepEqual(chips, ["ClickHouse"]);
+  assert.equal($("glossarySuggestCount").textContent, "1 предложений");
+
+  handlers.process({
+    event: "done", note: "/n.md", audio: "/a.wav", transcript: "t", summary: "s",
+    // "Kafka" was dismissed earlier — must never resurface; "Mindbox" is already
+    // in the glossary — must not duplicate into pending; "S3" is genuinely new.
+    suggestions: ["Kafka", "Mindbox", "S3", "ClickHouse"],
+  });
+  await tick(window);
+  chips = Array.from($("glossarySuggestChips").querySelectorAll(".chip-text")).map((el) => el.textContent);
+  assert.deepEqual(chips, ["ClickHouse", "S3"]);
+  assert.equal($("glossarySuggestCount").textContent, "2 предложений");
+});
+
+test("glossary suggestions section is hidden when there is nothing pending", async () => {
+  const { $, window } = await boot({
+    getPresets: async () => ({ presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru", glossary: "Mindbox" }),
+  });
+  await tick(window);
+  assert.ok($("glossarySuggestSection").classList.contains("hidden"));
+});
+
+test("accepting a suggestion moves it into the glossary chips and persists both lists, removing it from pending", async () => {
+  let saved = null;
+  const { $, window, handlers } = await boot({
+    getPresets: async () => ({ presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru", glossary: "Mindbox" }),
+    savePresets: async (data) => { saved = data; return true; },
+  });
+  await tick(window);
+  handlers.process({ event: "done", note: "/n.md", audio: "/a.wav", transcript: "t", summary: "s",
+    suggestions: ["ClickHouse", "Kafka"] });
+  await tick(window);
+
+  $("glossarySuggestChips").querySelectorAll(".chip-accept")[0].click();
+  await tick(window);
+
+  const glossaryChips = Array.from($("glossaryChips").querySelectorAll(".chip-text")).map((el) => el.textContent);
+  assert.deepEqual(glossaryChips, ["Mindbox", "ClickHouse"]);
+  const pending = Array.from($("glossarySuggestChips").querySelectorAll(".chip-text")).map((el) => el.textContent);
+  assert.deepEqual(pending, ["Kafka"]);
+  assert.equal($("glossary").value, "Mindbox, ClickHouse");
+  assert.ok(saved, "savePresets was not called");
+  assert.equal(saved.glossary, "Mindbox, ClickHouse");
+  assert.deepEqual(saved.glossarySuggestions, ["Kafka"]);
+});
+
+test("dismissing a suggestion removes it from pending, remembers it, and it never resurfaces after a later 'done' event", async () => {
+  let saved = null;
+  const { $, window, handlers } = await boot({
+    // non-empty glossary — "" would pre-fill DEFAULT_GLOSSARY (which already
+    // contains "Kafka"), masking the merge/dedupe behaviour under test.
+    getPresets: async () => ({ presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru", glossary: "Mindbox" }),
+    savePresets: async (data) => { saved = data; return true; },
+  });
+  await tick(window);
+  handlers.process({ event: "done", note: "/n.md", audio: "/a.wav", transcript: "t", summary: "s",
+    suggestions: ["Kafka"] });
+  await tick(window);
+
+  $("glossarySuggestChips").querySelectorAll(".chip-dismiss")[0].click();
+  await tick(window);
+
+  assert.ok($("glossarySuggestSection").classList.contains("hidden"), "pending list emptied → section hidden");
+  assert.ok(saved, "savePresets was not called");
+  assert.deepEqual(saved.glossaryDismissed, ["Kafka"]);
+  assert.deepEqual(saved.glossarySuggestions, []);
+
+  // a later process run re-suggests the same term — must not resurface.
+  handlers.process({ event: "done", note: "/n2.md", audio: "/a2.wav", transcript: "t2", summary: "s2",
+    suggestions: ["Kafka"] });
+  await tick(window);
+  assert.ok($("glossarySuggestSection").classList.contains("hidden"));
+  const pending = Array.from($("glossarySuggestChips").querySelectorAll(".chip-text")).map((el) => el.textContent);
+  assert.deepEqual(pending, []);
+});
+
+test("«Принять все» is shown only with ≥2 pending, and merges every pending term into the glossary at once", async () => {
+  let saved = null;
+  const { $, window, handlers } = await boot({
+    getPresets: async () => ({ presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru", glossary: "Mindbox" }),
+    savePresets: async (data) => { saved = data; return true; },
+  });
+  await tick(window);
+
+  handlers.process({ event: "done", note: "/n.md", audio: "/a.wav", transcript: "t", summary: "s",
+    suggestions: ["ClickHouse"] });
+  await tick(window);
+  assert.ok($("glossaryAcceptAll").classList.contains("hidden"), "hidden with only 1 pending");
+
+  handlers.process({ event: "done", note: "/n.md", audio: "/a.wav", transcript: "t", summary: "s",
+    suggestions: ["Kafka"] });
+  await tick(window);
+  assert.ok(!$("glossaryAcceptAll").classList.contains("hidden"), "shown with 2 pending");
+
+  $("glossaryAcceptAll").click();
+  await tick(window);
+  const glossaryChips = Array.from($("glossaryChips").querySelectorAll(".chip-text")).map((el) => el.textContent);
+  assert.deepEqual(glossaryChips, ["Mindbox", "ClickHouse", "Kafka"]);
+  const pending = Array.from($("glossarySuggestChips").querySelectorAll(".chip-text")).map((el) => el.textContent);
+  assert.deepEqual(pending, []);
+  assert.ok($("glossarySuggestSection").classList.contains("hidden"));
+  assert.equal(saved.glossary, "Mindbox, ClickHouse, Kafka");
+});
+
+test("a suggestion containing a double quote renders safely and can still be accepted/dismissed (regression: attribute-injection via data-term, see b28d276)", async () => {
+  const injected = 'x" onmouseover="alert(1)';
+  let saved = null;
+  const { $, window, handlers } = await boot({
+    // non-empty glossary — "" would pre-fill DEFAULT_GLOSSARY, muddying the
+    // exact-chip-list assertions below.
+    getPresets: async () => ({ presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru", glossary: "Mindbox" }),
+    savePresets: async (data) => { saved = data; return true; },
+  });
+  await tick(window);
+  handlers.process({ event: "done", note: "/n.md", audio: "/a.wav", transcript: "t", summary: "s",
+    suggestions: [injected] });
+  await tick(window);
+
+  const chipTexts = Array.from($("glossarySuggestChips").querySelectorAll(".chip-text")).map((el) => el.textContent);
+  assert.deepEqual(chipTexts, [injected], "term renders intact as text content");
+
+  const acceptBtn = $("glossarySuggestChips").querySelector(".chip-accept");
+  assert.equal(acceptBtn.getAttribute("data-term"), null);
+  assert.equal(acceptBtn.getAttribute("onmouseover"), null);
+  assert.equal(acceptBtn.onmouseover, null);
+
+  acceptBtn.click();
+  await tick(window);
+  const glossaryChips = Array.from($("glossaryChips").querySelectorAll(".chip-text")).map((el) => el.textContent);
+  assert.deepEqual(glossaryChips, ["Mindbox", injected]);
+  assert.ok(saved, "savePresets was not called");
+  assert.equal(saved.glossary, `Mindbox, ${injected}`);
+});
+
 // ── auto-«Я»: micFile/systemFile/authorName plumbing ────────────────────────
 test("auto-«Я» inputs (micFile/systemFile/authorName) are forwarded to processAudio in record mode", async () => {
   let sent = null;

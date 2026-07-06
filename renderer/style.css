@@ -222,6 +222,15 @@ body.processing .history-row button { opacity: .4; pointer-events: none; }
 .glossary-add-row { display: flex; gap: 8px; }
 .glossary-add-row input { flex: 1; }
 
+/* glossary: "Предложения" inbox (auto-suggested terms from processing) */
+.glossary-suggest { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); }
+.glossary-suggest-title { font-weight: 600; font-size: 13px; }
+.chip-accept {
+  background: transparent; border: none; color: var(--muted); cursor: pointer;
+  font-size: 15px; line-height: 1; padding: 3px 7px; border-radius: 50%; font-family: inherit;
+}
+.chip-accept:hover { background: var(--ok); color: #fff; }
+
 .preset-row { display: flex; gap: 8px; margin-bottom: 12px; }
 .preset-row select { flex: 1; }
 .check { display: flex; align-items: center; gap: 8px; color: var(--fg);

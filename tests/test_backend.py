@@ -74,6 +74,28 @@ def pipe():
     return backend.Pipeline(out_dir="/tmp/mr-test-out", diarize=False)
 
 
+@pytest.fixture(autouse=True)
+def _no_real_lmstudio_by_default(monkeypatch):
+    """"Всё замокано" (HANDOFF.md) is an invariant of this suite — no test may
+    depend on a real LM Studio being reachable. Unlike `correct`/`meta`, the
+    `suggest` pipeline stage calls LM Studio UNCONDITIONALLY whenever there is a
+    transcript, so any full `.process()` test that doesn't otherwise stub it
+    would now reach a real `requests.post` — and LM Studio may actually be
+    running on :1234 on a dev machine, which would make tests slow/non-deterministic.
+    Default every test to a safe non-200 stub; a test that wants a specific
+    canned LLM response calls install_fake_requests(monkeypatch, ...) itself,
+    which simply overwrites this default for that one test."""
+    fake = types.ModuleType("requests")
+
+    class _DefaultResp:
+        status_code = 503
+        def json(self):
+            return {}
+
+    fake.post = lambda *a, **k: _DefaultResp()
+    monkeypatch.setitem(sys.modules, "requests", fake)
+
+
 def test_filter_keeps_normal_speech(pipe):
     segs = [seg("Давай обсудим релиз на следующей неделе")]
     assert len(pipe.filter_hallucinations(segs)) == 1
@@ -2537,6 +2559,179 @@ def test_correct_stage_cache_honored_on_retry_skips_llm_recompute(monkeypatch, t
     assert llm_calls["n"] == 1  # Stage-2 LLM ran ONCE; the retry reused the cache
     ends = {e["stage"]: e for e in events if e["event"] == "stage_end"}
     assert "из кеша" in ends["correct"]["msg"]
+
+
+# ── suggest_glossary_terms (glossary auto-enrichment LLM pass) + `suggest` stage ──
+def test_suggest_glossary_terms_happy_path_filters_invented_and_caps(monkeypatch, pipe):
+    # "Микрософт" doesn't occur in the transcript at all — must be dropped (invention
+    # gate); the rest genuinely occur and survive.
+    payload = {"choices": [{"message": {"content":
+        "Иван Петров, Mindbox, ClickHouse, Микрософт"}}]}
+    install_fake_requests(monkeypatch, payload=payload)
+    transcript = "Иван Петров сказал, что перевозим метрики в ClickHouse через Mindbox."
+    out = pipe.suggest_glossary_terms(transcript, [])
+    assert out == ["Иван Петров", "Mindbox", "ClickHouse"]
+
+
+def test_suggest_glossary_terms_drops_terms_already_in_glossary_or_declined_form(monkeypatch, pipe):
+    # "Антона" is a whitelisted declined form of the glossary term "Антон" — dropped
+    # even though it occurs verbatim in the transcript; "Mindbox" is an exact
+    # glossary hit — dropped too. "Kafka" is new — kept.
+    payload = {"choices": [{"message": {"content": "Антона, Mindbox, Kafka"}}]}
+    install_fake_requests(monkeypatch, payload=payload)
+    transcript = "Встретил Антона в офисе Mindbox, обсудили Kafka."
+    out = pipe.suggest_glossary_terms(transcript, ["Антон", "Mindbox"])
+    assert out == ["Kafka"]
+
+
+def test_suggest_glossary_terms_dedupes_case_insensitively_and_drops_short_tokens(monkeypatch, pipe):
+    # "S3" (2 chars) and "ы" (1 char) are both dropped by the length gate ("1-2 char
+    # tokens"); "api" is a case-insensitive dupe of "API".
+    payload = {"choices": [{"message": {"content": "API, api, ClickHouse, S3, ы"}}]}
+    install_fake_requests(monkeypatch, payload=payload)
+    transcript = "Обсудили API интеграцию с ClickHouse и S3, буква ы тут тоже есть."
+    out = pipe.suggest_glossary_terms(transcript, [])
+    assert out == ["API", "ClickHouse"]
+
+
+def test_suggest_glossary_terms_caps_at_twenty(monkeypatch, pipe):
+    words = [f"термин{i}" for i in range(30)]
+    payload = {"choices": [{"message": {"content": ", ".join(words)}}]}
+    install_fake_requests(monkeypatch, payload=payload)
+    transcript = " ".join(words)
+    out = pipe.suggest_glossary_terms(transcript, [])
+    assert len(out) == 20
+    assert out == words[:20]
+
+
+def test_suggest_glossary_terms_empty_transcript_no_call(monkeypatch, pipe):
+    calls = install_fake_requests(monkeypatch, payload={"choices": [{"message": {"content": "X"}}]})
+    assert pipe.suggest_glossary_terms("", []) == []
+    assert pipe.suggest_glossary_terms("   ", []) == []
+    assert calls == {}  # requests.post never invoked
+
+
+def test_suggest_glossary_terms_non_200_degrades_to_empty_with_warning(monkeypatch, pipe):
+    install_fake_requests(monkeypatch, status=503, payload={})
+    events = capture(pipe.suggest_glossary_terms, "какой-то транскрипт текста", [])
+    logs = [e["msg"] for e in events if e["event"] == "log"]
+    assert any("HTTP 503" in m for m in logs)
+    assert pipe.suggest_glossary_terms("какой-то транскрипт текста", []) == []
+
+
+def test_suggest_glossary_terms_swallows_exception_and_logs(monkeypatch, pipe):
+    install_fake_requests(monkeypatch, raise_exc=ConnectionError("LM Studio down"))
+    assert pipe.suggest_glossary_terms("какой-то транскрипт текста", []) == []
+    events = capture(pipe.suggest_glossary_terms, "какой-то транскрипт текста", [])
+    logs = [e["msg"] for e in events if e["event"] == "log"]
+    assert any("LLM недоступен" in m for m in logs)
+
+
+def test_suggest_glossary_terms_empty_content_degrades_to_empty(monkeypatch, pipe):
+    install_fake_requests(monkeypatch, payload={"choices": [{"message": {"content": ""}}]})
+    assert pipe.suggest_glossary_terms("какой-то транскрипт текста", []) == []
+
+
+def test_suggest_glossary_terms_salvages_from_reasoning_content_when_content_empty(monkeypatch, pipe):
+    payload = {"choices": [{"message": {"content": "", "reasoning_content": "Kubernetes"}}]}
+    install_fake_requests(monkeypatch, payload=payload)
+    out = pipe.suggest_glossary_terms("Разговор про Kubernetes и деплой.", [])
+    assert out == ["Kubernetes"]
+
+
+# ── `suggest` pipeline stage: wiring + cache ────────────────────────────────
+def test_suggest_stage_emits_ok_and_suggestions_land_in_done_event(monkeypatch, tmp_path):
+    src = tmp_path / "in.wav"; src.write_bytes(b"x")
+    p = backend.Pipeline(out_dir=str(tmp_path / "v"), diarize=False)
+    monkeypatch.setattr(p, "convert_to_mono", lambda f: f)
+    monkeypatch.setattr(p, "remove_silence_vad", lambda f: (f, None))
+    monkeypatch.setattr(p, "transcribe", lambda f: {"segments": [seg("говорим про ClickHouse", 0, 3)], "text": "x"})
+    monkeypatch.setattr(p, "summarize", lambda t, pr: None)
+    monkeypatch.setattr(p, "suggest_glossary_terms", lambda t, terms: ["ClickHouse"])
+    events = capture(p.process, str(src), "prompt")
+    ends = {e["stage"]: e for e in events if e["event"] == "stage_end"}
+    assert ends["suggest"]["status"] == "ok"
+    done = [e for e in events if e["event"] == "done"][0]
+    assert done["suggestions"] == ["ClickHouse"]
+
+
+def test_suggest_stage_runs_even_when_summary_disabled(monkeypatch, tmp_path):
+    # contract: suggest is independent of DO_SUMMARY — a transcript-only run still
+    # gets suggestions (unlike the `meta` stage, which is gated on DO_SUMMARY).
+    src = tmp_path / "in.wav"; src.write_bytes(b"x")
+    p = backend.Pipeline(out_dir=str(tmp_path / "v"), diarize=False, do_summary=False)
+    monkeypatch.setattr(p, "convert_to_mono", lambda f: f)
+    monkeypatch.setattr(p, "remove_silence_vad", lambda f: (f, None))
+    monkeypatch.setattr(p, "transcribe", lambda f: {"segments": [seg("говорим про Kafka", 0, 3)], "text": "x"})
+    calls = {"n": 0}
+    monkeypatch.setattr(p, "suggest_glossary_terms",
+                         lambda t, terms: calls.__setitem__("n", calls["n"] + 1) or ["Kafka"])
+    events = capture(p.process, str(src), "prompt")
+    ends = {e["stage"]: e for e in events if e["event"] == "stage_end"}
+    assert ends["llm"]["status"] == "skip"     # summary disabled
+    assert ends["suggest"]["status"] == "ok"   # suggest still ran
+    assert calls["n"] == 1
+    done = [e for e in events if e["event"] == "done"][0]
+    assert done["suggestions"] == ["Kafka"]
+
+
+def test_suggest_stage_cache_honored_on_retry_skips_llm_recompute(monkeypatch, tmp_path):
+    src = tmp_path / "in.wav"; src.write_bytes(b"x")
+    cache = tmp_path / "cache"
+    calls = {"n": 0}
+
+    def fake_suggest(self, transcript, terms):
+        calls["n"] += 1
+        return ["Kafka"]
+
+    monkeypatch.setattr(backend.Pipeline, "suggest_glossary_terms", fake_suggest)
+
+    def fresh_pipe():
+        p = backend.Pipeline(out_dir=str(tmp_path / "v"), diarize=False, cache_dir=str(cache))
+        monkeypatch.setattr(p, "convert_to_mono", lambda f: f)
+        monkeypatch.setattr(p, "remove_silence_vad", lambda f: (f, None))
+        monkeypatch.setattr(p, "transcribe", lambda f: {"segments": [seg("говорим про Kafka", 0, 3)], "text": "x"})
+        monkeypatch.setattr(p, "summarize", lambda t, pr: None)
+        return p
+
+    capture(fresh_pipe().process, str(src), "p")           # first run → suggests + caches
+    events = capture(fresh_pipe().process, str(src), "p")  # retry, same cache_dir → resumes from cache
+
+    assert calls["n"] == 1  # suggest LLM call ran ONCE; the retry reused the cache
+    ends = {e["stage"]: e for e in events if e["event"] == "stage_end"}
+    assert "из кеша" in ends["suggest"]["msg"]
+    done = [e for e in events if e["event"] == "done"][0]
+    assert done["suggestions"] == ["Kafka"]
+
+
+def test_suggest_stage_cache_busted_by_glossary_change(monkeypatch, tmp_path):
+    # mirrors test_glossary_change_busts_transcribe_cache — a glossary change must
+    # not serve a stale cached suggestion set (the suggest cache filename embeds
+    # _glossary_cache_suffix precisely so this invalidates).
+    src = tmp_path / "in.wav"; src.write_bytes(b"x")
+    cache = tmp_path / "cache"
+    calls = {"n": 0}
+
+    def fake_suggest(self, transcript, terms):
+        calls["n"] += 1
+        return ["Kafka"]
+
+    monkeypatch.setattr(backend.Pipeline, "suggest_glossary_terms", fake_suggest)
+
+    def mk(glossary):
+        p = backend.Pipeline(out_dir=str(tmp_path / "v"), diarize=False, cache_dir=str(cache),
+                              glossary=glossary)
+        monkeypatch.setattr(p, "convert_to_mono", lambda f: f)
+        monkeypatch.setattr(p, "remove_silence_vad", lambda f: (f, None))
+        monkeypatch.setattr(p, "transcribe", lambda f: {"segments": [seg("говорим про Kafka", 0, 3)], "text": "x"})
+        monkeypatch.setattr(p, "summarize", lambda t, pr: None)
+        monkeypatch.setattr(p, "correct_glossary_llm", lambda segs, terms: (segs, 0))
+        return p
+
+    capture(mk("").process, str(src), "p")         # baseline run, no glossary
+    capture(mk("Mindbox").process, str(src), "p")  # glossary changed → must not reuse baseline suggest cache
+
+    assert calls["n"] == 2  # suggest LLM ran again — the glossary change invalidated the cache key
 
 
 # ── critic follow-up fixes ──────────────────────────────────────────────────

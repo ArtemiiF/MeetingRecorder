@@ -11,7 +11,8 @@ Events:
   elapsed   {"seconds": int}                    recording tick
   recorded  {"file": str, "size_mb": float}     recording finalized
   done      {"note": str, "audio": str, "transcript": str, "summary": str,
-             "actions": {"items": [{"what","who","due"}], "decisions": [str]}}
+             "actions": {"items": [{"what","who","due"}], "decisions": [str]},
+             "suggestions": [str]}                     glossary term candidates
   error     {"msg": str}
 
 Commands (argv[1]):
@@ -660,6 +661,15 @@ class Pipeline:
         "Исправь ТОЛЬКО неверно распознанные слова из словаря (имена, термины). "
         "Верни текст без других изменений."
     )
+    # "suggest" stage (see suggest_glossary_terms) — extraction hint only; every
+    # candidate is re-validated against the transcript and the glossary in code.
+    SUGGEST_SYSTEM_PROMPT = (
+        "Ты извлекаешь из транскрипта встречи кандидатов для словаря терминов, "
+        "которые помогают распознаванию речи. Извлеки до 20 терминов: имена людей, "
+        "названия продуктов/инструментов/компаний, повторяющиеся доменные термины. "
+        "Не выдумывай — только то, что явно есть в тексте. Ответь строго списком "
+        "терминов через запятую, без нумерации и пояснений."
+    )
 
     def _whisper_lang(self):
         # mlx/whisper take None for auto-detect
@@ -804,6 +814,64 @@ class Pipeline:
             log(f"⚠️ LLM недоступен — коррекция терминов только по словарю: {e}")
             return None, 0
         return new_segments, accepted
+
+    # ── glossary auto-enrichment: "suggest" stage ───────────────────────────
+    def suggest_glossary_terms(self, transcript, existing_terms):
+        """LLM pass over the FINAL corrected transcript, extracting up to 20
+        candidate glossary terms (people names, product/tool/company names,
+        recurring domain terms) that feed the "Предложения" inbox on the
+        Словарь tab. The LLM output is only a hint — every candidate is
+        re-validated in code before being returned:
+          - must actually occur in the transcript (case-insensitive substring
+            match) — blocks LLM invention;
+          - must not already be covered by the glossary, exactly or as a
+            whitelisted declined form (_term_or_declined_form, same guard
+            fuzzy_correct uses);
+          - longer than 2 characters;
+          - deduped, capped at 20.
+        On any LM Studio failure (unreachable, non-200, empty reply) this
+        degrades to an empty list and logs a warning — mirrors
+        correct_glossary_llm's degrade-and-log pattern — and never raises, so
+        the pipeline always completes."""
+        if not transcript or not transcript.strip():
+            return []
+        import re
+        import requests
+        try:
+            resp = requests.post(self.LMSTUDIO_API, json={
+                "messages": [
+                    {"role": "system", "content": self.SUGGEST_SYSTEM_PROMPT},
+                    {"role": "user", "content": f"ТРАНСКРИПТ:\n{transcript[:8000]}"},
+                ],
+                "temperature": 0.1, "max_tokens": 2500,
+            }, timeout=120)
+            if resp.status_code != 200:
+                log(f"⚠️ LM Studio HTTP {resp.status_code} — предложения словаря пропущены")
+                return []
+            msg = (resp.json().get("choices") or [{}])[0].get("message", {})
+            raw = (msg.get("content") or "") or (msg.get("reasoning_content") or "")
+            if not raw.strip():
+                return []
+        except Exception as e:
+            log(f"⚠️ LLM недоступен — предложения словаря пропущены: {e}")
+            return []
+
+        candidates = [t.strip() for t in re.split(r"[,\n]+", raw) if t.strip()]
+        lower_transcript = transcript.lower()
+        seen, out = set(), []
+        for cand in candidates:
+            low = cand.lower()
+            if low not in lower_transcript:
+                continue  # hard gate: LLM invented a term not actually in the transcript
+            if _term_or_declined_form(cand, existing_terms) is not None:
+                continue  # already covered by the glossary (exact or declined form)
+            if low in seen or len(cand) <= 2:
+                continue
+            seen.add(low)
+            out.append(cand)
+            if len(out) >= 20:
+                break
+        return out
 
     def filter_hallucinations(self, segments):
         import re
@@ -1392,7 +1460,29 @@ class Pipeline:
                 summary = summary or ""
                 stage_end("llm", "fail", "LM Studio не ответил — заметка без сводки")
 
-        # ── 4b. metadata: topical title + inferred speaker names (extra LLM calls) ──
+        # ── 4b. glossary term suggestions (cache: suggest-<lang><glossary-suffix>.json) ──
+        # Independent of DO_SUMMARY (unlike the meta stage below) — runs whenever an
+        # LLM is reachable, since a transcript-only run still benefits from glossary
+        # suggestions. Cache key mirrors correct's: language + glossary suffix (a
+        # suggestion set depends on what's already in the glossary) PLUS a hash of
+        # the transcript text itself, since — unlike correct — a glossary change
+        # alone doesn't bound every way this stage's input can change (formatted vs.
+        # plain transcript, diarization differences) while the suffix stays equal.
+        stage("suggest", "Предложения словаря")
+        sj = self._cache(f"suggest-{self.LANGUAGE}{self._glossary_cache_suffix()}.json")
+        import hashlib
+        suggest_input_hash = hashlib.sha1(transcript_for_llm.encode("utf-8")).hexdigest()[:12]
+        cached_s = self._cache_read(sj) if (sj and sj.exists()) else None
+        if cached_s and cached_s.get("input_hash") == suggest_input_hash:
+            suggestions = cached_s.get("terms", [])
+            stage_end("suggest", "ok", f"{len(suggestions)} кандидатов (из кеша)")
+        else:
+            suggestions = self.suggest_glossary_terms(transcript_for_llm, terms)
+            if sj:
+                self._cache_write(sj, {"terms": suggestions, "input_hash": suggest_input_hash})
+            stage_end("suggest", "ok", f"{len(suggestions)} кандидатов" if suggestions else "нет кандидатов")
+
+        # ── 4c. metadata: topical title + inferred speaker names (extra LLM calls) ──
         stage("meta", "Заголовок и спикеры")
         title = ""
         speakers = {}
@@ -1464,7 +1554,8 @@ class Pipeline:
              summary=summary,
              title=title,
              speakers=speakers,
-             actions=actions)
+             actions=actions,
+             suggestions=suggestions)
 
 
 def cmd_process(args):

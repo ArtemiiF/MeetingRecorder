@@ -22,6 +22,8 @@ const state = {
   language: "ru",
   authorName: "Автор",
   glossary: "",
+  glossarySuggestions: [], // pending candidates from the "suggest" pipeline stage — accept/dismiss
+  glossaryDismissed: [],   // dismissed candidates (lowercased) — never re-suggested
   para: null, // { root, folders: {projects, areas, resources, archives} }
 };
 
@@ -292,6 +294,8 @@ async function init() {
   state.language = (data.language === "auto" ? "" : data.language) || "ru";
   state.authorName = data.authorName || "Автор";
   state.glossary = data.glossary || DEFAULT_GLOSSARY;
+  state.glossarySuggestions = data.glossarySuggestions || [];
+  state.glossaryDismissed = data.glossaryDismissed || [];
   state.para = data.para || null;
   state.secretEncrypted = data.secretEncrypted !== false;
   $("outDir").value = state.outDir;
@@ -300,6 +304,7 @@ async function init() {
   $("authorName").value = state.authorName;
   $("glossary").value = state.glossary;
   renderGlossaryChips();
+  renderGlossarySuggestions();
   updateTokenWarn();
   renderPresets();
   if (state.presets.length) selectPreset(0);
@@ -365,6 +370,8 @@ async function persistPresets() {
     language: state.language,
     authorName: state.authorName,
     glossary: state.glossary,
+    glossarySuggestions: state.glossarySuggestions,
+    glossaryDismissed: state.glossaryDismissed,
     para: state.para,
   });
 }
@@ -467,6 +474,88 @@ $("glossaryNewTerm").addEventListener("keydown", (e) => {
 });
 $("glossaryFillDefaults").addEventListener("click", mergeDefaultGlossary);
 $("glossaryToggleText").addEventListener("click", () => $("glossaryTextWrap").classList.toggle("hidden"));
+
+// ── glossary: "Предложения" inbox (auto-suggested terms from processing) ────
+// The backend's "suggest" pipeline stage extracts candidate terms from the final
+// transcript; on each process-complete they land here for the user to accept
+// (→ glossary chips) or dismiss (→ glossaryDismissed, never re-suggested).
+// Pending list is capped at 100 so a long run of processing can't grow it forever.
+const GLOSSARY_SUGGEST_CAP = 100;
+
+function mergeGlossarySuggestions(newTerms) {
+  if (!Array.isArray(newTerms) || !newTerms.length) return;
+  const haveGlossary = new Set(parseGlossaryTerms(state.glossary).map((t) => t.toLowerCase()));
+  const dismissed = new Set((state.glossaryDismissed || []).map((t) => t.toLowerCase()));
+  const pending = state.glossarySuggestions || [];
+  const havePending = new Set(pending.map((t) => t.toLowerCase()));
+  const merged = pending.slice();
+  newTerms.forEach((raw) => {
+    const term = (raw || "").trim();
+    if (!term) return;
+    const low = term.toLowerCase();
+    if (haveGlossary.has(low) || dismissed.has(low) || havePending.has(low)) return;
+    havePending.add(low);
+    merged.push(term);
+  });
+  state.glossarySuggestions = merged.slice(0, GLOSSARY_SUGGEST_CAP);
+  renderGlossarySuggestions();
+  persistPresets();
+}
+
+function renderGlossarySuggestions() {
+  const section = $("glossarySuggestSection");
+  const box = $("glossarySuggestChips");
+  if (!section || !box) return;
+  const terms = state.glossarySuggestions || [];
+  section.classList.toggle("hidden", terms.length === 0);
+  box.innerHTML = terms.map((t) =>
+    `<span class="chip"><span class="chip-text">${escapeHtml(t)}</span>` +
+    `<button type="button" class="chip-accept" aria-label="Принять">✚</button>` +
+    `<button type="button" class="chip-dismiss chip-remove" aria-label="Отклонить">✕</button></span>`
+  ).join("");
+  // Term captured via closure (index into `terms`, same order that produced this
+  // innerHTML) — same rationale as renderGlossaryChips: a quote in the term must
+  // never round-trip through an HTML attribute.
+  box.querySelectorAll(".chip-accept").forEach((btn, i) =>
+    btn.addEventListener("click", () => acceptGlossarySuggestion(terms[i])));
+  box.querySelectorAll(".chip-dismiss").forEach((btn, i) =>
+    btn.addEventListener("click", () => dismissGlossarySuggestion(terms[i])));
+  $("glossarySuggestCount").textContent = terms.length + " предложений";
+  $("glossaryAcceptAll").classList.toggle("hidden", terms.length < 2);
+}
+
+function acceptGlossarySuggestion(term) {
+  state.glossarySuggestions = (state.glossarySuggestions || []).filter((t) => t !== term);
+  const terms = parseGlossaryTerms(state.glossary);
+  if (terms.some((t) => t.toLowerCase() === term.toLowerCase())) {
+    persistPresets(); // already in the glossary somehow — just drop it from pending
+  } else {
+    setGlossaryTerms(terms.concat(term)); // persists + re-renders chips
+  }
+  renderGlossarySuggestions();
+}
+
+function dismissGlossarySuggestion(term) {
+  state.glossarySuggestions = (state.glossarySuggestions || []).filter((t) => t !== term);
+  const dismissed = state.glossaryDismissed || [];
+  if (!dismissed.some((t) => t.toLowerCase() === term.toLowerCase())) {
+    state.glossaryDismissed = dismissed.concat(term);
+  }
+  renderGlossarySuggestions();
+  persistPresets();
+}
+
+function acceptAllGlossarySuggestions() {
+  const terms = parseGlossaryTerms(state.glossary);
+  const have = new Set(terms.map((t) => t.toLowerCase()));
+  const toAdd = (state.glossarySuggestions || []).filter((t) => !have.has(t.toLowerCase()));
+  state.glossarySuggestions = [];
+  if (toAdd.length) setGlossaryTerms(terms.concat(toAdd));
+  else persistPresets();
+  renderGlossarySuggestions();
+}
+
+$("glossaryAcceptAll").addEventListener("click", acceptAllGlossarySuggestions);
 
 function updateTokenWarn() {
   const warn = $("tokenWarn");
@@ -672,7 +761,7 @@ function refreshRunBtn() {
 // ── run processing ───────────────────────────────────────────────────────────
 const STAGE_LABELS = {
   convert: "Аудио", transcribe: "Транскрипция", correct: "Коррекция терминов",
-  diarize: "Спикеры", llm: "Сводка", meta: "Метаданные", save: "Сохранение",
+  diarize: "Спикеры", llm: "Сводка", suggest: "Предложения словаря", meta: "Метаданные", save: "Сохранение",
 };
 const STAGE_KEYS = Object.keys(STAGE_LABELS);
 
@@ -830,6 +919,7 @@ window.api.onProcessEvent((ev) => {
     pushLog(ev.stage, ev.msg);
   } else if (ev.event === "done") {
     showResult(ev);
+    mergeGlossarySuggestions(ev.suggestions);
     runEnded = true;
     finishProcessing();
     refreshHistory();
