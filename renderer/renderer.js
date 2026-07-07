@@ -610,6 +610,10 @@ $("hfToken").addEventListener("change", (e) => {
   persistPresets();
   updateTokenWarn();
 });
+$("hfHelpLink").addEventListener("click", (e) => {
+  e.preventDefault();
+  window.api.openExternal("https://huggingface.co/settings/tokens");
+});
 
 $("authorName").addEventListener("change", (e) => {
   state.authorName = e.target.value || "Автор";

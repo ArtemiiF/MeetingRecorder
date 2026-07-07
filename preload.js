@@ -5,6 +5,7 @@ contextBridge.exposeInMainWorld("api", {
   appReadiness: () => ipcRenderer.invoke("app-readiness"),
   requestMicAccess: () => ipcRenderer.invoke("request-mic-access"),
   openPrivacySettings: (target) => ipcRenderer.invoke("open-privacy-settings", target),
+  openExternal: (url) => ipcRenderer.invoke("open-external", url),
   listDevices: () => ipcRenderer.invoke("list-devices"),
   getPresets: () => ipcRenderer.invoke("get-presets"),
   savePresets: (data) => ipcRenderer.invoke("save-presets", data),

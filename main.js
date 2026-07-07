@@ -412,6 +412,14 @@ ipcMain.handle("open-privacy-settings", async (_e, target) => {
   await shell.openExternal(url);
 });
 
+// Open an external https link (e.g. the HF token page) in the default browser.
+// https-only — never let the renderer hand shell.openExternal an arbitrary scheme.
+ipcMain.handle("open-external", async (_e, url) => {
+  if (typeof url !== "string" || !/^https:\/\//i.test(url)) return;
+  const { shell } = require("electron");
+  await shell.openExternal(url);
+});
+
 ipcMain.handle("list-devices", async () => {
   return new Promise((resolve) => {
     let devices = [];

@@ -27,6 +27,7 @@ async function boot(apiOverrides = {}) {
     appReadiness: async () => ({ backend: true, whisper: true, vad: true, models: true }),
     requestMicAccess: async () => true,
     openPrivacySettings: async () => {},
+    openExternal: async () => {},
     renameSpeakers: async () => ({ ok: true }),
     listDevices: async () => [{ index: 0, name: "MacBook Mic", default: true }],
     getPresets: async () => ({ presets: [{ name: "P", prompt: "x" }], defaultOutDir: "/tmp/out", hfToken: "", language: "ru" }),
@@ -2998,6 +2999,23 @@ test("setup gate: hidden once appReadiness reports backend+models ready (default
   const { window, $ } = await boot();
   await tick(window);
   assert.equal($("setupGate").classList.contains("hidden"), true);
+});
+
+test("HF token help link opens the huggingface tokens page via openExternal", async () => {
+  const { window, $ } = await boot();
+  await tick(window);
+  let opened = null;
+  window.api.openExternal = async (url) => { opened = url; };
+  $("hfHelpLink").click();
+  await tick(window);
+  assert.equal(opened, "https://huggingface.co/settings/tokens");
+});
+
+test("main.js: open-external IPC opens only https urls (rejects other schemes)", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const handler = mainSrc.match(/ipcMain\.handle\("open-external"[\s\S]*?\n\}\);/)[0];
+  assert.match(handler, /\/\^https:\\\/\\\/\/i/, "must guard on an https-only regex before openExternal");
+  assert.match(handler, /shell\.openExternal\(url\)/);
 });
 
 test("setup gate: fails CLOSED — an appReadiness IPC error keeps the wall up, never exposes the app", async () => {
