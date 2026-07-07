@@ -619,6 +619,10 @@ async function init() {
   renderRail();
 }
 
+// Record-card #presetSelect stays index-based (option value = array index) — the
+// full editor (name/prompt/add/delete) lives only in the «Промпты» tab (#promptsList
+// rail + #promptsName/#promptsPrompt), which renderPromptsList() renders as a
+// parallel view over the same state.presets array.
 function renderPresets() {
   const sel = $("presetSelect");
   sel.innerHTML = "";
@@ -628,45 +632,68 @@ function renderPresets() {
     o.textContent = p.name;
     sel.appendChild(o);
   });
+  renderPromptsList();
+}
+function renderPromptsList() {
+  const list = $("promptsList");
+  list.innerHTML = "";
+  if (!state.presets.length) {
+    list.insertAdjacentHTML("beforeend", '<p class="hint">Пока пусто — добавь первый шаблон.</p>');
+    return;
+  }
+  // Built via createElement + textContent (never innerHTML/string interpolation of
+  // p.name) and the click handler closes over `i` from this same forEach — same
+  // discipline as renderRail/chip rendering: no user string ever lands in an HTML
+  // attribute or gets parsed as markup.
+  state.presets.forEach((p, i) => {
+    const btn = document.createElement("button");
+    btn.className = "rail-item" + (i === state.currentPreset ? " active" : "");
+    btn.textContent = p.name;
+    btn.addEventListener("click", () => selectPreset(i));
+    list.appendChild(btn);
+  });
 }
 function selectPreset(i) {
   state.currentPreset = i;
   const p = state.presets[i];
   $("presetSelect").value = i;
-  $("presetName").value = p ? p.name : "";
-  $("prompt").value = p ? p.prompt : "";
+  $("promptsName").value = p ? p.name : "";
+  $("promptsPrompt").value = p ? p.prompt : "";
+  renderPromptsList(); // refresh the rail's active highlight
 }
 $("presetSelect").addEventListener("change", (e) => selectPreset(+e.target.value));
 
 // edits write back to the selected preset + persist (on blur/change, not per keystroke)
-$("presetName").addEventListener("change", () => {
+$("promptsName").addEventListener("change", () => {
   const p = state.presets[state.currentPreset];
   if (!p) return;
-  p.name = $("presetName").value;
+  p.name = $("promptsName").value;
   renderPresets();
   $("presetSelect").value = state.currentPreset;
   persistPresets();
 });
-$("prompt").addEventListener("change", () => {
+$("promptsPrompt").addEventListener("change", () => {
   const p = state.presets[state.currentPreset];
-  if (p) { p.prompt = $("prompt").value; persistPresets(); }
+  if (p) { p.prompt = $("promptsPrompt").value; persistPresets(); }
 });
 
-$("newPreset").addEventListener("click", async () => {
-  state.presets.push({ name: "Новый пресет", prompt: $("prompt").value || "" });
+$("promptsNewBtn").addEventListener("click", async () => {
+  // Stable id (independent of array position) — see main.js's loadPresetsData()
+  // backfill for presets that predate this field.
+  state.presets.push({ id: crypto.randomUUID(), name: "Новый пресет", prompt: $("promptsPrompt").value || "" });
   renderPresets();
   selectPreset(state.presets.length - 1);
   await persistPresets();
-  $("presetName").focus();
-  $("presetName").select();
+  $("promptsName").focus();
+  $("promptsName").select();
 });
-$("delPreset").addEventListener("click", async () => {
+$("promptsDelBtn").addEventListener("click", async () => {
   const i = state.currentPreset;
   if (!state.presets[i]) return;
   state.presets.splice(i, 1);
   renderPresets();
   if (state.presets.length) selectPreset(Math.min(i, state.presets.length - 1));
-  else { state.currentPreset = -1; $("presetName").value = ""; $("prompt").value = ""; }
+  else { state.currentPreset = -1; $("promptsName").value = ""; $("promptsPrompt").value = ""; }
   await persistPresets();
 });
 async function persistPresets() {
@@ -1044,15 +1071,17 @@ function queueActive() {
 }
 
 // Entry point wired to runBtn/retryBtn/freshBtn when mode==='import'. Starts
-// the item at queueIndex (or the first item, on a fresh queue).
-function startQueueRun(fresh) {
+// the item at queueIndex (or the first item, on a fresh queue). override is forwarded
+// to startProcessing unchanged — only reprocessHistory() (via the История picker)
+// ever passes one; runBtn/retryBtn/freshBtn always call this with fresh only.
+function startQueueRun(fresh, override) {
   if (!state.importQueue.length) return;
   if (state.queueIndex < 0 || state.queueIndex >= state.importQueue.length) state.queueIndex = 0;
   const item = state.importQueue[state.queueIndex];
   if (item) item.status = "running";
   queueSingleRetry = false; // whole-queue entry point, not a single-row retry
   renderImportQueue();
-  startProcessing(fresh);
+  startProcessing(fresh, undefined, override);
 }
 
 // Called from onProcessEvent's terminal branches (done / error / non-canceled
@@ -1346,7 +1375,11 @@ function finishProcessing() {
 // item: an explicit entry from state.pendingRecordings (per-row ▶ / "Обработать все")
 // — the ONLY way record-mode audio gets processed (there is no single-slot fallback;
 // import mode leaves item undefined and drives audioFile from currentAudio() as before).
-async function startProcessing(fresh, item) {
+// override: { prompt, template } — set only by the История reprocess picker to force
+// a specific preset regardless of state.currentPreset; every other caller omits it and
+// falls back to the currently selected preset (record-mode and import-mode default
+// flow, unchanged).
+async function startProcessing(fresh, item, override) {
   const audioFile = item ? item.mixed : currentAudio();
   if (!audioFile) return;
   $("progressCard").style.display = "";
@@ -1363,9 +1396,10 @@ async function startProcessing(fresh, item) {
   // recording finishing mid-run could silently reassign it to the wrong id).
   activePendingId = item ? item.id : null;
 
+  const activePreset = state.presets[state.currentPreset] || {};
   const res = await window.api.processAudio({
     audioFile,
-    prompt: $("prompt").value,
+    prompt: override ? override.prompt : (activePreset.prompt || ""),
     diarize: $("diarize").checked,
     outDir: state.outDir,
     engine: "mlx",
@@ -1375,7 +1409,7 @@ async function startProcessing(fresh, item) {
     glossary: state.glossary,
     fastModel: state.fastModel,
     summarize: !$("noSummary").checked,
-    template: (state.presets[state.currentPreset] || {}).name || "",
+    template: override ? override.template : (activePreset.name || ""),
     // auto-«Я»: only meaningful for a record-sourced mic/system pair — import mode
     // never passes an item, so these stay undefined and the backend sees identical
     // argv to today.
@@ -1467,7 +1501,7 @@ window.api.onProcessEvent((ev) => {
 // ── top-level view switching ─────────────────────────────────────────────────
 function switchView(v) {
   document.querySelectorAll(".topbtn").forEach((b) => b.classList.toggle("active", b.dataset.view === v));
-  ["record", "history", "para", "glossary"].forEach((id) => $("view-" + id).classList.toggle("hidden", id !== v));
+  ["record", "history", "para", "glossary", "prompts"].forEach((id) => $("view-" + id).classList.toggle("hidden", id !== v));
   if (v === "history") refreshHistory();
   if (v === "para") renderPara();
 }
@@ -1616,11 +1650,74 @@ async function openHistoryNote(item) {
      <div class="note-body">${renderMarkdown(md)}</div>`;
   $("nvOpen").onclick = () => window.api.reveal(item.note);
   if (item.audio) $("nvAudio").onclick = () => window.api.reveal(item.audio);
-  $("nvReprocess").onclick = () => { if (item.audio) reprocessHistory(item.audio); };
+  $("nvReprocess").onclick = () => { if (item.audio) openReprocessPicker(item); };
 }
 
-function reprocessHistory(audio) {
+// Small inline panel appended to #noteView (not a full modal) letting the user pick
+// which template to reprocess with, instead of silently reusing whatever the record
+// card last held. Built entirely via createElement/textContent/property assignment —
+// no innerHTML of user strings — so a template name can never break out as markup or
+// an HTML attribute (same discipline as the chip/rail renderers).
+function openReprocessPicker(item) {
   if (state.recording || state.processing) return; // don't hijack an active run
+  closeReprocessPicker(); // toggle-safe if one is already open (e.g. re-click)
+
+  const byTemplate = state.presets.find((p) => p.name === item.template);
+  const preselected = byTemplate || state.presets[state.currentPreset];
+
+  const sel = document.createElement("select");
+  sel.id = "reprocessPresetSelect";
+  state.presets.forEach((p) => {
+    const o = document.createElement("option");
+    o.value = p.id;
+    o.textContent = p.name;
+    if (preselected && p.id === preselected.id) o.selected = true;
+    sel.appendChild(o);
+  });
+
+  const label = document.createElement("label");
+  label.textContent = "Шаблон для переобработки";
+  label.appendChild(sel);
+
+  const confirmBtn = document.createElement("button");
+  confirmBtn.id = "reprocessConfirm";
+  confirmBtn.className = "btn small primary";
+  confirmBtn.textContent = "▶ Запустить";
+  confirmBtn.addEventListener("click", () => {
+    const presetId = sel.value;
+    closeReprocessPicker();
+    reprocessHistory(item.audio, presetId);
+  });
+
+  const cancelBtn = document.createElement("button");
+  cancelBtn.id = "reprocessCancel";
+  cancelBtn.className = "btn small ghost";
+  cancelBtn.textContent = "Отмена";
+  cancelBtn.addEventListener("click", () => closeReprocessPicker());
+
+  const row = document.createElement("div");
+  row.className = "run-row";
+  row.appendChild(confirmBtn);
+  row.appendChild(cancelBtn);
+
+  const panel = document.createElement("div");
+  panel.id = "reprocessPicker";
+  panel.className = "reprocess-picker";
+  panel.appendChild(label);
+  panel.appendChild(row);
+  $("noteView").appendChild(panel);
+}
+function closeReprocessPicker() {
+  const el = $("reprocessPicker");
+  if (el) el.remove();
+}
+
+// presetId: the chosen template's stable id (from the reprocess picker) — resolved
+// here to a {prompt, template} override rather than trusting whatever the record
+// card's own state.currentPreset happens to be at call time.
+function reprocessHistory(audio, presetId) {
+  if (state.recording || state.processing) return; // don't hijack an active run
+  const preset = state.presets.find((p) => p.id === presetId);
   switchView("record");
   state.mode = "import";
   document.querySelectorAll(".tab").forEach((x) => x.classList.toggle("active", x.dataset.tab === "import"));
@@ -1628,7 +1725,7 @@ function reprocessHistory(audio) {
   $("pane-import").classList.remove("hidden");
   setImportQueue([audio]); // queue-of-1 — same path as an N-file batch
   $("pickedFile").textContent = audio.split("/").pop();
-  startQueueRun();
+  startQueueRun(false, preset ? { prompt: preset.prompt, template: preset.name } : undefined);
 }
 
 // ── minimal, XSS-safe markdown renderer for the note viewer ───────────────────
