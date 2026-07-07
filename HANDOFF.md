@@ -17,6 +17,11 @@ Preflight-панель: у строки Микрофон — кнопка «Ра
 ### Setup-стена (`95dd80d`)
 Жёсткий гейт: пока НЕ (бэкенд установлен И whisper+vad в кеше) — full-cover overlay `#setupGate` (шаги «Установить бэкенд» → «Скачать модели» с прогрессом, реюз install/download-флоу), нормальный UI перекрыт. Готовность через `app-readiness` IPC: `backendAvailable()` + кеш whisper/vad проверяется **Node fs** (НЕ спавн python — до установки его нет), пути зеркалят backend.py `_model_cached` (coupling: менять оба). Диаризация НЕ в стене (опциональна, gated) — гейчится per-run в process-audio (diarize=true + нет pyannote → отказ). **Fail-closed**: `#setupGate` по умолчанию видим, скрывается только на confirmed-ready; ошибка IPC оставляет стену (не открывает приложение). Триггеры пере-проверки: boot / focus / после install-closed / после download-closed. Скачивание из стены scoped `["whisper","vad"]` (не тянет pyannote даже при токене). Тесты: path-exactness (падает при дрейфе путей), 4-state predicate, show/hide, fail-closed, diarize-гейт.
 
+### Фиксы live-теста (`c39bd83`)
+- **Двойной keychain-промпт** на старте: `loadToken` дёргал `safeStorage` дважды (get-presets + preflight). Фикс: module-кеш токена + `encryptionAvailable()`, `loadToken` short-circuit на `!fs.existsSync(SECRET_FILE)` (fresh без токена → keychain не трогается вообще). Один промпт при смене подписи (ad-hoc rebuild) — неизбежен, для стабильного .app «Always Allow» разово.
+- **Прогресс скачивания моделей**: байт-прогресс % / МБ через `snapshot_download(tqdm_class=_ProgressTqdm)` (реальный `tqdm.auto.tqdm` subclass — HF юзает tqdm_class двуролево, дак-стаб падает на `set_lock`; эмит только для bytes-бара `unit=="B"`, throttle, emit в try/except, `_emit_lock` не путать с tqdm `_lock`). VAD (torch.hub) — грубо (мелкий). UI: %/МБ в стене + «Модели».
+- **Отмена скачивания**: кнопки в стене + настройках → существующий cancel IPC. **Чистка частичной модели авторитетно на стороне родителя** (main.js close-handler после смерти дочернего: `cleanupPartialModelCache(inFlightModelId)` при canceled||code≠0) — гонки нет (worker-тредов уже нет), пути single-sourced из тех же хелперов что readiness → после отмены whisper-папки нет → `_model_cached`=false → стена НЕ снимается ложно. `inFlightModelId` = модель со `stage` без `stage_end` (завершённые не трогаются). Backend SIGTERM-cleanup остаётся best-effort.
+
 ### Ручной smoke упаковки (НЕ проверено автоматом)
 - Выдача TCC mic+системный звук при первом запуске + реальная запись (нужен GUI + клики юзера).
 - Полный флоу «Установить бэкенд» на чистой машине (~1.3ГБ download).
@@ -75,7 +80,7 @@ Preflight-панель: у строки Микрофон — кнопка «Ра
 
 ## Тесты
 
-`npm test` = JS `node --test` (255/255) + PY pytest (222/222). Всё замокано — живой e2e (RAG, коррекция, auto-«Я», скачивание моделей, батч-импорт + row-retry, reset, suggest-стадия, tray, персист-очередь записей + запись-во-время-обработки) не гонялся; первый реальный запуск = smoke.
+`npm test` = JS `node --test` (280/280) + PY pytest (238/238). Всё замокано — живой e2e (RAG, коррекция, auto-«Я», скачивание моделей, батч-импорт + row-retry, reset, suggest-стадия, tray, персист-очередь записей + запись-во-время-обработки) не гонялся; первый реальный запуск = smoke.
 
 ## Решения владельца (действуют)
 
