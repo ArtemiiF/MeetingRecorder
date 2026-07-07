@@ -22,8 +22,13 @@ Preflight-панель: у строки Микрофон — кнопка «Ра
 - **Прогресс скачивания моделей**: байт-прогресс % / МБ через `snapshot_download(tqdm_class=_ProgressTqdm)` (реальный `tqdm.auto.tqdm` subclass — HF юзает tqdm_class двуролево, дак-стаб падает на `set_lock`; эмит только для bytes-бара `unit=="B"`, throttle, emit в try/except, `_emit_lock` не путать с tqdm `_lock`). VAD (torch.hub) — грубо (мелкий). UI: %/МБ в стене + «Модели».
 - **Отмена скачивания**: кнопки в стене + настройках → существующий cancel IPC. **Чистка частичной модели авторитетно на стороне родителя** (main.js close-handler после смерти дочернего: `cleanupPartialModelCache(inFlightModelId)` при canceled||code≠0) — гонки нет (worker-тредов уже нет), пути single-sourced из тех же хелперов что readiness → после отмены whisper-папки нет → `_model_cached`=false → стена НЕ снимается ложно. `inFlightModelId` = модель со `stage` без `stage_end` (завершённые не трогаются). Backend SIGTERM-cleanup остаётся best-effort.
 
+### Фиксы live-теста #2 (2026-07-07)
+- **Keychain-промпт каждый запуск даже без токена** (`5a87f55`): `isEncryptionAvailable()` дёргался на старте в `loadPresetsData` (для `secretEncrypted`). Фикс: gate `token ? encryptionAvailable() : false` на обоих return-путях — без `.secret` `safeStorage` не трогается вообще → ноль промптов. С токеном — один промпт/запуск (ad-hoc не закрепляет «Always Allow», неизбежно). Диагностика: на fresh не было ни `.secret` ни presets, промпт всё равно → значит `isEncryptionAvailable`, не `loadToken`.
+- **Системный звук не писался в упакованном .app** (`dac47d6`, ПОДТВЕРЖДЕНО на рантайме): AudioTee спавнил бинарь по asar-относительному пути (`join(__dirname,"../bin/audiotee")` внутри app.asar), полагаясь на авто-редирект Electron в .unpacked. Диагностика: и dev-, и packaged-бинарь standalone дают реальный PCM (не тишина) → OS/бинарь/TCC ок, баг в интеграции. Фикс: явный `binaryPath` в `new AudioTee({binaryPath})` — packaged `resourcesPath/app.asar.unpacked/node_modules/audiotee/bin/audiotee`, dev `APP_DIR/...` (helper `resolveAudioTeeBin`, mainutil). Опция называется именно `binaryPath` (проверено в audiotee dist/index.js:84). Плюс `[audiotee]` console-логи (binaryPath + error/log events) для будущей диагностики.
+- **Ссылка «Где взять токен?»** (`b710274`): у поля HF-токена подсказка + линк на huggingface.co/settings/tokens. Generic `open-external` IPC (https-only гейт — renderer не может открыть произвольную схему), `openExternal` в preload.
+
 ### Ручной smoke упаковки (НЕ проверено автоматом)
-- Выдача TCC mic+системный звук при первом запуске + реальная запись (нужен GUI + клики юзера).
+- Выдача TCC mic при первом запуске (системный звук — ПОДТВЕРЖДЁН рабочим после binaryPath-фикса на реальном прогоне 2026-07-07).
 - Полный флоу «Установить бэкенд» на чистой машине (~1.3ГБ download).
 - Gatekeeper: non-notarized .app даст «приложение повреждено/неизвестный разработчик» — правый клик → Открыть (снять quarantine), неизбежно без платного Developer ID.
 - Нет иконки — ships с дефолтной Electron (follow-up).
@@ -80,7 +85,7 @@ Preflight-панель: у строки Микрофон — кнопка «Ра
 
 ## Тесты
 
-`npm test` = JS `node --test` (280/280) + PY pytest (238/238). Всё замокано — живой e2e (RAG, коррекция, auto-«Я», скачивание моделей, батч-импорт + row-retry, reset, suggest-стадия, tray, персист-очередь записей + запись-во-время-обработки) не гонялся; первый реальный запуск = smoke.
+`npm test` = JS `node --test` (285/285) + PY pytest (238/238). Всё замокано — живой e2e (RAG, коррекция, auto-«Я», скачивание моделей, батч-импорт + row-retry, reset, suggest-стадия, tray, персист-очередь записей + запись-во-время-обработки) не гонялся; первый реальный запуск = smoke.
 
 ## Решения владельца (действуют)
 
