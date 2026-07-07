@@ -20,6 +20,7 @@ contextBridge.exposeInMainWorld("api", {
   cancelProcess: () => ipcRenderer.invoke("cancel-process"),
   getModels: () => ipcRenderer.invoke("models"),
   downloadModels: (opts) => ipcRenderer.invoke("download-models", opts),
+  redownloadModel: (modelId) => ipcRenderer.invoke("redownload-model", modelId),
   cancelModelDownload: () => ipcRenderer.invoke("cancel-model-download"),
   backendStatus: () => ipcRenderer.invoke("backend-status"),
   installBackend: () => ipcRenderer.invoke("install-backend"),

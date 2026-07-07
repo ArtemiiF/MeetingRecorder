@@ -56,6 +56,7 @@ async function boot(apiOverrides = {}) {
       { id: "diarization", label: "Диаризация (pyannote)", size_mb: 31, needs_token: true, cached: false, locked: true },
     ]),
     downloadModels: async () => ({ ok: true }),
+    redownloadModel: async () => ({ ok: true }),
     cancelModelDownload: async () => ({ ok: true }),
     backendStatus: async () => ({ installed: true, pythonVersion: "3.11.15", stale: false }),
     installBackend: async () => ({ ok: true }),
@@ -435,6 +436,61 @@ test("preflight: ungranted system audio shows «Открыть настройк�
   assert.equal(btn.textContent, "Открыть настройки");
   btn.click(); await tick(window);
   assert.equal(opened, "screen");
+});
+
+// ── system audio: honest three-state readiness (grey when unconfirmed/denied,
+// never the alarming red a real failure would show — AudioTee's screen-capture
+// TCC category has no advance-check API, see main.js's open-privacy-settings) ──
+test("preflight: system audio — granted is green with 'разрешено'", async () => {
+  const { window, $ } = await boot({
+    preflight: async () => ({ lmStudio: true, mic: "granted", screen: "granted", ffmpeg: true, whisperCached: true, hfToken: true, embedModel: true, backendInstalled: true }),
+  });
+  $("settingsOpen").click(); await tick(window);
+  const row = $("preflightList").querySelectorAll(".pf-row")[3];
+  assert.ok(row.querySelector(".pf-dot").classList.contains("ok"));
+  assert.match(row.querySelector(".pf-detail").textContent, /разрешено/);
+});
+
+test("preflight: system audio — not-determined is grey (neutral), never red", async () => {
+  const { window, $ } = await boot({
+    preflight: async () => ({ lmStudio: true, mic: "granted", screen: "not-determined", ffmpeg: true, whisperCached: true, hfToken: true, embedModel: true, backendInstalled: true }),
+  });
+  $("settingsOpen").click(); await tick(window);
+  const row = $("preflightList").querySelectorAll(".pf-row")[3];
+  assert.ok(row.querySelector(".pf-dot").classList.contains("neutral"));
+  assert.ok(!row.querySelector(".pf-dot").classList.contains("bad"), "unconfirmed must never read as the alarming red 'broken' state");
+  assert.match(row.querySelector(".pf-detail").textContent, /проверяется при записи/);
+});
+
+test("preflight: system audio — explicitly denied is STILL grey (not red), and the settings button remains", async () => {
+  const { window, $ } = await boot({
+    preflight: async () => ({ lmStudio: true, mic: "granted", screen: "denied", ffmpeg: true, whisperCached: true, hfToken: true, embedModel: true, backendInstalled: true }),
+    openPrivacySettings: async () => {},
+  });
+  $("settingsOpen").click(); await tick(window);
+  const row = $("preflightList").querySelectorAll(".pf-row")[3];
+  assert.ok(row.querySelector(".pf-dot").classList.contains("neutral"), "denied must read the same calm grey as not-determined — no confirmed-broken state exists");
+  assert.ok(!row.querySelector(".pf-dot").classList.contains("bad"));
+  assert.equal(row.querySelector(".pf-retry").textContent, "Открыть настройки", "the settings deep-link must still be offered");
+});
+
+test("preflight: system audio row carries a tooltip explaining the check-only-at-recording-time behavior", async () => {
+  const { window, $ } = await boot({
+    preflight: async () => ({ lmStudio: true, mic: "granted", screen: "not-determined", ffmpeg: true, whisperCached: true, hfToken: true, embedModel: true, backendInstalled: true }),
+  });
+  $("settingsOpen").click(); await tick(window);
+  const row = $("preflightList").querySelectorAll(".pf-row")[3];
+  assert.match(row.title, /AudioTee/);
+  assert.match(row.title, /записью/);
+});
+
+test("preflight: header verdict is unaffected by system-audio state — a denied/unconfirmed screen row never contradicts 'Всё готово'", async () => {
+  const { window, $ } = await boot({
+    preflight: async () => ({ lmStudio: true, mic: "granted", screen: "denied", ffmpeg: true, whisperCached: true, hfToken: true, embedModel: true, backendInstalled: true }),
+  });
+  $("settingsOpen").click(); await tick(window);
+  assert.match($("preflightVerdict").textContent, /Всё готово/,
+    "backend+LM Studio+ffmpeg+mic all satisfied — a merely-unconfirmed system-audio row must not flip this to 'не готово'");
 });
 
 test("history rail renders items; selecting one renders the note markdown", async () => {
@@ -2002,6 +2058,54 @@ test("Бэкенд: installed but stale (requirements.txt changed since install)
   assert.match(row.querySelector(".pf-detail").textContent, /требования изменились/);
 });
 
+// ── richer "показать КАКОЙ именно бэкенд" detail (ffmpeg version + env path) ──
+test("Бэкенд: installed status shows the ffmpeg version alongside the python version", async () => {
+  const { window, $ } = await boot({
+    backendStatus: async () => ({
+      installed: true, pythonVersion: "3.11.15", stale: false,
+      envPath: "/Users/x/Library/Application Support/MeetingRecorder/backend-env", ffmpegVersion: "8.1",
+    }),
+  });
+  $("settingsOpen").click();
+  await tick(window);
+  assert.match($("backendStatusRow").querySelector(".pf-detail").textContent, /ffmpeg 8\.1/);
+  assert.match($("backendStatusDetail").textContent, /backend-env/, "env path must be shown somewhere in the section");
+});
+
+test("Бэкенд: ffmpegVersion null (binary missing) reads honestly instead of showing a blank/undefined", async () => {
+  const { window, $ } = await boot({
+    backendStatus: async () => ({
+      installed: true, pythonVersion: "3.11.15", stale: false,
+      envPath: "/Users/x/backend-env", ffmpegVersion: null,
+    }),
+  });
+  $("settingsOpen").click();
+  await tick(window);
+  assert.match($("backendStatusRow").querySelector(".pf-detail").textContent, /не найден/);
+});
+
+test("Бэкенд: reinstall button is honestly labeled 'целиком' — the install is monolithic, no per-component reinstall exists", async () => {
+  const { window, $ } = await boot({
+    backendStatus: async () => ({ installed: true, pythonVersion: "3.11.15", stale: false, envPath: "/x", ffmpegVersion: "8.1" }),
+  });
+  $("settingsOpen").click();
+  await tick(window);
+  assert.match($("backendInstallBtn").textContent, /целиком/);
+});
+
+test("Бэкенд: clicking «Проверить» on an already-green, unchanged status still shows a fresh 'проверено HH:MM:SS' — not a no-op", async () => {
+  const { window, $ } = await boot({
+    backendStatus: async () => ({ installed: true, pythonVersion: "3.11.15", stale: false, envPath: "/x", ffmpegVersion: "8.1" }),
+  });
+  $("settingsOpen").click();
+  await tick(window);
+  const before = $("backendStatusDetail").textContent;
+  assert.match(before, /проверено \d{1,2}:\d{2}:\d{2}/);
+  $("backendRefresh").click();
+  await tick(window);
+  assert.match($("backendStatusDetail").textContent, /проверено \d{1,2}:\d{2}:\d{2}/, "must still show a checked-at marker after a repeat check");
+});
+
 test("Бэкенд: install button click calls installBackend and disables refresh/install until install-closed", async () => {
   let called = false;
   const { window, $, handlers } = await boot({
@@ -2123,6 +2227,56 @@ test("main.js: backend-status and uninstall-backend handlers exist", () => {
   assert.match(mainSrc, /ipcMain\.handle\("uninstall-backend"/);
 });
 
+// ── richer backend-status payload (settings "Бэкенд" — "показать КАКОЙ именно
+// бэкенд"): env path + real ffmpeg version, both only once actually installed ──
+test("main.js: backend-status reports envPath/ffmpegVersion only when installed, null otherwise", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const handler = mainSrc.match(/ipcMain\.handle\("backend-status"[\s\S]*?\n\}\);/)[0];
+  assert.match(handler, /if \(!status\.installed\) return \{ \.\.\.status, envPath: null, ffmpegVersion: null \}/);
+  assert.match(handler, /envPath: BACKEND_ENV/);
+  assert.match(handler, /ffmpegVersion: await getFfmpegVersion\(INSTALLED_FFMPEG\)/);
+});
+
+test("main.js: getFfmpegVersion parses stdout via the shared parseFfmpegVersion helper and never throws on a missing binary", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const fn = mainSrc.match(/function getFfmpegVersion\([\s\S]*?\n\}/)[0];
+  assert.match(fn, /parseFfmpegVersion\(out\)/);
+  assert.match(fn, /proc\.on\("error", \(\) => resolve\(null\)\)/);
+});
+
+// ── per-model on-disk size (settings "Модели" — "добавить размер на диске") ──
+test("main.js: models handler augments each item with sizeBytes computed via modelCacheDirsFor/dirSizeBytes, 0 when not cached", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const handler = mainSrc.match(/ipcMain\.handle\("models"[\s\S]*?\n\}\);/)[0];
+  assert.match(handler, /modelCacheDirsFor\(home, item\.id\)/);
+  assert.match(handler, /dirSizeBytes\(dir\)/);
+  assert.match(handler, /sizeBytes: item\.cached\s*\n?\s*\?/, "sizeBytes must be gated on item.cached — 0 (not a wasted fs walk) otherwise");
+});
+
+// ── per-model forced reinstall (settings "Модели" — per-model "↻ Скачать заново") ──
+test("main.js: redownload-model wipes the model's cache via cleanupPartialModelCache BEFORE the batch actually spawns, never on a refused call", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const handler = mainSrc.match(/ipcMain\.handle\("redownload-model"[\s\S]*?\n\}\);/)[0];
+  assert.match(handler, /cleanupPartialModelCache\(os\.homedir\(\), modelId\)/);
+  assert.match(handler, /runModelDownloadBatch\(\[modelId\], /,
+    "the wipe must be passed as runModelDownloadBatch's beforeStart hook, not run unconditionally before the guard checks");
+  // The wipe callback must live INSIDE runModelDownloadBatch's own guarded body
+  // (via beforeStart), not fire directly in this thin handler — otherwise a
+  // busy/low-disk refusal would still wipe a working cache with nothing to
+  // replace it (see runModelDownloadBatch's own beforeStart comment in main.js).
+  assert.ok(!/cleanupPartialModelCache\(os\.homedir\(\), modelId\);\s*\n\s*return runModelDownloadBatch/.test(handler),
+    "cleanup must not run unconditionally before the guarded batch call");
+});
+
+test("main.js: runModelDownloadBatch's beforeStart hook fires only after every busy guard and the disk check have passed", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const fn = mainSrc.match(/async function runModelDownloadBatch\([\s\S]*?\n\}/)[0];
+  const guardIdx = fn.lastIndexOf('if (diskVerdict.action === "refuse")');
+  const beforeStartIdx = fn.indexOf("if (beforeStart) beforeStart();");
+  assert.ok(guardIdx >= 0 && beforeStartIdx > guardIdx,
+    "beforeStart() must run after the disk-refuse check, not before it");
+});
+
 test("main.js: process-audio refuses when no backend interpreter is available, and while an install is in flight", () => {
   const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
   const processAudio = mainSrc.match(/ipcMain\.handle\("process-audio"[\s\S]*?\n\}\);/)[0];
@@ -2153,7 +2307,7 @@ test("main.js: app-readiness IPC exists and derives its verdict from appReadines
 test("main.js: start-recording and download-models also refuse while a backend install is in flight (both spawn pythonBin())", () => {
   const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
   const startRecording = mainSrc.match(/ipcMain\.handle\("start-recording"[\s\S]*?\n  const micDevice/)[0];
-  const downloadModels = mainSrc.match(/ipcMain\.handle\("download-models"[\s\S]*?\n\}\);/)[0];
+  const downloadModels = mainSrc.match(/async function runModelDownloadBatch\([\s\S]*?\n\}/)[0];
   assert.match(startRecording, /if \(installBackendProc\) return/);
   assert.match(downloadModels, /if \(installBackendProc\) return/);
 });
@@ -2345,13 +2499,53 @@ test("Модели: renders one pf-row per model with cached/needed/locked statu
   assert.match(diar.querySelector(".pf-detail").textContent, /нужен HF-токен/);
 });
 
-test("Модели: per-row retry button only renders for needed (not cached, not locked) rows", async () => {
+test("Модели: per-row action button — «⬇» for needed, «↻» scoped reinstall for cached, none for locked", async () => {
   const { window, $ } = await boot();
   $("settingsOpen").click();
   await tick(window);
-  assert.equal($("model-row-whisper").querySelector(".pf-retry"), null, "cached row must not offer retry");
-  assert.equal($("model-row-diarization").querySelector(".pf-retry"), null, "locked row must not offer retry");
-  assert.ok($("model-row-vad").querySelector(".pf-retry"), "needed row must offer a retry button");
+  assert.equal($("model-row-diarization").querySelector(".pf-retry"), null, "locked row must not offer any action button");
+  assert.equal($("model-row-whisper").querySelector(".pf-retry").textContent, "↻",
+    "cached row offers a scoped reinstall, not the missing-model download button");
+  assert.equal($("model-row-vad").querySelector(".pf-retry").textContent, "⬇", "needed row keeps the download button");
+});
+
+test("Модели: cached row's «↻» calls redownloadModel(modelId), not downloadModels", async () => {
+  let redownloadCalled = null;
+  let downloadCalled = null;
+  const { window, $ } = await boot({
+    redownloadModel: async (modelId) => { redownloadCalled = modelId; return { ok: true }; },
+    downloadModels: async (opts) => { downloadCalled = opts; return { ok: true }; },
+  });
+  $("settingsOpen").click();
+  await tick(window);
+  $("model-row-whisper").querySelector(".pf-retry").click();
+  await tick(window);
+  assert.equal(redownloadCalled, "whisper");
+  assert.equal(downloadCalled, null, "a cached-row reinstall must not go through the ordinary downloadModels path");
+});
+
+test("Модели: cached row's size on disk renders when the main process reports sizeBytes", async () => {
+  const { window, $ } = await boot({
+    getModels: async () => ([
+      { id: "whisper", label: "MLX Whisper (large-v3-turbo)", size_mb: 1500, needs_token: false, cached: true, locked: false, sizeBytes: 1610612736 },
+      { id: "vad", label: "Silero VAD", size_mb: 35, needs_token: false, cached: true, locked: false, sizeBytes: 36700160 },
+    ]),
+  });
+  $("settingsOpen").click();
+  await tick(window);
+  assert.match($("model-row-whisper").querySelector(".pf-detail").textContent, /1\.5 ГБ/);
+  assert.match($("model-row-vad").querySelector(".pf-detail").textContent, /35 МБ/);
+});
+
+test("Модели: cached row with no sizeBytes (e.g. an older main.js) still renders 'скачано' without a bogus size", async () => {
+  const { window, $ } = await boot({
+    getModels: async () => ([
+      { id: "whisper", label: "MLX Whisper (large-v3-turbo)", size_mb: 1500, needs_token: false, cached: true, locked: false },
+    ]),
+  });
+  $("settingsOpen").click();
+  await tick(window);
+  assert.equal($("model-row-whisper").querySelector(".pf-detail").textContent, "скачано");
 });
 
 test("Модели: 'Скачать недостающие' click calls downloadModels and disables buttons until download-closed", async () => {
@@ -2578,7 +2772,7 @@ test("main.js: cancel-model-download's comment no longer claims a re-click resum
 // cleanupPartialModelCache tests for the actual fs-level behavior) ──────────
 test("main.js: download-models tracks the in-flight model via stage/stage_end before forwarding each event", () => {
   const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
-  const handler = mainSrc.match(/ipcMain\.handle\("download-models"[\s\S]*?\n\}\);/)[0];
+  const handler = mainSrc.match(/async function runModelDownloadBatch\([\s\S]*?\n\}/)[0];
   assert.match(handler, /let inFlightModelId = null/);
   assert.match(handler, /if \(ev\.event === "stage"\) inFlightModelId = /);
   assert.match(handler, /else if \(ev\.event === "stage_end"\) inFlightModelId = null/);
@@ -2586,7 +2780,7 @@ test("main.js: download-models tracks the in-flight model via stage/stage_end be
 
 test("main.js: download-models' close handler cleans up ONLY when canceled or non-zero exit, and ONLY the in-flight model", () => {
   const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
-  const handler = mainSrc.match(/ipcMain\.handle\("download-models"[\s\S]*?\n\}\);/)[0];
+  const handler = mainSrc.match(/async function runModelDownloadBatch\([\s\S]*?\n\}/)[0];
   assert.match(handler, /if \(\(canceled \|\| code !== 0\) && inFlightModelId\) cleanupPartialModelCache\(os\.homedir\(\), inFlightModelId\)/);
   // must run BEFORE the child's stdout/stderr are discarded (send() + modelDlProc = null),
   // i.e. still inside the same close callback, after the child has already exited.
@@ -2603,7 +2797,7 @@ test("main.js: cleanupPartialModelCache is imported from lib/mainutil (single-so
 
 test("main.js: download-models and process-audio refuse to run while the other is active", () => {
   const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
-  const downloadModels = mainSrc.match(/ipcMain\.handle\("download-models"[\s\S]*?\n\}\);/)[0];
+  const downloadModels = mainSrc.match(/async function runModelDownloadBatch\([\s\S]*?\n\}/)[0];
   const processAudio = mainSrc.match(/ipcMain\.handle\("process-audio"[\s\S]*?\n\}\);/)[0];
   assert.match(downloadModels, /if \(procProc\)/);
   assert.match(processAudio, /if \(modelDlProc\)/);
@@ -2611,7 +2805,7 @@ test("main.js: download-models and process-audio refuse to run while the other i
 
 test("main.js: download-models also refuses while a recording is active (recordProc or tee) — CPU/network contention with live capture", () => {
   const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
-  const downloadModels = mainSrc.match(/ipcMain\.handle\("download-models"[\s\S]*?\n\}\);/)[0];
+  const downloadModels = mainSrc.match(/async function runModelDownloadBatch\([\s\S]*?\n\}/)[0];
   assert.match(downloadModels, /if \(recordProc \|\| tee\)/,
     "download-models must refuse while recordProc/tee are set, same as reset-app's busy guard");
 });
@@ -3625,7 +3819,7 @@ test("main.js: process-audio writes glossaryUsage to a temp JSON file and passes
 
 test("main.js: download-models refuses while an update is in flight (updateProc)", () => {
   const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
-  const downloadModels = mainSrc.match(/ipcMain\.handle\("download-models"[\s\S]*?\n\}\);/)[0];
+  const downloadModels = mainSrc.match(/async function runModelDownloadBatch\([\s\S]*?\n\}/)[0];
   assert.match(downloadModels, /if \(updateProc\) return/);
 });
 

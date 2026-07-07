@@ -10,8 +10,9 @@ const {
   rewriteNoteSpeakers, isOutsideRoot, indexRunReducer, diskGuardVerdict,
   resolveOutDirOnVaultChange, trayMenuTemplate,
   resolvePythonBin, resolveFfmpegBin, resolveResourcePath, resolveAudioTeeBin, resolveAssetPath, backendInstallStatus,
+  parseFfmpegVersion,
   hfCacheDir, whisperModelDir, vadJitPath, diarizationModelDirs, appReadinessStatus,
-  modelCacheDirsFor, cleanupPartialModelCache,
+  modelCacheDirsFor, cleanupPartialModelCache, dirSizeBytes,
   compareVersions, pickUpdateAsset,
 } = require("../lib/mainutil");
 
@@ -569,6 +570,59 @@ test("cleanupPartialModelCache: an unknown model id touches nothing and does not
   const home = tmpHomedir("unknown-model");
   assert.doesNotThrow(() => cleanupPartialModelCache(home, "not-a-model"));
   fs.rmSync(home, { recursive: true, force: true });
+});
+
+// ── dirSizeBytes (settings "Модели" section — per-model on-disk footprint) ─────
+test("dirSizeBytes: sums plain files across nested subdirectories", () => {
+  const home = tmpHomedir("dirsize-plain");
+  fs.mkdirSync(path.join(home, "a", "b"), { recursive: true });
+  fs.writeFileSync(path.join(home, "top.bin"), Buffer.alloc(100));
+  fs.writeFileSync(path.join(home, "a", "mid.bin"), Buffer.alloc(50));
+  fs.writeFileSync(path.join(home, "a", "b", "deep.bin"), Buffer.alloc(25));
+  assert.equal(dirSizeBytes(home), 175);
+  fs.rmSync(home, { recursive: true, force: true });
+});
+
+test("dirSizeBytes: missing directory resolves to 0, not a throw", () => {
+  assert.equal(dirSizeBytes(path.join(os.tmpdir(), "mainutil-dirsize-does-not-exist")), 0);
+});
+
+test("dirSizeBytes: empty directory is 0", () => {
+  const home = tmpHomedir("dirsize-empty");
+  assert.equal(dirSizeBytes(home), 0);
+  fs.rmSync(home, { recursive: true, force: true });
+});
+
+test("dirSizeBytes: symlinked files are skipped, not double-counted — mirrors the HF cache's blobs/+snapshots/ layout", () => {
+  // models--org--name/blobs/<hash> holds the real bytes; snapshots/<rev>/<file> is a
+  // symlink into blobs/. Following the symlink too would double the reported size.
+  const home = tmpHomedir("dirsize-symlink");
+  const blobsDir = path.join(home, "blobs");
+  const snapshotDir = path.join(home, "snapshots", "rev1");
+  fs.mkdirSync(blobsDir, { recursive: true });
+  fs.mkdirSync(snapshotDir, { recursive: true });
+  const blobFile = path.join(blobsDir, "abc123");
+  fs.writeFileSync(blobFile, Buffer.alloc(200));
+  fs.symlinkSync(blobFile, path.join(snapshotDir, "model.bin"));
+  assert.equal(dirSizeBytes(home), 200, "real bytes counted once via blobs/, the snapshot symlink adds nothing");
+  fs.rmSync(home, { recursive: true, force: true });
+});
+
+// ── parseFfmpegVersion (settings "Бэкенд" section — "показать КАКОЙ именно бэкенд") ──
+test("parseFfmpegVersion: extracts the version token from a standard release banner", () => {
+  const banner = "ffmpeg version 8.1 Copyright (c) 2000-2025 the FFmpeg developers\nbuilt with Apple clang...";
+  assert.equal(parseFfmpegVersion(banner), "8.1");
+});
+
+test("parseFfmpegVersion: extracts a git-describe build string", () => {
+  const banner = "ffmpeg version n6.0-2-g1234567 Copyright (c) 2000-2023 the FFmpeg developers";
+  assert.equal(parseFfmpegVersion(banner), "n6.0-2-g1234567");
+});
+
+test("parseFfmpegVersion: unrecognized output resolves null rather than guessing", () => {
+  assert.equal(parseFfmpegVersion("command not found"), null);
+  assert.equal(parseFfmpegVersion(""), null);
+  assert.equal(parseFfmpegVersion(null), null);
 });
 
 // ── in-app updater: version comparator (settings "Обновления" section) ──────
