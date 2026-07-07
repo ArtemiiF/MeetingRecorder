@@ -2011,6 +2011,29 @@ test("main.js: preflight and get-presets read the token/encryption-availability 
   assert.ok(!/safeStorage\./.test(loadPresetsData), "loadPresetsData must not call safeStorage directly");
 });
 
+// ── keychain prompt on EVERY launch even with no HF token ever set (regression:
+// encryptionAvailable() used to be called unconditionally from loadPresetsData(),
+// so isEncryptionAvailable() — a keychain touch — fired on a fresh install with no
+// .secret file at all, on every single launch) ─────────────────────────────────
+test("main.js: loadPresetsData() gates every encryptionAvailable() call on token truthiness — no bare/unconditional call survives on either return path", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const loadPresetsData = mainSrc.match(/function loadPresetsData\(\)[\s\S]*?\n\}/)[0];
+
+  // Every mention of encryptionAvailable() in the function must be the token-gated
+  // ternary form — a bare `encryptionAvailable()` (unconditional call) would mean a
+  // no-token launch still touches safeStorage.isEncryptionAvailable().
+  const allCalls = loadPresetsData.match(/[\w.]*encryptionAvailable\(\)/g) || [];
+  const gatedCalls = loadPresetsData.match(/token \? encryptionAvailable\(\) : false/g) || [];
+  assert.ok(allCalls.length >= 2, "expected encryptionAvailable() on both the fallback and normal-load return paths");
+  assert.equal(allCalls.length, gatedCalls.length,
+    `found ${allCalls.length} encryptionAvailable() mention(s) but only ${gatedCalls.length} are token-gated — a bare call would keychain-prompt on every launch even with no token`);
+
+  // The missing-presets-file fallback path resolves `token` via loadToken() before
+  // returning, so the ternary above actually has a `token` binding to gate on.
+  const fallbackBranch = loadPresetsData.match(/catch \{\s*const token = loadToken\(\);\s*\n[\s\S]*?\n\s*\}\s*\n\s*\}/);
+  assert.ok(fallbackBranch, "expected `const token = loadToken()` bound before the fallback's gated return");
+});
+
 // ── settings "Модели" section (model inventory + pre-download) ─────────────
 test("Модели: renders one pf-row per model with cached/needed/locked status + detail text", async () => {
   const { window, $ } = await boot();

@@ -492,7 +492,11 @@ function loadPresetsData() {
     try {
       data = JSON.parse(fs.readFileSync(PRESETS_EXAMPLE, "utf-8"));
     } catch {
-      return { presets: [], defaultOutDir: DEFAULT_OUT, hfToken: loadToken(), secretEncrypted: encryptionAvailable() };
+      const token = loadToken();
+      // No token → secretEncrypted is moot (renderer's warning only reads it when
+      // hfToken is truthy) → skip the encryption-availability lookup so a fresh/no-token
+      // launch never touches the keychain.
+      return { presets: [], defaultOutDir: DEFAULT_OUT, hfToken: token, secretEncrypted: token ? encryptionAvailable() : false };
     }
   }
   data.defaultOutDir = expandHome(data.defaultOutDir);
@@ -506,7 +510,10 @@ function loadPresetsData() {
   }
   delete data.hfToken;
   data.hfToken = token;
-  data.secretEncrypted = encryptionAvailable(); // false → token stored reversibly
+  // No token on disk → nothing to report on, and resolving encryption availability here
+  // unconditionally would touch the keychain on every launch even when the user never
+  // set an HF token at all. Only resolve it once there's an actual secret to describe.
+  data.secretEncrypted = token ? encryptionAvailable() : false; // false → token stored reversibly (or absent)
   return data;
 }
 
