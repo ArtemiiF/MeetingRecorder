@@ -1068,6 +1068,33 @@ def test_generate_title_falls_back_to_reasoning(monkeypatch, pipe):
     assert pipe.generate_title("t") == "Синк по релизу"
 
 
+# ── generate_title / language pinning ───────────────────────────────────────
+# The note's title must match the pipeline's transcription language, not whatever
+# language the LLM happens to answer in by default (owner report: Russian titles
+# on English-language meetings).
+def test_generate_title_pins_russian_for_ru_pipeline(monkeypatch):
+    pipe = backend.Pipeline(out_dir="/tmp/mr-test-out", diarize=False, language="ru")
+    calls = install_fake_requests(monkeypatch, payload={"choices": [{"message": {"content": "Синк"}}]})
+    pipe.generate_title("t")
+    assert "на русском языке" in calls["json"]["messages"][0]["content"]
+
+
+def test_generate_title_pins_english_for_en_pipeline(monkeypatch):
+    pipe = backend.Pipeline(out_dir="/tmp/mr-test-out", diarize=False, language="en")
+    calls = install_fake_requests(monkeypatch, payload={"choices": [{"message": {"content": "Sync"}}]})
+    pipe.generate_title("t")
+    assert "Answer in English" in calls["json"]["messages"][0]["content"]
+
+
+def test_generate_title_no_language_pin_for_auto_pipeline(monkeypatch):
+    pipe = backend.Pipeline(out_dir="/tmp/mr-test-out", diarize=False, language="auto")
+    calls = install_fake_requests(monkeypatch, payload={"choices": [{"message": {"content": "Title"}}]})
+    pipe.generate_title("t")
+    system_content = calls["json"]["messages"][0]["content"]
+    assert "на русском языке" not in system_content
+    assert "Answer in English" not in system_content
+
+
 # ── generate_title / fast-model override (mechanical LLM call) ─────────────
 def test_generate_title_includes_model_field_when_fast_model_set(monkeypatch):
     pipe = backend.Pipeline(out_dir="/tmp/mr-test-out", diarize=False, fast_model="google/gemma-3-4b")
