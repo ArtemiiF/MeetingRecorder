@@ -1,6 +1,21 @@
-# HANDOFF — состояние на 2026-07-06 (вечер)
+# HANDOFF — состояние на 2026-07-07
 
 Electron-приложение записи встреч: mic+system (AudioTee) / импорт → `backend.py` (JSON-stdout): mono/VAD → MLX Whisper → коррекция терминов → pyannote → LLM-сводка (LM Studio `:1234`) → `.md` в Obsidian. Архитектура и хранение — см. README.md. Четыре вида: 🎙 Запись · 📚 История · 🗂 PARA · 📖 Словарь.
+
+## Упаковка в .app + установка бэкенда по кнопке (2026-07-07)
+
+Решение владельца: **тонкая .app**, тяжёлый Python-бэкенд НЕ бандлится, а ставится по кнопке в `userData` на машине юзера. Цель — самодостаточный arm64 .app на другой Mac; подпись ad-hoc (без Apple Developer).
+
+- **requirements.txt** (`b5682da`): pip freeze venv, 107 пакетов, py3.11.15. `openai-whisper` свапнут git→PyPI `==20250625` (убрал требование git при установке). pytest оставлен (dev-only, тримить потом).
+- **Кнопка «Установить бэкенд»** (`b5682da`, секция «Бэкенд» в настройках, sibling «Модели»): качает python-build-standalone (arm64 CPython 3.11.15, sha256-пин) + статичный arm64 ffmpeg (sha256-пин) → `pip install --find-links vendor/wheels -r requirements.txt` со стримом прогресса. **Атомарно**: весь стек ставится в `BACKEND_ENV_STAGING`, `fs.rename` на `BACKEND_ENV` только после pip+маркера — partial/cancel никогда не виден как installed (это был blocker критика). `backendAvailable()`/`pythonBin()`/preflight/status все **marker-gated** (единый источник правды, не existence). IPC install/cancel/status/uninstall, busy-guard vs запись/обработка/скачивание. Полная чистая установка проверена живьём (симуляция чистого Mac, brew срезан, exit 0, всё импортится).
+- **PyAudio** (`b5682da`, `vendor/wheels/pyaudio-0.2.14-cp311-cp311-macosx_11_0_arm64.whl`): у PyAudio нет macOS-wheel на PyPI (только Windows+sdist, компилится против системного portaudio). Решение: собран delocate-wheel с вшитым `libportaudio.2.dylib` (`@loader_path/.dylibs/`, ноль homebrew-ссылок), ретаргечен на big_sur bottle → тег `macosx_11_0` (работает на macOS 11+). Ставится из локального wheel — ни компилятора, ни brew на машине юзера.
+- **electron-builder** (`ee85c03`, `26.15.3` пин): mac dmg+zip arm64, ad-hoc `identity:"-"` + `hardenedRuntime`. `build/entitlements.mac.plist` (`device.audio-input` + `disable-library-validation`) на `mac.entitlements` И `entitlementsInherit`; Info.plist `NSMicrophoneUsageDescription`+`NSAudioCaptureUsageDescription` через extendInfo. `extraResources`: backend.py+requirements.txt+vendor/wheels; `asarUnpack` audiotee bin. **Баг #9529** (ad-hoc ломает mic на v26.0.13+) решён через правильные entitlements (hardened runtime требует audio-input на main+helpers), НЕ через afterSign-хак/пин старой версии. Два packaged-бага пойманы прогоном бинаря: `WRITABLE_DIR` (presets/db/recordings/.secret уезжали в read-only asar — теперь userData при packaged, APP_DIR в dev) + spawn `cwd` (asar-virtual APP_DIR → `ENOTDIR`, чинено на `dirname(BACKEND)`). Билд: `npx electron-builder --mac --arm64`; `dist/` в .gitignore.
+
+### Ручной smoke упаковки (НЕ проверено автоматом)
+- Выдача TCC mic+системный звук при первом запуске + реальная запись (нужен GUI + клики юзера).
+- Полный флоу «Установить бэкенд» на чистой машине (~1.3ГБ download).
+- Gatekeeper: non-notarized .app даст «приложение повреждено/неизвестный разработчик» — правый клик → Открыть (снять quarantine), неизбежно без платного Developer ID.
+- Нет иконки — ships с дефолтной Electron (follow-up).
 
 ## Фича: персист-очередь записей (`68aac2d`, ветка feat-pending-recordings)
 
@@ -54,7 +69,7 @@ Electron-приложение записи встреч: mic+system (AudioTee) /
 
 ## Тесты
 
-`npm test` = JS `node --test` (189/189) + PY pytest (222/222). Всё замокано — живой e2e (RAG, коррекция, auto-«Я», скачивание моделей, батч-импорт + row-retry, reset, suggest-стадия, tray, персист-очередь записей + запись-во-время-обработки) не гонялся; первый реальный запуск = smoke.
+`npm test` = JS `node --test` (228/228) + PY pytest (222/222). Всё замокано — живой e2e (RAG, коррекция, auto-«Я», скачивание моделей, батч-импорт + row-retry, reset, suggest-стадия, tray, персист-очередь записей + запись-во-время-обработки) не гонялся; первый реальный запуск = smoke.
 
 ## Решения владельца (действуют)
 
@@ -68,7 +83,7 @@ Electron-приложение записи встреч: mic+system (AudioTee) /
 
 ## Git / процесс
 
-- Remote `ArtemiiF/MeetingRecorder` (private, solo). `main` = origin/main = docs-коммит поверх `68aac2d` (фича pending-recordings). Фича-ветки спрюнены.
+- Remote `ArtemiiF/MeetingRecorder` (private, solo). `main` = origin/main = docs-коммит поверх `ee85c03` (упаковка .app). Фича-ветки спрюнены.
 - Push в main разрешён владельцем **только через критик-гейт**: критик по `git diff origin/main...HEAD` → marker `printf 'verdict: approve\ndiff-sha256: %s\n'` где sha = `printf '%s' "$(git diff origin/main...HEAD)" | sha256sum` (именно `printf '%s'` — прямой pipe оставляет \n → mismatch) → push отдельной командой. Marker одноразовый, TTL 300 c. Marker и push НЕ объединять в одну команду (hook проверяет до выполнения).
 - Agent-report'ы (`.claude/agent-reports/`) — untracked, в коммиты не включать.
 - Фиксы предсуществующих поломок — отдельным чанком от фичи.

@@ -1,5 +1,11 @@
 # TODO
 
+## Не-блокеры критик-гейтов (2026-07-07, упаковка .app)
+- Install atomic-rename: краш/kill между `rename(BACKEND_ENV→BACKEND_ENV.old)` и `rename(staging→BACKEND_ENV)` стрендит рабочий env в `.old`, новый в staging — ни один не на `BACKEND_ENV` (резолвится SAFE: absent→venv, но юзер теряет установку). `.old` чистится только на старте след. установки, НЕ на launch и НЕ в `uninstall-backend` → ~1.3ГБ может залипнуть. Чистить `.old` в uninstall + на launch.
+- pip-стадия НЕ hash-pinned (`--find-links … -r requirements.txt` без `--require-hashes`; requirements без хешей) — стандартный pip-over-TLS trust; python-build-standalone+ffmpeg ЗAheshированы. `--require-hashes` для 107 транзитивных деп — непропорционально, оставлено сознательно.
+- Нет иконки .app — дефолтная Electron (сделать assets/icon.icns + `mac.icon`).
+- pyaudio wheel привязан к arm64/py3.11 — при апгрейде Python или pyaudio пересобирать delocate-wheel (build-time: brew portaudio + delocate).
+
 ## Не-блокеры критик-гейтов (2026-07-06, фича pending-recordings)
 - Синхронный reject-путь `processAudio` (`{ok:false}` «Обработка уже идёт» при renderer `state.processing=false` — desync main↔renderer) зовёт `finishProcessing`, но НЕ `finishPendingItem` → строка застревает `status:running` (ни reprocess, ни delete). Low-reach (гейты `state.recording||state.processing` закрывают почти все окна), предсуществующая форма. Обернуть reject в `finishPendingItem` при случае.
 
