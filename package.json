@@ -47,7 +47,8 @@
       }
     ],
     "asarUnpack": [
-      "node_modules/audiotee/bin/**"
+      "node_modules/audiotee/bin/**",
+      "assets/trayTemplate*.png"
     ],
     "mac": {
       "target": [

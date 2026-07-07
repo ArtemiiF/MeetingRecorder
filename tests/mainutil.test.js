@@ -9,7 +9,7 @@ const {
   pairHistory, encodeTokenBlob, decodeTokenBlob, isStale,
   rewriteNoteSpeakers, isOutsideRoot, indexRunReducer, diskGuardVerdict,
   resolveOutDirOnVaultChange, trayMenuTemplate,
-  resolvePythonBin, resolveFfmpegBin, resolveResourcePath, resolveAudioTeeBin, backendInstallStatus,
+  resolvePythonBin, resolveFfmpegBin, resolveResourcePath, resolveAudioTeeBin, resolveAssetPath, backendInstallStatus,
   hfCacheDir, whisperModelDir, vadJitPath, diarizationModelDirs, appReadinessStatus,
   modelCacheDirsFor, cleanupPartialModelCache,
 } = require("../lib/mainutil");
@@ -396,6 +396,19 @@ test("resolveAudioTeeBin: dev checkout resolves directly under appDir/node_modul
   assert.equal(
     resolveAudioTeeBin(false, "/Contents/Resources", "/dev/app"),
     path.join("/dev/app", "node_modules", "audiotee", "bin", "audiotee")
+  );
+});
+
+test("resolveAssetPath: packaged app resolves under resourcesPath/app.asar.unpacked/assets (not plain resourcesPath)", () => {
+  assert.equal(
+    resolveAssetPath(true, "/Contents/Resources", "/dev/app", "trayTemplate.png"),
+    path.join("/Contents/Resources", "app.asar.unpacked", "assets", "trayTemplate.png")
+  );
+});
+test("resolveAssetPath: dev checkout resolves directly under appDir/assets", () => {
+  assert.equal(
+    resolveAssetPath(false, "/Contents/Resources", "/dev/app", "trayTemplate.png"),
+    path.join("/dev/app", "assets", "trayTemplate.png")
   );
 });
 

@@ -14,7 +14,7 @@ const {
   encodeTokenBlob, decodeTokenBlob, isStale,
   rewriteNoteSpeakers, isOutsideRoot, indexRunReducer, diskGuardVerdict,
   resolveOutDirOnVaultChange, trayMenuTemplate,
-  resolvePythonBin, resolveFfmpegBin, resolveResourcePath, resolveAudioTeeBin, backendInstallStatus,
+  resolvePythonBin, resolveFfmpegBin, resolveResourcePath, resolveAudioTeeBin, resolveAssetPath, backendInstallStatus,
   whisperModelDir, vadJitPath, diarizationModelDirs, appReadinessStatus,
   cleanupPartialModelCache,
 } = require("./lib/mainutil");
@@ -272,7 +272,9 @@ function pruneTemp(maxAgeMs) {
 // up automatically by nativeImage's retina-representation lookup — no explicit
 // setTemplateImage/resize call needed).
 function createTray() {
-  const icon = nativeImage.createFromPath(path.join(APP_DIR, "assets", "trayTemplate.png"));
+  const iconPath = resolveAssetPath(app.isPackaged, process.resourcesPath, APP_DIR, "trayTemplate.png");
+  const icon = nativeImage.createFromPath(iconPath);
+  if (icon.isEmpty()) console.error("[tray] icon failed to load:", iconPath);
   tray = new Tray(icon);
   tray.setToolTip("Meeting Recorder");
   refreshTray();
