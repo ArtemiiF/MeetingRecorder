@@ -521,6 +521,15 @@ function loadPresetsData() {
   }
   data.defaultOutDir = expandHome(data.defaultOutDir);
   if (data.para && data.para.root) data.para.root = expandHome(data.para.root);
+  // Stable per-preset ids (prompts-tab / reprocess-picker feature): presets created
+  // before this migration have no `id` — backfill once here so every preset can be
+  // addressed by a stable id (not array index, which shifts on delete/reorder) from
+  // now on. Persist immediately so the backfill runs at most once per preset.
+  if (Array.isArray(data.presets) && data.presets.some((p) => p && !p.id)) {
+    data.presets = data.presets.map((p) => (p && !p.id ? { ...p, id: crypto.randomUUID() } : p));
+    const { hfToken, ...rest } = data;             // never persist the token in presets.json
+    try { writeJsonAtomic(PRESETS_FILE, rest); } catch {}
+  }
   let token = loadToken();
   if (!token && data.hfToken) {        // migrate legacy plaintext token out of presets.json
     token = data.hfToken;

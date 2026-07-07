@@ -18,6 +18,7 @@
     <button class="topbtn" data-view="history">📚 История</button>
     <button class="topbtn" data-view="para">🗂 PARA</button>
     <button class="topbtn" data-view="glossary">📖 Словарь</button>
+    <button class="topbtn" data-view="prompts">📝 Промпты</button>
   </nav>
 
   <main>
@@ -54,14 +55,10 @@
     <!-- PROMPT -->
     <section class="card">
       <h2>2 · Промпт для сводки</h2>
-      <div class="preset-row">
+      <label>Шаблон сводки
         <select id="presetSelect"></select>
-        <button id="newPreset" class="btn small">＋ Новый</button>
-        <button id="delPreset" class="btn small ghost">🗑</button>
-      </div>
-      <input type="text" id="presetName" placeholder="Название пресета" />
-      <textarea id="prompt" rows="7" spellcheck="false"></textarea>
-      <p class="hint">Изменения названия и текста сохраняются в выбранный пресет автоматически.</p>
+      </label>
+      <p class="hint">Редактировать шаблоны — во вкладке «📝 Промпты».</p>
       <div class="opts-row">
         <label>Язык
           <select id="language">
@@ -258,6 +255,29 @@
           </label>
         </div>
       </section>
+    </div>
+
+    <!-- PROMPTS VIEW -->
+    <div id="view-prompts" class="hidden">
+      <div class="history-layout">
+        <aside class="history-rail">
+          <div class="rail-head">
+            <span>Шаблоны</span>
+            <div class="rail-head-btns">
+              <button id="promptsNewBtn" class="btn small">＋ Новый</button>
+            </div>
+          </div>
+          <div id="promptsList"></div>
+        </aside>
+        <section class="note-view">
+          <input type="text" id="promptsName" placeholder="Название шаблона" />
+          <textarea id="promptsPrompt" rows="16" spellcheck="false"></textarea>
+          <p class="hint">Изменения названия и текста сохраняются в выбранный шаблон автоматически.</p>
+          <div class="run-row">
+            <button id="promptsDelBtn" class="btn small ghost">🗑 Удалить шаблон</button>
+          </div>
+        </section>
+      </div>
     </div>
   </main>
 
