@@ -14,7 +14,7 @@ const {
   encodeTokenBlob, decodeTokenBlob, isStale,
   rewriteNoteSpeakers, isOutsideRoot, indexRunReducer, diskGuardVerdict,
   resolveOutDirOnVaultChange, trayMenuTemplate,
-  resolvePythonBin, resolveFfmpegBin, resolveResourcePath, backendInstallStatus,
+  resolvePythonBin, resolveFfmpegBin, resolveResourcePath, resolveAudioTeeBin, backendInstallStatus,
   whisperModelDir, vadJitPath, diarizationModelDirs, appReadinessStatus,
   cleanupPartialModelCache,
 } = require("./lib/mainutil");
@@ -48,6 +48,13 @@ const VENV_PYTHON = path.join(PROJECT_DIR, "venv", "bin", "python");
 const BACKEND = resolveResourcePath(app.isPackaged, process.resourcesPath, APP_DIR, "backend.py");
 const REQUIREMENTS_FILE = resolveResourcePath(app.isPackaged, process.resourcesPath, APP_DIR, "requirements.txt");
 const VENDOR_WHEELS_DIR = resolveResourcePath(app.isPackaged, process.resourcesPath, APP_DIR, "vendor/wheels");
+// audiotee resolves its own binary relative to its own (asar-internal, once
+// packaged) __dirname and relies on Electron's implicit asar→unpacked spawn
+// redirect to find the real bin — passed explicitly here instead so system
+// audio never depends on that implicit behaviour. See resolveAudioTeeBin
+// (lib/mainutil) for why this isn't just resolveResourcePath.
+const AUDIOTEE_BIN = resolveAudioTeeBin(app.isPackaged, process.resourcesPath, APP_DIR);
+console.log("[audiotee] binaryPath resolved to:", AUDIOTEE_BIN);
 // Backend installer (settings "Бэкенд" section) — the heavy Python/ML stack (~1.3GB)
 // is installed on-demand into userData rather than bundled into the .app, so the
 // app itself stays thin and trivially code-signable (see install-backend below).
@@ -630,7 +637,15 @@ ipcMain.handle("start-recording", async (_e, opts) => {
   try {
     const AudioTee = await getAudioTee();
     sysWav = new WavWriter(session.sysPath, SYS_SAMPLE_RATE, 1, 16);
-    tee = new AudioTee({ sampleRate: SYS_SAMPLE_RATE, chunkDurationMs: 200 });
+    // Belt-and-suspenders: the binary SHOULD exist at AUDIOTEE_BIN (see its
+    // resolution above) — if it doesn't, log + surface it loudly rather than
+    // let it fail silently inside AudioTee's spawn. Still attempt the spawn
+    // below regardless (AudioTee/the OS may resolve it another way).
+    if (!fs.existsSync(AUDIOTEE_BIN)) {
+      console.error("[audiotee] binary NOT FOUND at resolved binaryPath:", AUDIOTEE_BIN);
+      send("record-event", { event: "system-audio-error", msg: "аудио-бинарник не найден: " + AUDIOTEE_BIN });
+    }
+    tee = new AudioTee({ sampleRate: SYS_SAMPLE_RATE, chunkDurationMs: 200, binaryPath: AUDIOTEE_BIN });
     let sysWriteFailed = false;
     tee.on("data", (chunk) => {
       try { sysWav.write(chunk.data); }
@@ -642,12 +657,20 @@ ipcMain.handle("start-recording", async (_e, opts) => {
       }
       send("record-event", { event: "level", source: "system", level: rmsLevel(chunk.data) });
     });
-    tee.on("error", (err) =>
-      send("record-event", { event: "system-audio-error", msg: String((err && err.message) || err) }));
+    tee.on("error", (err) => {
+      console.error("[audiotee] error:", err);
+      send("record-event", { event: "system-audio-error", msg: String((err && err.message) || err) });
+    });
+    // audiotee's binary emits structured debug/info lines on stderr that the
+    // library re-exposes as a "log" event (message_type, data) — surface them
+    // to the terminal so a packaged-app run reveals the real cause of a
+    // silent system-audio failure, not just "it didn't work".
+    tee.on("log", (level, data) => console.log("[audiotee]", level, data));
     await tee.start();
     send("record-event", { event: "system-audio-started" });
   } catch (e) {
-    // permission denied / macOS < 14.2 → continue mic-only, surface to UI
+    // permission denied / macOS < 14.2 / spawn failure → continue mic-only, surface to UI
+    console.error("[audiotee] failed to start:", e);
     send("record-event", { event: "system-audio-error", msg: String((e && e.message) || e) });
     if (sysWav) { try { sysWav.close(); } catch {} sysWav = null; }
     tee = null;

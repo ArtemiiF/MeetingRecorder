@@ -9,7 +9,7 @@ const {
   pairHistory, encodeTokenBlob, decodeTokenBlob, isStale,
   rewriteNoteSpeakers, isOutsideRoot, indexRunReducer, diskGuardVerdict,
   resolveOutDirOnVaultChange, trayMenuTemplate,
-  resolvePythonBin, resolveFfmpegBin, resolveResourcePath, backendInstallStatus,
+  resolvePythonBin, resolveFfmpegBin, resolveResourcePath, resolveAudioTeeBin, backendInstallStatus,
   hfCacheDir, whisperModelDir, vadJitPath, diarizationModelDirs, appReadinessStatus,
   modelCacheDirsFor, cleanupPartialModelCache,
 } = require("../lib/mainutil");
@@ -384,6 +384,19 @@ test("resolveResourcePath: packaged app resolves under resourcesPath, ignoring a
 });
 test("resolveResourcePath: works for a nested relative path (vendor/wheels)", () => {
   assert.equal(resolveResourcePath(false, "/res", "/dev/app", "vendor/wheels"), path.join("/dev/app", "vendor/wheels"));
+});
+
+test("resolveAudioTeeBin: packaged app resolves under resourcesPath/app.asar.unpacked (not plain resourcesPath)", () => {
+  assert.equal(
+    resolveAudioTeeBin(true, "/Contents/Resources", "/dev/app"),
+    path.join("/Contents/Resources", "app.asar.unpacked", "node_modules", "audiotee", "bin", "audiotee")
+  );
+});
+test("resolveAudioTeeBin: dev checkout resolves directly under appDir/node_modules", () => {
+  assert.equal(
+    resolveAudioTeeBin(false, "/Contents/Resources", "/dev/app"),
+    path.join("/dev/app", "node_modules", "audiotee", "bin", "audiotee")
+  );
 });
 
 test("backendInstallStatus: no marker + interpreter missing → not installed", () => {
