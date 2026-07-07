@@ -11,6 +11,9 @@ Electron-приложение записи встреч: mic+system (AudioTee) /
 - **PyAudio** (`b5682da`, `vendor/wheels/pyaudio-0.2.14-cp311-cp311-macosx_11_0_arm64.whl`): у PyAudio нет macOS-wheel на PyPI (только Windows+sdist, компилится против системного portaudio). Решение: собран delocate-wheel с вшитым `libportaudio.2.dylib` (`@loader_path/.dylibs/`, ноль homebrew-ссылок), ретаргечен на big_sur bottle → тег `macosx_11_0` (работает на macOS 11+). Ставится из локального wheel — ни компилятора, ни brew на машине юзера.
 - **electron-builder** (`ee85c03`, `26.15.3` пин): mac dmg+zip arm64, ad-hoc `identity:"-"` + `hardenedRuntime`. `build/entitlements.mac.plist` (`device.audio-input` + `disable-library-validation`) на `mac.entitlements` И `entitlementsInherit`; Info.plist `NSMicrophoneUsageDescription`+`NSAudioCaptureUsageDescription` через extendInfo. `extraResources`: backend.py+requirements.txt+vendor/wheels; `asarUnpack` audiotee bin. **Баг #9529** (ad-hoc ломает mic на v26.0.13+) решён через правильные entitlements (hardened runtime требует audio-input на main+helpers), НЕ через afterSign-хак/пин старой версии. Два packaged-бага пойманы прогоном бинаря: `WRITABLE_DIR` (presets/db/recordings/.secret уезжали в read-only asar — теперь userData при packaged, APP_DIR в dev) + spawn `cwd` (asar-virtual APP_DIR → `ENOTDIR`, чинено на `dirname(BACKEND)`). Билд: `npx electron-builder --mac --arm64`; `dist/` в .gitignore.
 
+### Кнопки разрешений в Preflight (`545a0d7`)
+Preflight-панель: у строки Микрофон — кнопка «Разрешить» (`systemPreferences.askForMediaAccess("microphone")` — нативный промпт при not-determined; после → refresh) / «Открыть настройки» при denied|restricted (диплинк `Privacy_Microphone`). У Системного звука — «Открыть настройки» (диплинк `Privacy_ScreenCapture`; программного промпта у AudioTee-категории нет). IPC `request-mic-access`/`open-privacy-settings` (target валидируется, non-darwin→true). macOS TCC программно НЕ выдаётся — кнопки только вызывают промпт/ведут в Настройки.
+
 ### Ручной smoke упаковки (НЕ проверено автоматом)
 - Выдача TCC mic+системный звук при первом запуске + реальная запись (нужен GUI + клики юзера).
 - Полный флоу «Установить бэкенд» на чистой машине (~1.3ГБ download).
@@ -69,7 +72,7 @@ Electron-приложение записи встреч: mic+system (AudioTee) /
 
 ## Тесты
 
-`npm test` = JS `node --test` (228/228) + PY pytest (222/222). Всё замокано — живой e2e (RAG, коррекция, auto-«Я», скачивание моделей, батч-импорт + row-retry, reset, suggest-стадия, tray, персист-очередь записей + запись-во-время-обработки) не гонялся; первый реальный запуск = smoke.
+`npm test` = JS `node --test` (234/234) + PY pytest (222/222). Всё замокано — живой e2e (RAG, коррекция, auto-«Я», скачивание моделей, батч-импорт + row-retry, reset, suggest-стадия, tray, персист-очередь записей + запись-во-время-обработки) не гонялся; первый реальный запуск = smoke.
 
 ## Решения владельца (действуют)
 
