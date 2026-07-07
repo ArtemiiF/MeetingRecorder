@@ -87,7 +87,7 @@ const tick = (window) => new Promise((r) => window.setTimeout(r, 10));
 test("stage_end: ok→done, fail→failed, skip→skip", async () => {
   const { window, $, handlers } = await boot();
   handlers.record({ event: "recorded", id: "r1", name: "Запись 1", file: "/tmp/mixed.wav", mic: "/tmp/m.wav", system: null, tracks: 1 });
-  $("pendingRecordings").querySelector(".pending-play-btn").click(); await tick(window); // builds the stage chips
+  $("historyList").querySelector(".pending-play-btn").click(); await tick(window); // builds the stage chips
   handlers.process({ event: "stage_end", stage: "transcribe", status: "ok", msg: "5 сегментов" });
   handlers.process({ event: "stage_end", stage: "llm", status: "fail", msg: "LM Studio" });
   handlers.process({ event: "stage_end", stage: "diarize", status: "skip", msg: "выключено" });
@@ -99,7 +99,7 @@ test("stage_end: ok→done, fail→failed, skip→skip", async () => {
 test("stage_end: cached (msg 'из кеша') marks done + cached", async () => {
   const { window, $, handlers } = await boot();
   handlers.record({ event: "recorded", id: "r1", name: "Запись 1", file: "/tmp/mixed.wav", mic: "/tmp/m.wav", system: null, tracks: 1 });
-  $("pendingRecordings").querySelector(".pending-play-btn").click(); await tick(window);
+  $("historyList").querySelector(".pending-play-btn").click(); await tick(window);
   handlers.process({ event: "stage_end", stage: "transcribe", status: "ok", msg: "12 сегм. (из кеша)" });
   assert.ok($("stage-transcribe").classList.contains("done"));
   assert.ok($("stage-transcribe").classList.contains("cached"));
@@ -109,7 +109,7 @@ test("stage_end: cached (msg 'из кеша') marks done + cached", async () => 
 test("correct stage renders the 'Коррекция терминов' label and colours by status", async () => {
   const { window, $, handlers } = await boot();
   handlers.record({ event: "recorded", id: "r1", name: "Запись 1", file: "/tmp/mixed.wav", mic: "/tmp/m.wav", system: null, tracks: 1 });
-  $("pendingRecordings").querySelector(".pending-play-btn").click(); await tick(window); // builds the stage chips
+  $("historyList").querySelector(".pending-play-btn").click(); await tick(window); // builds the stage chips
   assert.equal($("stage-correct").textContent, "Коррекция терминов");
   handlers.process({ event: "stage_end", stage: "correct", status: "ok", msg: "Исправлено терминов: 2" });
   assert.ok($("stage-correct").classList.contains("done"));
@@ -159,7 +159,7 @@ test("copy button copies the active result pane's text; switching tabs changes w
   window.navigator.clipboard.writeText = async (text) => { copied.push(text); };
 
   handlers.record({ event: "recorded", id: "r1", name: "Запись 1", file: "/tmp/mixed.wav", mic: "/tmp/mic.wav", system: "/tmp/system.wav", tracks: 2 });
-  $("pendingRecordings").querySelector(".pending-play-btn").click(); await tick(window);
+  $("historyList").querySelector(".pending-play-btn").click(); await tick(window);
   handlers.process({
     event: "done", note: "/n.md", audio: "/a.wav",
     transcript: "транскрипт-текст", summary: "сводка-текст",
@@ -183,7 +183,7 @@ test("copy button copies the active result pane's text; switching tabs changes w
 test("process-closed canceled → 'Остановлено' log + stage skip, UI restored", async () => {
   const { window, $, handlers } = await boot();
   handlers.record({ event: "recorded", id: "r1", name: "Запись 1", file: "/tmp/mixed.wav", mic: "/tmp/mic.wav", system: null, tracks: 1 });
-  $("pendingRecordings").querySelector(".pending-play-btn").click(); await tick(window);
+  $("historyList").querySelector(".pending-play-btn").click(); await tick(window);
   handlers.process({ event: "stage", stage: "transcribe", msg: "Транскрибация" });
   handlers.process({ event: "process-closed", code: null, canceled: true });
   await tick(window);
@@ -195,7 +195,7 @@ test("process-closed canceled → 'Остановлено' log + stage skip, UI 
 test("processAudio busy → error logged, UI not stuck on Stop", async () => {
   const { window, $, handlers } = await boot({ processAudio: async () => ({ ok: false, error: "Обработка уже идёт" }) });
   handlers.record({ event: "recorded", id: "r1", name: "Запись 1", file: "/tmp/mixed.wav", mic: "/tmp/mic.wav", system: null, tracks: 1 });
-  $("pendingRecordings").querySelector(".pending-play-btn").click(); await tick(window);
+  $("historyList").querySelector(".pending-play-btn").click(); await tick(window);
   assert.ok($("logs").textContent.includes("Обработка уже идёт"));
   assert.equal($("stopBtn").style.display, "none"); // restored, not stuck
 });
@@ -209,7 +209,7 @@ test("history reprocess (from note view) is blocked while a run is in flight", a
   let calls = 0;
   const { window, $, handlers } = await boot({ processAudio: async () => { calls++; return { ok: true }; } });
   handlers.record({ event: "recorded", id: "r1", name: "Запись 1", file: "/tmp/mixed.wav", mic: "/tmp/m.wav", system: null, tracks: 1 });
-  $("pendingRecordings").querySelector(".pending-play-btn").click(); await tick(window); // processing=true, calls=1
+  $("historyList").querySelector(".pending-play-btn").click(); await tick(window); // processing=true, calls=1
   assert.equal(calls, 1);
   window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
   $("historyList").querySelector(".rail-item:not(.pending)").click(); await tick(window);
@@ -289,7 +289,7 @@ test("speaker rename: detects labels, applies map, rewrites transcript + calls I
     renameSpeakers: async (notePath, map) => { renamed = { notePath, map }; return { ok: true }; },
   });
   handlers.record({ event: "recorded", id: "r1", name: "Запись 1", file: "/tmp/mixed.wav", mic: "/tmp/m.wav", system: null, tracks: 1 });
-  $("pendingRecordings").querySelector(".pending-play-btn").click(); await tick(window);
+  $("historyList").querySelector(".pending-play-btn").click(); await tick(window);
   handlers.process({
     event: "done", note: "/o/meeting-x.md", audio: "/o/a.wav",
     transcript: "**[Спикер 1]**: привет\n\n**[Спикер 2]**: пока", summary: "s",
@@ -306,7 +306,7 @@ test("speaker rename: detects labels, applies map, rewrites transcript + calls I
 test("inferred speaker names prefill the rename inputs", async () => {
   const { window, $, handlers } = await boot();
   handlers.record({ event: "recorded", id: "r1", name: "Запись 1", file: "/tmp/mixed.wav", mic: "/tmp/m.wav", system: null, tracks: 1 });
-  $("pendingRecordings").querySelector(".pending-play-btn").click(); await tick(window);
+  $("historyList").querySelector(".pending-play-btn").click(); await tick(window);
   handlers.process({
     event: "done", note: "/o/n.md", audio: "/o/a.wav",
     transcript: "**[Спикер 1]**: привет\n\n**[Спикер 2]**: пока", summary: "s",
@@ -322,7 +322,7 @@ test("inferred speaker names prefill the rename inputs", async () => {
 test("«Действия» tab renders items + decisions from done event", async () => {
   const { window, $, handlers } = await boot();
   handlers.record({ event: "recorded", id: "r1", name: "Запись 1", file: "/tmp/mixed.wav", mic: "/tmp/m.wav", system: null, tracks: 1 });
-  $("pendingRecordings").querySelector(".pending-play-btn").click(); await tick(window);
+  $("historyList").querySelector(".pending-play-btn").click(); await tick(window);
   handlers.process({
     event: "done", note: "/o/n.md", audio: "/o/a.wav",
     transcript: "t", summary: "s",
@@ -350,7 +350,7 @@ test("«Действия» tab renders items + decisions from done event", async
 test("«Действия» tab shows empty-state text when no actions", async () => {
   const { window, $, handlers } = await boot();
   handlers.record({ event: "recorded", id: "r1", name: "Запись 1", file: "/tmp/mixed.wav", mic: "/tmp/m.wav", system: null, tracks: 1 });
-  $("pendingRecordings").querySelector(".pending-play-btn").click(); await tick(window);
+  $("historyList").querySelector(".pending-play-btn").click(); await tick(window);
   handlers.process({ event: "done", note: "/o/n.md", audio: "/o/a.wav", transcript: "t", summary: "s" });
   await tick(window);
   assert.equal($("resActions").textContent, "(пунктов действий нет)");
@@ -1308,7 +1308,7 @@ test("glossary is forwarded to processAudio when running", async () => {
   });
   await tick(window);
   handlers.record({ event: "recorded", id: "r1", name: "Запись 1", file: "/tmp/mixed.wav", mic: "/tmp/m.wav", system: null, tracks: 1 });
-  $("pendingRecordings").querySelector(".pending-play-btn").click();
+  $("historyList").querySelector(".pending-play-btn").click();
   await tick(window);
   assert.ok(sent, "processAudio was not called");
   assert.equal(sent.glossary, "Иван Петров, Mindbox");
@@ -1659,7 +1659,7 @@ test("auto-«Я» inputs (micFile/systemFile/authorName) are forwarded to proces
   });
   await tick(window);
   handlers.record({ event: "recorded", id: "r1", name: "Запись 1", file: "/tmp/mixed.wav", mic: "/tmp/m.wav", system: "/tmp/s.wav", tracks: 2 });
-  $("pendingRecordings").querySelector(".pending-play-btn").click();
+  $("historyList").querySelector(".pending-play-btn").click();
   await tick(window);
   assert.ok(sent, "processAudio was not called");
   assert.equal(sent.micFile, "/tmp/m.wav");
@@ -1689,7 +1689,7 @@ test("'это я' button fills speaker row input with authorName; Apply sends it
   });
   await tick(window);
   handlers.record({ event: "recorded", id: "r1", name: "Запись 1", file: "/tmp/mixed.wav", mic: "/tmp/m.wav", system: null, tracks: 1 });
-  $("pendingRecordings").querySelector(".pending-play-btn").click(); await tick(window);
+  $("historyList").querySelector(".pending-play-btn").click(); await tick(window);
   handlers.process({
     event: "done", note: "/o/meeting.md", audio: "/o/a.wav",
     transcript: "**[Спикер 1]**: привет\n\n**[Спикер 2]**: пока", summary: "s",
@@ -2887,16 +2887,15 @@ test("pending recordings: a recorded event appends a row; a second appends a sec
     file: "/rec/r1/mixed.wav", mic: "/rec/r1/mic.wav", system: null, tracks: 1,
   });
   await tick(window);
-  let rows = $("pendingRecordings").querySelectorAll(".queue-item");
+  let rows = $("historyList").querySelectorAll(".queue-item");
   assert.equal(rows.length, 1);
-  assert.ok(!$("pendingRecordings").classList.contains("hidden"));
 
   handlers.record({
     event: "recorded", id: "r2", name: "Запись 2",
     file: "/rec/r2/mixed.wav", mic: null, system: "/rec/r2/system.wav", tracks: 1,
   });
   await tick(window);
-  rows = $("pendingRecordings").querySelectorAll(".queue-item");
+  rows = $("historyList").querySelectorAll(".queue-item");
   assert.equal(rows.length, 2, "second recording must append, not overwrite the first");
 });
 
@@ -2917,7 +2916,7 @@ test("BLOCKER LOCK: a recording finishing during an active processing run must n
   // r1 finishes and starts processing.
   handlers.record({ event: "recorded", id: "r1", name: "Запись 1", file: "/rec/r1/mixed.wav", mic: null, system: null, tracks: 1 });
   await tick(window);
-  $("pendingRecordings").querySelector(".pending-play-btn").click(); await tick(window);
+  $("historyList").querySelector(".pending-play-btn").click(); await tick(window);
   assert.deepEqual(calls, ["/rec/r1/mixed.wav"]);
   assert.equal($("stopBtn").style.display, "", "Stop must be visible while r1 processes");
   assert.equal($("runBtn").style.display, "none", "Run must be hidden while r1 processes");
@@ -2934,7 +2933,7 @@ test("BLOCKER LOCK: a recording finishing during an active processing run must n
   handlers.process({ event: "done", note: "/n1.md", audio: "/rec/r1/mixed.wav", transcript: "t1", summary: "s1" });
   await tick(window);
   assert.deepEqual(removed, ["r1"], "must remove the recording that was actually processed (r1), never r2");
-  const rows = $("pendingRecordings").querySelectorAll(".queue-item");
+  const rows = $("historyList").querySelectorAll(".queue-item");
   assert.equal(rows.length, 1, "r2 must still be waiting — it was never processed");
   assert.equal(rows[0].querySelector(".queue-name").textContent, "Запись 2");
 });
@@ -2950,13 +2949,13 @@ test("pending recordings: per-row ▶ success removes the row and calls removePe
     file: "/rec/r1/mixed.wav", mic: "/rec/r1/mic.wav", system: null, tracks: 1,
   });
   await tick(window);
-  const playBtn = $("pendingRecordings").querySelector(".pending-play-btn");
+  const playBtn = $("historyList").querySelector(".pending-play-btn");
   assert.ok(playBtn, "a pending row must expose a ▶ button");
   playBtn.click(); await tick(window);
   handlers.process({ event: "done", note: "/n.md", audio: "/rec/r1/mixed.wav", transcript: "t", summary: "s" });
   await tick(window);
   assert.deepEqual(removed, ["r1"]);
-  assert.equal($("pendingRecordings").querySelectorAll(".queue-item").length, 0);
+  assert.equal($("historyList").querySelectorAll(".queue-item").length, 0);
 });
 
 test("pending recordings: a failed run leaves the row with status failed and keeps it (retry via ▶ stays available)", async () => {
@@ -2969,10 +2968,10 @@ test("pending recordings: a failed run leaves the row with status failed and kee
     file: "/rec/r1/mixed.wav", mic: "/rec/r1/mic.wav", system: null, tracks: 1,
   });
   await tick(window);
-  $("pendingRecordings").querySelector(".pending-play-btn").click(); await tick(window);
+  $("historyList").querySelector(".pending-play-btn").click(); await tick(window);
   handlers.process({ event: "error", msg: "boom" });
   await tick(window);
-  const rows = $("pendingRecordings").querySelectorAll(".queue-item");
+  const rows = $("historyList").querySelectorAll(".queue-item");
   assert.equal(rows.length, 1, "a failed row must stay in the queue, not vanish");
   assert.ok(rows[0].classList.contains("queue-failed"));
   assert.ok(rows[0].querySelector(".pending-play-btn"), "failed row still offers a retry ▶");
@@ -2998,7 +2997,7 @@ test("pending recordings: «Обработать все» processes rows sequent
 
   handlers.process({ event: "done", note: "/n2.md", audio: "/rec/r2/mixed.wav", transcript: "t2", summary: "s2" });
   await tick(window);
-  assert.equal($("pendingRecordings").querySelectorAll(".queue-item").length, 0);
+  assert.equal($("historyList").querySelectorAll(".queue-item").length, 0);
   assert.ok(allBtn.classList.contains("hidden"), "nothing left to process — bulk button hides");
 });
 
@@ -3011,10 +3010,10 @@ test("pending recordings: delete (✕) removes the row and calls removePendingRe
   });
   handlers.record({ event: "recorded", id: "r1", name: "Запись 1", file: "/rec/r1/mixed.wav", mic: null, system: null, tracks: 1 });
   await tick(window);
-  $("pendingRecordings").querySelector(".pending-del-btn").click(); await tick(window);
+  $("historyList").querySelector(".pending-del-btn").click(); await tick(window);
   assert.deepEqual(removed, ["r1"]);
   assert.deepEqual(calls, [], "deleting a pending row must never trigger processing");
-  assert.equal($("pendingRecordings").querySelectorAll(".queue-item").length, 0);
+  assert.equal($("historyList").querySelectorAll(".queue-item").length, 0);
 });
 
 test("init() restores the persistent pending queue from disk (survives an app restart)", async () => {
@@ -3025,9 +3024,8 @@ test("init() restores the persistent pending queue from disk (survives an app re
     ]),
   });
   await tick(window);
-  const rows = $("pendingRecordings").querySelectorAll(".queue-item");
+  const rows = $("historyList").querySelectorAll(".queue-item");
   assert.equal(rows.length, 2);
-  assert.ok(!$("pendingRecordings").classList.contains("hidden"));
 });
 
 // ── recording-during-processing gate (owner-approved revert of commit 0a79d98) ──
@@ -3037,7 +3035,7 @@ test("recording is allowed while record-mode processing is running (gate relaxed
     startRecording: async () => { startCalls++; return { ok: true }; },
   });
   handlers.record({ event: "recorded", id: "r1", name: "Запись 1", file: "/tmp/mixed.wav", mic: "/tmp/m.wav", system: null, tracks: 1 });
-  $("pendingRecordings").querySelector(".pending-play-btn").click(); await tick(window); // pending-item processing starts
+  $("historyList").querySelector(".pending-play-btn").click(); await tick(window); // pending-item processing starts
   assert.equal($("recBtn").disabled, false, "recBtn must not be disabled by processing alone");
   $("recBtn").click(); await tick(window);
   assert.equal(startCalls, 1, "a new recording must be able to start while processing runs");

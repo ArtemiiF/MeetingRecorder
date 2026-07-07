@@ -534,10 +534,11 @@ async function init() {
   refreshHistory();
 
   // Restore the persistent pending-recordings queue (survives an app restart —
-  // main.js reads it back from pending.json).
+  // main.js reads it back from pending.json). Rendered inline in the История rail
+  // (renderRail) — there is no separate control strip.
   const pending = await window.api.listPendingRecordings();
   state.pendingRecordings = (pending || []).map((r) => ({ ...r, status: "pending" }));
-  renderPendingRecordings();
+  renderRail();
 }
 
 function renderPresets() {
@@ -859,14 +860,13 @@ function renderImportQueue() {
 let activePendingId = null;   // id of the pending recording the in-flight run belongs to, if any
 let pendingBatchRunning = false; // true while "Обработать все" is driving the queue
 
-// Builds one pending-recording row (icon + name + ▶/✕) — shared by renderPendingRecordings
-// (the compact control strip) and renderRail (the same row inline in the История timeline,
-// see below). idx is the item's current position in state.pendingRecordings; extraClass lets
-// the rail give its copy a distinguishing class (".pending") without touching this markup.
-function buildPendingRow(item, idx, extraClass) {
+// Builds one pending-recording row (icon + name + ▶/✕) for the История rail — the single
+// render path for a pending recording (owner decision: no separate control strip — see
+// renderRail below). idx is the item's current position in state.pendingRecordings.
+function buildPendingRow(item, idx) {
   const icon = QUEUE_STATUS_ICON[item.status] || "⏳";
   const row = document.createElement("div");
-  row.className = ["queue-item", "queue-" + item.status, extraClass].filter(Boolean).join(" ");
+  row.className = "rail-item pending queue-item queue-" + item.status;
   row.innerHTML =
     `<span class="queue-icon">${icon}</span><span class="queue-name">${escapeHtml(item.name)}</span>`;
   const canProcess = item.status === "pending" || item.status === "failed";
@@ -891,26 +891,13 @@ function buildPendingRow(item, idx, extraClass) {
   return row;
 }
 
-function renderPendingRecordings() {
-  const wrap = $("pendingRecordings");
-  const list = state.pendingRecordings || [];
-  wrap.innerHTML = "";
-  wrap.classList.toggle("hidden", list.length === 0);
-  list.forEach((item, idx) => wrap.appendChild(buildPendingRow(item, idx)));
-  const hasWork = list.some((it) => it.status === "pending" || it.status === "failed");
-  $("pendingProcessAll").classList.toggle("hidden", !hasWork);
-  // Pending rows also render inline in the История rail (always visible there,
-  // bypassing its filters) — keep that copy in sync with every state change here.
-  renderRail();
-}
-
 function nextPendingWork() {
   return (state.pendingRecordings || []).find((it) => it.status === "pending" || it.status === "failed");
 }
 
 function runPendingItem(item) {
   item.status = "running";
-  renderPendingRecordings();
+  renderRail();
   startProcessing(false, item);
 }
 
@@ -928,7 +915,7 @@ function deletePendingRecording(idx) {
   const item = state.pendingRecordings[idx];
   if (!item || item.status === "running") return;
   state.pendingRecordings.splice(idx, 1);
-  renderPendingRecordings();
+  renderRail();
   window.api.removePendingRecording(item.id);
 }
 
@@ -963,7 +950,7 @@ function finishPendingItem(outcome) {
   } else {
     state.pendingRecordings[idx].status = "failed";
   }
-  renderPendingRecordings();
+  renderRail();
   return true;
 }
 
@@ -1147,7 +1134,7 @@ window.api.onRecordEvent((ev) => {
         mixed: ev.file, mic: ev.mic, system: ev.system, tracks: ev.tracks,
         status: "pending",
       });
-      renderPendingRecordings();
+      renderRail();
     }
     const parts = [];
     if (ev.mic) parts.push("микрофон");
@@ -1480,11 +1467,13 @@ function renderRail() {
   const rail = $("historyList");
   rail.innerHTML = "";
   const pending = state.pendingRecordings || [];
-  // Reuses buildPendingRow's ▶/✕ semantics (processPendingRecording/deletePendingRecording
-  // by index) — same functions as the pendingRecordings control strip, just a second place
-  // they're wired from. The row itself gets no click listener, so clicking it (outside the
+  // The rail is the single render path for a pending recording (owner decision — no
+  // separate control strip). Rows wire the same processPendingRecording/deletePendingRecording
+  // used everywhere else; the row itself gets no click listener, so clicking it (outside the
   // buttons) is a no-op — it must never call selectNote/readNote like a real note row does.
-  pending.forEach((item, idx) => rail.appendChild(buildPendingRow(item, idx, "rail-item pending")));
+  pending.forEach((item, idx) => rail.appendChild(buildPendingRow(item, idx)));
+  const hasWork = pending.some((it) => it.status === "pending" || it.status === "failed");
+  $("pendingProcessAll").classList.toggle("hidden", !hasWork);
   // Backend-merged listHistory rows carry kind:"pending" too (cmd_history --pending-file) —
   // real notes never do. Exclude them here so a restart-era pending row (already covered by
   // state.pendingRecordings above, loaded from the same manifest) isn't rendered a second
