@@ -227,6 +227,15 @@ body.processing .history-row button { opacity: .4; pointer-events: none; }
 .chip-remove:hover { background: var(--danger); color: #fff; }
 .glossary-add-row { display: flex; gap: 8px; }
 .glossary-add-row input { flex: 1; }
+.glossary-filter { width: 100%; margin: 0 0 12px; }
+.glossary-section-default { margin-top: 6px; }
+.glossary-section-toggle {
+  display: inline-flex; align-items: center; gap: 6px; background: transparent; border: none;
+  color: var(--muted); font-size: 12px; cursor: pointer; padding: 4px 0; margin-bottom: 8px; font-family: inherit;
+}
+.glossary-section-toggle:hover { color: var(--fg); }
+.glossary-caret { font-size: 10px; }
+.chip-usage { color: var(--muted); font-size: 11px; }
 
 /* glossary: "Предложения" inbox (auto-suggested terms from processing) */
 .glossary-suggest { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); }

@@ -230,10 +230,12 @@
         <div class="glossary-toolbar">
           <span id="glossaryCount" class="glossary-count">0 терминов</span>
           <button id="glossaryFillDefaults" class="btn small">Дополнить распространёнными</button>
-          <button id="glossaryToggleText" class="btn small ghost">Редактировать текстом</button>
+          <button id="glossaryToggleText" class="btn small ghost">Импорт/экспорт текстом</button>
         </div>
 
-        <div id="glossaryChips" class="chip-list"></div>
+        <input id="glossaryFilter" type="text" class="glossary-filter" placeholder="Фильтр по терминам…" />
+
+        <div id="glossaryChips"></div>
 
         <div class="glossary-add-row">
           <input id="glossaryNewTerm" type="text" placeholder="Добавить термин…" />
@@ -251,7 +253,7 @@
         </div>
 
         <div id="glossaryTextWrap" class="hidden">
-          <label>Текстом, через запятую
+          <label>Текстом — через запятую или с новой строки
             <textarea id="glossary" rows="3" spellcheck="false" placeholder="Иван Петров, Mindbox, ClickHouse"></textarea>
           </label>
         </div>

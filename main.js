@@ -817,7 +817,7 @@ function cacheDirFor(audioFile) {
 
 // processing pipeline
 ipcMain.handle("process-audio", async (_e, opts) => {
-  const { audioFile, prompt, diarize, outDir, engine, hfToken, fresh, language, glossary, summarize, template, micFile, systemFile, authorName, origin, fastModel } = opts;
+  const { audioFile, prompt, diarize, outDir, engine, hfToken, fresh, language, glossary, summarize, template, micFile, systemFile, authorName, origin, fastModel, glossaryUsage } = opts;
   if (procProc) return { ok: false, error: "Обработка уже идёт" };
   if (modelDlProc) return { ok: false, error: "Дождитесь окончания скачивания моделей" };
   // Same reasoning as start-recording's guard above: processing spawns pythonBin(),
@@ -868,6 +868,16 @@ ipcMain.handle("process-audio", async (_e, opts) => {
   // omit the flag entirely, backend.py's --fast-model default ("") preserves today's
   // behaviour (no "model" field sent, LM Studio uses whatever's loaded).
   if (fastModel) args.push("--fast-model", fastModel);
+  // Cumulative {termLower: count} from the renderer's presets — same file-based
+  // plumbing as --prompt-file (avoids CLI arg length/escaping concerns). Omitted
+  // entirely when there's no usage data yet (first-ever run), mirroring fastModel
+  // above — backend.py's default (no file → {}) preserves today's behaviour.
+  let glossaryUsageFile = null;
+  if (glossaryUsage && Object.keys(glossaryUsage).length) {
+    glossaryUsageFile = path.join(TMP_DIR, `glossary-usage-${Date.now()}.json`);
+    fs.writeFileSync(glossaryUsageFile, JSON.stringify(glossaryUsage), "utf-8");
+    args.push("--glossary-usage-file", glossaryUsageFile);
+  }
   // UI-entered token wins over a shell env one; empty → backend skips diarization.
   const extraEnv = hfToken && hfToken.trim() ? { HF_TOKEN: hfToken.trim() } : {};
   let doneNote = null; // captured from the "done" event, used to auto-index on close
@@ -881,6 +891,7 @@ ipcMain.handle("process-audio", async (_e, opts) => {
       const canceled = procCanceled;
       send("process-event", { event: "process-closed", code, stderr, canceled });
       try { fs.unlinkSync(promptFile); } catch {}
+      if (glossaryUsageFile) { try { fs.unlinkSync(glossaryUsageFile); } catch {} }
       procProc = null;
       procCanceled = false;
       // Fire-and-forget: resolves to the renderer above regardless; indexing runs after.
