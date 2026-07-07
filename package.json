@@ -65,6 +65,7 @@
         }
       ],
       "category": "public.app-category.productivity",
+      "icon": "assets/icon.icns",
       "identity": "-",
       "hardenedRuntime": true,
       "notarize": false,
