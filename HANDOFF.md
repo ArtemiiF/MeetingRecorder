@@ -26,6 +26,11 @@ Preflight-панель: у строки Микрофон — кнопка «Ра
 - **Keychain-промпт каждый запуск даже без токена** (`5a87f55`): `isEncryptionAvailable()` дёргался на старте в `loadPresetsData` (для `secretEncrypted`). Фикс: gate `token ? encryptionAvailable() : false` на обоих return-путях — без `.secret` `safeStorage` не трогается вообще → ноль промптов. С токеном — один промпт/запуск (ad-hoc не закрепляет «Always Allow», неизбежно). Диагностика: на fresh не было ни `.secret` ни presets, промпт всё равно → значит `isEncryptionAvailable`, не `loadToken`.
 - **Системный звук не писался в упакованном .app** (`dac47d6`, ПОДТВЕРЖДЕНО на рантайме): AudioTee спавнил бинарь по asar-относительному пути (`join(__dirname,"../bin/audiotee")` внутри app.asar), полагаясь на авто-редирект Electron в .unpacked. Диагностика: и dev-, и packaged-бинарь standalone дают реальный PCM (не тишина) → OS/бинарь/TCC ок, баг в интеграции. Фикс: явный `binaryPath` в `new AudioTee({binaryPath})` — packaged `resourcesPath/app.asar.unpacked/node_modules/audiotee/bin/audiotee`, dev `APP_DIR/...` (helper `resolveAudioTeeBin`, mainutil). Опция называется именно `binaryPath` (проверено в audiotee dist/index.js:84). Плюс `[audiotee]` console-логи (binaryPath + error/log events) для будущей диагностики.
 - **Ссылка «Где взять токен?»** (`b710274`): у поля HF-токена подсказка + линк на huggingface.co/settings/tokens. Generic `open-external` IPC (https-only гейт — renderer не может открыть произвольную схему), `openExternal` в preload.
+- **Трей-иконка не видна в упакованном .app** (`28566c1`, ПОДТВЕРЖДЕНО на рантайме): `createTray` грузил PNG через `nativeImage.createFromPath(APP_DIR/assets/...)` = asar-путь → пустая иконка → невидимый трей (тот же класс, что audiotee). Hidden Bar исключён (не запущен). Фикс: helper `resolveAssetPath` (mainutil) — packaged `resourcesPath/app.asar.unpacked/assets/trayTemplate.png`, dev `APP_DIR/assets/...`; `asarUnpack` добавлен `assets/trayTemplate*.png` (и @2x — retina-сиблинг тоже реальным файлом); `if(icon.isEmpty()) console.error` для диагностики. **Общий урок вынесен в G-правило** `g-electron-asar-path-audit` (general-rules.md, reflect-session): при упаковке Electron dev-first аудитить все `__dirname`/APP_DIR рантайм-пути ДО сборки.
+- **safeStorage/keychain на ad-hoc**: `isEncryptionAvailable()` возвращает false в упакованном ad-hoc .app → токен хранится base64 (варнинг в UI, честный fallback). Не баг — корень тот же (нет стабильной keychain-идентичности без Developer ID). HF read-токен, локально, в `.secret` (не в git) — риск низкий. Владелец решил оставить (пункт 1).
+
+## Релиз v1.0.0 (GitHub Release)
+`gh release create v1.0.0` на `main` (`28566c1`), приватный репо → виден только владельцу. Вложения: `Meeting Recorder-1.0.0-arm64.dmg` + `.zip` (~98МБ). Заметки: требования (arm64, LM Studio, интернет на первый запуск), шаги установки (drag→Gatekeeper right-click Open→setup-стена→разрешения), ad-hoc-ограничения, sha256 dmg (`1f08a601…`). URL: https://github.com/ArtemiiF/MeetingRecorder/releases/tag/v1.0.0. Скачать: `gh release download v1.0.0 -R ArtemiiF/MeetingRecorder`. Следующая версия: bump `version` в package.json → пересборка → `gh release create vX.Y.Z`.
 
 ### Ручной smoke упаковки (НЕ проверено автоматом)
 - Выдача TCC mic при первом запуске (системный звук — ПОДТВЕРЖДЁН рабочим после binaryPath-фикса на реальном прогоне 2026-07-07).
@@ -85,7 +90,7 @@ Preflight-панель: у строки Микрофон — кнопка «Ра
 
 ## Тесты
 
-`npm test` = JS `node --test` (285/285) + PY pytest (238/238). Всё замокано — живой e2e (RAG, коррекция, auto-«Я», скачивание моделей, батч-импорт + row-retry, reset, suggest-стадия, tray, персист-очередь записей + запись-во-время-обработки) не гонялся; первый реальный запуск = smoke.
+`npm test` = JS `node --test` (287/287) + PY pytest (238/238). Всё замокано — живой e2e (RAG, коррекция, auto-«Я», скачивание моделей, батч-импорт + row-retry, reset, suggest-стадия, tray, персист-очередь записей + запись-во-время-обработки) не гонялся; первый реальный запуск = smoke.
 
 ## Решения владельца (действуют)
 
@@ -99,7 +104,7 @@ Preflight-панель: у строки Микрофон — кнопка «Ра
 
 ## Git / процесс
 
-- Remote `ArtemiiF/MeetingRecorder` (private, solo). `main` = origin/main = docs-коммит поверх `ee85c03` (упаковка .app). Фича-ветки спрюнены.
+- Remote `ArtemiiF/MeetingRecorder` (private, solo). `main` = origin/main = `28566c1` (трей-фикс; последний в арке упаковки). Тег `v1.0.0` = релиз с .dmg. Фича-ветки спрюнены.
 - Push в main разрешён владельцем **только через критик-гейт**: критик по `git diff origin/main...HEAD` → marker `printf 'verdict: approve\ndiff-sha256: %s\n'` где sha = `printf '%s' "$(git diff origin/main...HEAD)" | sha256sum` (именно `printf '%s'` — прямой pipe оставляет \n → mismatch) → push отдельной командой. Marker одноразовый, TTL 300 c. Marker и push НЕ объединять в одну команду (hook проверяет до выполнения).
 - Agent-report'ы (`.claude/agent-reports/`) — untracked, в коммиты не включать.
 - Фиксы предсуществующих поломок — отдельным чанком от фичи.
