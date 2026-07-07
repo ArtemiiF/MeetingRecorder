@@ -61,6 +61,11 @@ async function boot(apiOverrides = {}) {
     installBackend: async () => ({ ok: true }),
     cancelInstallBackend: async () => ({ ok: true }),
     uninstallBackend: async () => ({ ok: true }),
+    checkAppUpdate: async () => ({
+      ok: true, current: "1.0.0", latest: "1.0.0", hasUpdate: false, assetUrl: null, releaseNotes: null, isPackaged: true,
+    }),
+    downloadAndInstallUpdate: async () => ({ ok: true }),
+    cancelAppUpdate: async () => ({ ok: true }),
     paraExtract: async () => ({ content: "x" }),
     paraReindex: async () => ({ indexed: 0, skipped: 0, removed: 0 }),
     paraSearch: async (_root, _messages) => ({ found: false, answer: "Не нашёл по этому вопросу записей в заметках.", citations: [] }),
@@ -72,6 +77,7 @@ async function boot(apiOverrides = {}) {
     onParaReindexEvent: (cb) => { handlers.reindex = cb; },
     onModelDownloadEvent: (cb) => { handlers.modelDownload = cb; },
     onInstallBackendEvent: (cb) => { handlers.installBackend = cb; },
+    onAppUpdateEvent: (cb) => { handlers.appUpdate = cb; },
     onTrayRecordToggle: (cb) => { handlers.trayRecordToggle = cb; },
   }, apiOverrides);
 
@@ -3222,4 +3228,253 @@ test("setup gate: clicking step 2 download button requests only whisper+vad (nev
   $("gateModelsDownloadBtn").click();
   await tick(window);
   assert.deepEqual(downloadOpts, { only: ["whisper", "vad"] });
+});
+
+// ── in-app updater (settings "Обновления" section) ──────────────────────────
+test("Обновления: check button calls checkAppUpdate and renders 'актуальная' when no update is available", async () => {
+  let calls = 0;
+  const { window, $ } = await boot({
+    checkAppUpdate: async () => { calls++; return { ok: true, current: "1.0.0", latest: "1.0.0", hasUpdate: false, assetUrl: null, releaseNotes: null, isPackaged: true }; },
+  });
+  $("settingsOpen").click();
+  await tick(window);
+  $("updateCheckBtn").click();
+  await tick(window);
+  assert.equal(calls, 1);
+  assert.match($("updateStatusRow").querySelector(".pf-detail").textContent, /актуальная/);
+  assert.equal($("updateInstallBtn").classList.contains("hidden"), true);
+});
+
+test("Обновления: install button appears (enabled) only once hasUpdate is true in a packaged app", async () => {
+  const { window, $ } = await boot({
+    checkAppUpdate: async () => ({
+      ok: true, current: "1.0.0", latest: "1.1.0", hasUpdate: true, assetUrl: "https://x/zip",
+      releaseNotes: "Фикс трея", isPackaged: true,
+    }),
+  });
+  $("settingsOpen").click();
+  await tick(window);
+  $("updateCheckBtn").click();
+  await tick(window);
+  assert.equal($("updateInstallBtn").classList.contains("hidden"), false);
+  assert.equal($("updateInstallBtn").disabled, false);
+  assert.equal($("updateDevHint").classList.contains("hidden"), true);
+  assert.match($("updateStatusRow").querySelector(".pf-detail").textContent, /1\.1\.0/);
+  assert.match($("updateStatusRow").querySelector(".pf-detail").textContent, /Фикс трея/);
+});
+
+test("Обновления: dev-mode (isPackaged:false) shows the update but disables install and shows the dev hint", async () => {
+  const { window, $ } = await boot({
+    checkAppUpdate: async () => ({
+      ok: true, current: "1.0.0", latest: "1.1.0", hasUpdate: true, assetUrl: "https://x/zip", releaseNotes: null, isPackaged: false,
+    }),
+  });
+  $("settingsOpen").click();
+  await tick(window);
+  $("updateCheckBtn").click();
+  await tick(window);
+  assert.equal($("updateInstallBtn").classList.contains("hidden"), false);
+  assert.equal($("updateInstallBtn").disabled, true);
+  assert.equal($("updateDevHint").classList.contains("hidden"), false);
+});
+
+test("Обновления: a check-app-update error renders the error text and never throws", async () => {
+  const { window, $ } = await boot({
+    checkAppUpdate: async () => ({
+      ok: false, current: "1.0.0", latest: null, hasUpdate: false, assetUrl: null, releaseNotes: null,
+      isPackaged: true, error: "не в сети",
+    }),
+  });
+  $("settingsOpen").click();
+  await tick(window);
+  $("updateCheckBtn").click();
+  await tick(window);
+  assert.match($("updateStatusRow").querySelector(".pf-detail").textContent, /не в сети/);
+  assert.equal($("updateInstallBtn").classList.contains("hidden"), true);
+});
+
+test("Обновления: install button click calls downloadAndInstallUpdate and shows progress from app-update-event", async () => {
+  let installCalls = 0;
+  const { window, $, handlers } = await boot({
+    checkAppUpdate: async () => ({
+      ok: true, current: "1.0.0", latest: "1.1.0", hasUpdate: true, assetUrl: "https://x/zip", releaseNotes: null, isPackaged: true,
+    }),
+    downloadAndInstallUpdate: async () => { installCalls++; return { ok: true }; },
+  });
+  $("settingsOpen").click();
+  await tick(window);
+  $("updateCheckBtn").click();
+  await tick(window);
+  $("updateInstallBtn").click();
+  await tick(window);
+  assert.equal(installCalls, 1);
+  assert.equal($("updateCancelBtn").classList.contains("hidden"), false);
+  handlers.appUpdate({ event: "download-progress", pct: 42 });
+  assert.match($("updateInstallStatus").textContent, /42%/);
+});
+
+test("Обновления: a failed downloadAndInstallUpdate() call surfaces the error and re-enables the check button", async () => {
+  const { window, $ } = await boot({
+    checkAppUpdate: async () => ({
+      ok: true, current: "1.0.0", latest: "1.1.0", hasUpdate: true, assetUrl: "https://x/zip", releaseNotes: null, isPackaged: true,
+    }),
+    downloadAndInstallUpdate: async () => ({ ok: false, error: "только в собранном приложении" }),
+  });
+  let alerted = null;
+  window.alert = (msg) => { alerted = msg; };
+  $("settingsOpen").click();
+  await tick(window);
+  $("updateCheckBtn").click();
+  await tick(window);
+  $("updateInstallBtn").click();
+  await tick(window);
+  assert.equal(alerted, "только в собранном приложении");
+  assert.equal($("updateCheckBtn").disabled, false);
+});
+
+test("Обновления: cancel button calls cancelAppUpdate", async () => {
+  let cancelCalls = 0;
+  const { window, $ } = await boot({
+    checkAppUpdate: async () => ({
+      ok: true, current: "1.0.0", latest: "1.1.0", hasUpdate: true, assetUrl: "https://x/zip", releaseNotes: null, isPackaged: true,
+    }),
+    downloadAndInstallUpdate: async () => new Promise(() => {}), // never resolves — mirrors a real in-flight download
+    cancelAppUpdate: async () => { cancelCalls++; return { ok: true }; },
+  });
+  $("settingsOpen").click();
+  await tick(window);
+  $("updateCheckBtn").click();
+  await tick(window);
+  $("updateInstallBtn").click();
+  await tick(window);
+  $("updateCancelBtn").click();
+  await tick(window);
+  assert.equal(cancelCalls, 1);
+});
+
+// ── main.js in-app updater wiring (source-text checks — see the Бэкенд block
+// above for why: main.js requires("electron") and can't load headless) ──────
+test("main.js: download-and-install-update refuses outside a packaged app, while busy, and while recording/processing/model-download/backend-install is active", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const handler = mainSrc.match(/ipcMain\.handle\("download-and-install-update"[\s\S]*?\n\}\);/)[0];
+  assert.match(handler, /if \(!app\.isPackaged\) return/);
+  assert.match(handler, /if \(updateProc\) return/);
+  assert.match(handler, /if \(recordProc \|\| tee\) return/);
+  assert.match(handler, /if \(procProc\) return/);
+  assert.match(handler, /if \(modelDlProc\) return/);
+  assert.match(handler, /if \(installBackendProc\) return/);
+});
+
+test("main.js: cancel-app-update sets updateCanceled and kills the tracked step", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const cancel = mainSrc.match(/ipcMain\.handle\("cancel-app-update"[\s\S]*?\n\}\);/)[0];
+  assert.match(cancel, /updateCanceled = true/);
+  assert.match(cancel, /updateProc\.kill\(\)/);
+});
+
+test("main.js: check-app-update handler exists and derives hasUpdate from compareVersions + pickUpdateAsset", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const handler = mainSrc.match(/ipcMain\.handle\("check-app-update"[\s\S]*?\n\}\);/);
+  assert.ok(handler, "check-app-update handler not found");
+  assert.match(handler[0], /compareVersions\(latest, current\)/);
+  assert.match(handler[0], /pickUpdateAsset\(release\.assets \|\| \[\]\)/);
+});
+
+test("main.js: runUpdateInstall rolls back the swap (.old -> original name) if renaming the new bundle into place fails", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const runUpdate = mainSrc.match(/async function runUpdateInstall\(\) \{[\s\S]*?\n\}\n/)[0];
+  const renameIdx = runUpdate.indexOf("fs.renameSync(currentAppPath, oldAppPath)");
+  const catchIdx = runUpdate.indexOf("fs.renameSync(oldAppPath, currentAppPath)");
+  assert.ok(renameIdx > 0, "must move the current bundle aside before swapping in the new one");
+  assert.ok(catchIdx > renameIdx, "must roll back onto the original name if the swap-in rename throws");
+});
+
+test("main.js: runUpdateInstall relaunches and exits only after the install-closed event, never before the swap", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const runUpdate = mainSrc.match(/async function runUpdateInstall\(\) \{[\s\S]*?\n\}\n/)[0];
+  const closedIdx = runUpdate.indexOf('event: "install-closed", code: 0');
+  const relaunchIdx = runUpdate.indexOf("app.relaunch()");
+  const exitIdx = runUpdate.indexOf("app.exit(0)");
+  assert.ok(closedIdx > 0 && relaunchIdx > closedIdx && exitIdx > relaunchIdx);
+});
+
+test("main.js: a failed/cancelled update cleans up the downloaded zip and extract dir (no partial update survives)", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const runUpdate = mainSrc.match(/async function runUpdateInstall\(\) \{[\s\S]*?\n\}\n/)[0];
+  const finallyBlock = runUpdate.match(/\} finally \{[\s\S]*?\n  \}/)[0];
+  assert.match(finallyBlock, /fs\.rmSync\(zipPath,/);
+  assert.match(finallyBlock, /fs\.rmSync\(extractDir,/);
+  assert.match(finallyBlock, /updateProc = null/);
+  assert.match(finallyBlock, /updateCanceled = false/);
+});
+
+test("main.js: updateProc is killed in before-quit alongside the other tracked children", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const beforeQuit = mainSrc.match(/app\.on\("before-quit"[\s\S]*?\n\}\);/)[0];
+  assert.match(beforeQuit, /updateProc/);
+});
+
+test("main.js: cleanupUpdateLeftovers is wired into app.whenReady alongside pruneTemp", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const whenReady = mainSrc.match(/app\.whenReady\(\)\.then\(\(\) => \{[\s\S]*?\n\}\);/)[0];
+  assert.match(whenReady, /cleanupUpdateLeftovers\(\)/);
+});
+
+// ── reverse guards: an in-flight update must block recording/processing/
+// model-download/backend-install too, not just the other way around — a
+// swap that lands mid-recording skips before-quit's graceful mic-finalize
+// wait (app.exit(0) bypasses it entirely), leaving an unplayable WAV ──────
+test("main.js: start-recording refuses while an update is in flight (updateProc)", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const startRecording = mainSrc.match(/ipcMain\.handle\("start-recording"[\s\S]*?\n  const micDevice/)[0];
+  assert.match(startRecording, /if \(updateProc\) return/);
+});
+
+test("main.js: process-audio refuses while an update is in flight (updateProc)", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const processAudio = mainSrc.match(/ipcMain\.handle\("process-audio"[\s\S]*?\n\}\);/)[0];
+  assert.match(processAudio, /if \(updateProc\) return/);
+});
+
+test("main.js: download-models refuses while an update is in flight (updateProc)", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const downloadModels = mainSrc.match(/ipcMain\.handle\("download-models"[\s\S]*?\n\}\);/)[0];
+  assert.match(downloadModels, /if \(updateProc\) return/);
+});
+
+test("main.js: install-backend refuses while an update is in flight (updateProc) — wasn't mutually exclusive before", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const installBackend = mainSrc.match(/ipcMain\.handle\("install-backend"[\s\S]*?\n\}\);/)[0];
+  assert.match(installBackend, /if \(updateProc\) return/);
+});
+
+// ── pre-swap recheck: belt-and-suspenders against the reverse guards above —
+// closes the race where a conflicting op starts during the multi-minute
+// download/unpack window despite the front-door guard already having passed ──
+test("main.js: runUpdateInstall rechecks recordProc/tee/procProc/modelDlProc/installBackendProc immediately before the swap and aborts without renaming if any are active", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const runUpdate = mainSrc.match(/async function runUpdateInstall\(\) \{[\s\S]*?\n\}\n/)[0];
+  const recheckIdx = runUpdate.indexOf("if (recordProc || tee || procProc || modelDlProc || installBackendProc)");
+  const swapRenameIdx = runUpdate.indexOf("fs.renameSync(currentAppPath, oldAppPath)");
+  assert.ok(recheckIdx > 0, "pre-swap recheck condition not found");
+  assert.ok(swapRenameIdx > recheckIdx, "the recheck must happen strictly before the bundle is renamed aside");
+  assert.match(runUpdate, /deferredBusy = true/);
+  assert.match(runUpdate, /Обновление отложено: идёт запись\/обработка/);
+});
+
+test("main.js: a deferredBusy abort skips the zip/extractDir cleanup (keeps the downloaded zip, per the abort contract)", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const runUpdate = mainSrc.match(/async function runUpdateInstall\(\) \{[\s\S]*?\n\}\n/)[0];
+  const finallyBlock = runUpdate.match(/\} finally \{[\s\S]*?\n  \}/)[0];
+  assert.match(finallyBlock, /if \(!deferredBusy\) \{/);
+});
+
+// ── EXDEV: known limitation when userData and the .app live on different
+// volumes (e.g. external-drive install) — must surface an honest message,
+// not a raw ENOENT/EXDEV rename error ────────────────────────────────────
+test("main.js: runUpdateInstall detects EXDEV on the swap-in rename and reports the cross-volume limitation honestly", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const runUpdate = mainSrc.match(/async function runUpdateInstall\(\) \{[\s\S]*?\n\}\n/)[0];
+  assert.match(runUpdate, /e\.code === "EXDEV"/);
+  assert.match(runUpdate, /Обновление не поддерживается, когда приложение установлено на другом томе/);
 });

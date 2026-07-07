@@ -459,6 +459,81 @@ async function refreshSetupGate() {
 }
 window.addEventListener("focus", refreshSetupGate);
 
+// ── in-app updater (settings "Обновления" section) ──────────────────────────
+// Manual button only — no auto-check on page load/settings-open (see task
+// contract), so this section starts blank and only fills in once the user
+// clicks "Проверить обновления".
+let appUpdateRunning = false;
+let appUpdateInfo = null; // last check-app-update() result — drives the install button's visibility
+
+function renderUpdateStatusRow(text, dotClass) {
+  const row = $("updateStatusRow");
+  row.innerHTML = `<span class="pf-dot ${dotClass}"></span><span class="pf-label">Версия</span><span class="pf-detail"></span>`;
+  row.querySelector(".pf-detail").textContent = text;
+}
+
+function setUpdateInstallUI(running) {
+  appUpdateRunning = running;
+  $("updateCheckBtn").disabled = running;
+  $("updateInstallBtn").disabled = running;
+  $("updateCancelBtn").classList.toggle("hidden", !running);
+}
+
+async function checkAppUpdate() {
+  if (appUpdateRunning) return;
+  $("updateCheckBtn").disabled = true;
+  renderUpdateStatusRow("Проверяю…", "warn");
+  $("updateInstallBtn").classList.add("hidden");
+  $("updateDevHint").classList.add("hidden");
+  $("updateInstallStatus").textContent = "";
+  const res = await window.api.checkAppUpdate();
+  $("updateCheckBtn").disabled = false;
+  appUpdateInfo = res;
+  if (!res || res.ok === false) {
+    const current = (res && res.current) || "—";
+    renderUpdateStatusRow(`Текущая версия: ${current} — ошибка проверки: ${(res && res.error) || "неизвестная ошибка"}`, "bad");
+    return;
+  }
+  if (res.hasUpdate) {
+    const notesLine = res.releaseNotes ? ` — ${res.releaseNotes}` : "";
+    renderUpdateStatusRow(`Текущая версия: ${res.current}. Доступна ${res.latest}${notesLine}`, "warn");
+    $("updateInstallBtn").classList.remove("hidden");
+    $("updateInstallBtn").disabled = !res.isPackaged;
+    $("updateDevHint").classList.toggle("hidden", !!res.isPackaged);
+  } else {
+    renderUpdateStatusRow(`Текущая версия: ${res.current} — актуальная`, "ok");
+    $("updateInstallBtn").classList.add("hidden");
+  }
+}
+
+async function startAppUpdateInstall() {
+  if (appUpdateRunning || !appUpdateInfo || !appUpdateInfo.isPackaged) return;
+  setUpdateInstallUI(true);
+  $("updateInstallStatus").textContent = "";
+  const res = await window.api.downloadAndInstallUpdate();
+  if (res && res.ok === false) {
+    setUpdateInstallUI(false);
+    alert(res.error);
+  }
+  // on success the app relaunches itself — no further UI update needed here
+}
+
+$("updateCheckBtn").addEventListener("click", checkAppUpdate);
+$("updateInstallBtn").addEventListener("click", startAppUpdateInstall);
+$("updateCancelBtn").addEventListener("click", () => window.api.cancelAppUpdate());
+
+window.api.onAppUpdateEvent((ev) => {
+  if (ev.event === "stage") {
+    $("updateInstallStatus").textContent = ev.msg;
+  } else if (ev.event === "download-progress") {
+    $("updateInstallStatus").textContent = `Скачиваю: ${ev.pct}%`;
+  } else if (ev.event === "install-closed") {
+    setUpdateInstallUI(false);
+    if (ev.canceled) $("updateInstallStatus").textContent = "Отменено";
+    else if (ev.error) { $("updateInstallStatus").textContent = ""; alert(ev.error); }
+  }
+});
+
 // settings / readiness modal
 function openSettings() { $("settingsOverlay").classList.remove("hidden"); refreshPreflight(); refreshBackendStatus(); refreshModels(); }
 function closeSettings() { $("settingsOverlay").classList.add("hidden"); }
