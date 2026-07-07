@@ -26,6 +26,7 @@ import os
 import json
 import time
 import wave
+import signal
 import threading
 import argparse
 import warnings
@@ -2675,15 +2676,118 @@ def cmd_models_status():
     emit("models", items=items)
 
 
+# ── byte-level download progress ────────────────────────────────────────────
+# huggingface_hub 1.10.2's snapshot_download exposes exactly one progress hook:
+# tqdm_class. Its own docstring: "Passed argument must inherit from tqdm.auto.
+# tqdm or at least mimic its behavior" — and it's genuinely used in TWO roles
+# internally (see huggingface_hub._snapshot_download):
+#   1. The outer "Fetching N files" bar, driven via tqdm.contrib.concurrent.
+#      thread_map — needs the FULL tqdm interface (set_lock/get_lock
+#      classmethods, iterator-wrapping constructor). A minimal duck-typed stub
+#      crashes here (AttributeError: no set_lock) — confirmed against a real
+#      snapshot_download() call, not just by reading the source.
+#   2. ONE aggregate "bytes downloaded" bar that snapshot_download creates
+#      itself and forwards every per-file update()/`.total +=` into via its
+#      internal _AggregatedTqdm relay — the ONLY instance created with
+#      unit="B" (role 1 counts files, not bytes); this is the one we want
+#      progress events from.
+# torch.hub (VAD) has no equivalent hook at all — stays coarse stage/stage_end,
+# matching its small ~35MB size.
+try:
+    # tqdm is an unconditional dependency of huggingface_hub (tqdm>=4.42.1 in its
+    # own requirements), so it's guaranteed present whenever huggingface_hub is —
+    # but backend.py itself must stay importable even on the bare "python3"
+    # fallback used before the backend/ML stack is installed (see main.js), where
+    # NEITHER package exists yet. Every other huggingface_hub/torch import in this
+    # file is already deferred into the function that needs it for the same
+    # reason; this one can't be (it's a base class), so it's guarded instead.
+    from tqdm.auto import tqdm as _TqdmBase
+except ImportError:
+    _TqdmBase = object  # _ProgressTqdm is only ever instantiated from _download_model's
+    # whisper/diarization branches, which already require huggingface_hub (and
+    # therefore tqdm) to be importable to get that far — this fallback just keeps
+    # unrelated commands (preflight/devices/models/etc.) from crashing at import time.
+
+_PROGRESS_EMIT_STEP_BYTES = 2 * 1024 * 1024  # throttle: at most ~1 event / 2MB
+
+
+class _ProgressTqdm(_TqdmBase):
+    """See module note above. disable is forced True — no terminal/stderr bar
+    (backend.py's stdout is a strict one-json-per-line protocol; a live
+    \\r-updating bar spammed to a piped, non-tty stderr is just noise). A
+    disabled tqdm's own update()/__iter__ skip counting entirely (tqdm.std
+    short-circuits on `self.disable`), so the bytes-bar role counts here
+    explicitly, under a lock — _AggregatedTqdm.update() can be called from any
+    of snapshot_download's parallel file-download worker threads
+    (max_workers=8)."""
+
+    model_id = None  # set by _download_model right before each snapshot_download call
+    # NOT named `_lock` — that's a real tqdm classvar (see tqdm.std.tqdm.set_lock/
+    # get_lock), and thread_map's ensure_lock() reassigns tqdm_class._lock around
+    # the outer "Fetching N files" bar. A same-named attribute here would collide
+    # with that mechanism instead of being an independent mutex.
+    _emit_lock = threading.Lock()
+
+    def __init__(self, *args, **kwargs):
+        is_bytes_bar = kwargs.get("unit") == "B"
+        kwargs["disable"] = True
+        super().__init__(*args, **kwargs)
+        self._is_bytes_bar = is_bytes_bar
+        self._last_emit = 0
+
+    def update(self, n=1):
+        if n:
+            with _ProgressTqdm._emit_lock:
+                self.n += n
+                downloaded, total = self.n, self.total or 0
+            if self._is_bytes_bar and (downloaded - self._last_emit >= _PROGRESS_EMIT_STEP_BYTES
+                                        or (total and downloaded >= total)):
+                self._last_emit = downloaded
+                try:
+                    emit("model-progress", id=_ProgressTqdm.model_id, downloaded=downloaded, total=total)
+                except Exception:
+                    pass  # progress reporting is best-effort — must never abort the actual download
+        super().update(n)  # no-op while disabled (tqdm.std short-circuits) — kept for forward-compat
+
+
+# ── partial-download cleanup (cancel/failure) ───────────────────────────────
+def _cache_dirs_for(model_id):
+    """Cache dir(s) whose mere existence _model_cached treats as "done" for
+    this model. A canceled or failed download must remove ALL of these —
+    otherwise a partial dir survives and the next status check (or the setup
+    wall) reads the model as already cached."""
+    if model_id == "whisper":
+        return [_WHISPER_MODEL_DIR]
+    if model_id == "diarization":
+        return [_hf_cache_dir(r) for r in _PYANNOTE_REPO_IDS]
+    return []
+
+
+def _cleanup_partial_download(model_id):
+    import shutil
+    for d in _cache_dirs_for(model_id):
+        shutil.rmtree(d, ignore_errors=True)
+
+
+_DOWNLOADING_MODEL_ID = None  # model currently mid-download, for the SIGTERM handler below
+
+
+def _handle_download_sigterm(signum, frame):
+    """main.js's cancel-model-download IPC kills this process with SIGTERM
+    (main.js's cancel-model-download handler). Without a handler the process
+    just dies mid-transfer, leaving the partial cache dir in place — which
+    _model_cached would then misreport as fully cached on the next check."""
+    if _DOWNLOADING_MODEL_ID:
+        _cleanup_partial_download(_DOWNLOADING_MODEL_ID)
+    sys.exit(143)  # 128 + SIGTERM, conventional exit code for a signal-terminated process
+
+
 def _download_model(model_id):
-    """Download one model's weights. Raises on failure (caller catches).
-    No fine-grained byte progress is available from huggingface_hub 1.10.2's
-    snapshot_download (tqdm_class override only) or torch.hub (single-zip
-    fetch, no progress hook) — coarse per-model stage/stage_end only,
-    matching this codebase's existing granularity (no byte-level bar anywhere)."""
+    """Download one model's weights. Raises on failure (caller catches)."""
     if model_id == "whisper":
         from huggingface_hub import snapshot_download
-        snapshot_download(repo_id=_WHISPER_REPO_ID)
+        _ProgressTqdm.model_id = model_id
+        snapshot_download(repo_id=_WHISPER_REPO_ID, tqdm_class=_ProgressTqdm)
     elif model_id == "vad":
         import torch
         # Corrupt-dir edge case: a crash/SIGTERM mid-download can leave the repo
@@ -2700,8 +2804,12 @@ def _download_model(model_id):
         hf_token = os.environ.get("HF_TOKEN")
         if not hf_token:
             raise RuntimeError("нужен HF-токен (переменная HF_TOKEN) — диаризация не скачана")
+        # Each repo is its own snapshot_download() call → its own fresh bytes-bar
+        # (0-100% per sub-repo, not one combined bar across all three); acceptable
+        # given diarization's total size here is tiny (~31MB across all 3).
+        _ProgressTqdm.model_id = model_id
         for repo_id in _PYANNOTE_REPO_IDS:
-            snapshot_download(repo_id=repo_id, token=hf_token)
+            snapshot_download(repo_id=repo_id, token=hf_token, tqdm_class=_ProgressTqdm)
     else:
         raise ValueError(f"неизвестная модель: {model_id}")
 
@@ -2713,6 +2821,9 @@ def cmd_download_models(only=None):
     pipeline (backend.py:614-643,838-871)."""
     from huggingface_hub.errors import GatedRepoError
 
+    global _DOWNLOADING_MODEL_ID
+    signal.signal(signal.SIGTERM, _handle_download_sigterm)
+
     wanted = set(only.split(",")) if only else None
     for spec in MODEL_SPECS:
         model_id = spec["id"]
@@ -2720,6 +2831,7 @@ def cmd_download_models(only=None):
             continue
         stage_name = f"model:{model_id}"
         stage(stage_name, f"Скачиваю {spec['label']} (~{spec['size_mb']} МБ)…")
+        _DOWNLOADING_MODEL_ID = model_id
         try:
             if _model_cached(model_id):
                 stage_end(stage_name, "skip", "уже скачано")
@@ -2727,11 +2839,15 @@ def cmd_download_models(only=None):
             _download_model(model_id)
             stage_end(stage_name, "ok", "Скачано")
         except GatedRepoError as e:
+            _cleanup_partial_download(model_id)
             stage_end(stage_name, "fail",
                       f"Токен есть, но доступ к репозиторию не выдан — прими условия на huggingface.co ({e})")
         except Exception as e:
+            _cleanup_partial_download(model_id)
             stage_end(stage_name, "fail", str(e))
             # continue to the next model — one failure must not abort the batch
+        finally:
+            _DOWNLOADING_MODEL_ID = None
 
 
 def str2bool(v):

@@ -11,6 +11,7 @@ const {
   resolveOutDirOnVaultChange, trayMenuTemplate,
   resolvePythonBin, resolveFfmpegBin, resolveResourcePath, backendInstallStatus,
   hfCacheDir, whisperModelDir, vadJitPath, diarizationModelDirs, appReadinessStatus,
+  modelCacheDirsFor, cleanupPartialModelCache,
 } = require("../lib/mainutil");
 
 // ── WAV header ──────────────────────────────────────────────────────────────
@@ -457,4 +458,88 @@ test("appReadinessStatus: both backend and models ready", () => {
 test("appReadinessStatus: models is false unless BOTH whisper and vad are cached (partial doesn't count)", () => {
   assert.deepEqual(appReadinessStatus(true, true, false), { backend: true, whisper: true, vad: false, models: false });
   assert.deepEqual(appReadinessStatus(true, false, true), { backend: true, whisper: false, vad: true, models: false });
+});
+
+// ── modelCacheDirsFor / cleanupPartialModelCache (parent-side partial-download
+// cleanup — the authoritative counterpart to backend.py's own best-effort
+// _cleanup_partial_download; see main.js's download-models close handler for why
+// this side, not the child's SIGTERM handler, is the actual race-free guarantee) ──
+test("modelCacheDirsFor: whisper resolves to whisperModelDir", () => {
+  assert.deepEqual(modelCacheDirsFor("/Users/x", "whisper"), [whisperModelDir("/Users/x")]);
+});
+test("modelCacheDirsFor: vad resolves to the repo dir (4 levels up from the .jit file), not the .jit file itself", () => {
+  assert.deepEqual(
+    modelCacheDirsFor("/Users/x", "vad"),
+    [path.join("/Users/x", ".cache/torch/hub/snakers4_silero-vad_master")]
+  );
+});
+test("modelCacheDirsFor: diarization resolves to all 3 pyannote sub-repo dirs", () => {
+  assert.deepEqual(modelCacheDirsFor("/Users/x", "diarization"), diarizationModelDirs("/Users/x"));
+});
+test("modelCacheDirsFor: unknown model id resolves to nothing (no accidental wipe)", () => {
+  assert.deepEqual(modelCacheDirsFor("/Users/x", "not-a-model"), []);
+});
+
+function tmpHomedir(name) {
+  const dir = path.join(os.tmpdir(), `mainutil-cleanup-test-${process.pid}-${name}`);
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+test("cleanupPartialModelCache: removes a partial whisper dir", () => {
+  const home = tmpHomedir("whisper");
+  const dir = whisperModelDir(home);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "partial.bin"), "junk");
+  cleanupPartialModelCache(home, "whisper");
+  assert.equal(fs.existsSync(dir), false);
+  fs.rmSync(home, { recursive: true, force: true });
+});
+
+// Direct check of the critical bug this whole mechanism exists to prevent: after
+// a canceled/failed whisper download, the exact predicate main.js's whisperCached()
+// (and backend.py's _model_cached) use to decide "is this ready" must read false —
+// otherwise the setup wall would falsely dismiss on a broken model.
+test("cleanupPartialModelCache: whisperCached()'s own predicate (fs.existsSync(whisperModelDir)) reads false after cleanup", () => {
+  const home = tmpHomedir("whisper-readiness");
+  const dir = whisperModelDir(home);
+  fs.mkdirSync(dir, { recursive: true });
+  assert.equal(fs.existsSync(dir), true, "sanity: partial dir exists before cleanup");
+  cleanupPartialModelCache(home, "whisper");
+  assert.equal(fs.existsSync(whisperModelDir(home)), false, "readiness must read false — the wall must stay up");
+  fs.rmSync(home, { recursive: true, force: true });
+});
+
+test("cleanupPartialModelCache: removes the whole vad repo dir, not just the .jit file", () => {
+  const home = tmpHomedir("vad");
+  const jit = vadJitPath(home);
+  fs.mkdirSync(path.dirname(jit), { recursive: true });
+  fs.writeFileSync(jit, "junk");
+  cleanupPartialModelCache(home, "vad");
+  assert.equal(fs.existsSync(path.join(home, ".cache/torch/hub/snakers4_silero-vad_master")), false);
+  fs.rmSync(home, { recursive: true, force: true });
+});
+
+test("cleanupPartialModelCache: removes all 3 pyannote sub-repo dirs for diarization, even ones that finished", () => {
+  // A cancel/failure partway through the 3-repo diarization batch must not leave
+  // a mixed state that _model_cached's all() check could misreport — wiping ALL
+  // three (not just the interrupted one) guarantees "diarization" reads uncached.
+  const home = tmpHomedir("diarization");
+  for (const dir of diarizationModelDirs(home)) fs.mkdirSync(dir, { recursive: true });
+  cleanupPartialModelCache(home, "diarization");
+  for (const dir of diarizationModelDirs(home)) assert.equal(fs.existsSync(dir), false);
+  fs.rmSync(home, { recursive: true, force: true });
+});
+
+test("cleanupPartialModelCache: a missing/already-clean dir is a silent no-op (no throw)", () => {
+  const home = tmpHomedir("nothing-there");
+  assert.doesNotThrow(() => cleanupPartialModelCache(home, "whisper"));
+  fs.rmSync(home, { recursive: true, force: true });
+});
+
+test("cleanupPartialModelCache: an unknown model id touches nothing and does not throw", () => {
+  const home = tmpHomedir("unknown-model");
+  assert.doesNotThrow(() => cleanupPartialModelCache(home, "not-a-model"));
+  fs.rmSync(home, { recursive: true, force: true });
 });

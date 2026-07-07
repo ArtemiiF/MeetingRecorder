@@ -2,7 +2,9 @@
 import io
 import json
 import os
+import signal
 import sys
+import threading
 import types
 from pathlib import Path
 
@@ -558,7 +560,7 @@ def install_fake_hf_hub(monkeypatch, *, raise_for=None, raise_exc=None):
     raise_set = {raise_for} if isinstance(raise_for, str) else set(raise_for or [])
 
     def snapshot_download(repo_id, token=None, **kwargs):
-        calls["snapshot"].append({"repo_id": repo_id, "token": token})
+        calls["snapshot"].append({"repo_id": repo_id, "token": token, "tqdm_class": kwargs.get("tqdm_class")})
         if repo_id in raise_set:
             raise raise_exc or FakeGatedRepoError(f"gated: {repo_id}")
         return f"/fake/cache/{repo_id}"
@@ -692,6 +694,218 @@ def test_cmd_download_models_vad_corrupt_partial_dir_is_wiped_before_retry(monke
     assert ends["model:vad"]["status"] == "ok"
     assert not vad_repo.exists(), "corrupt partial dir should have been wiped before re-fetching"
     assert torch_calls["load"]
+
+
+# ── model download: byte progress (_ProgressTqdm / tqdm_class) ─────────────
+def test_download_model_wires_progress_tqdm_class_into_snapshot_download(monkeypatch, tmp_path):
+    # huggingface_hub 1.10.2's ONLY progress hook is tqdm_class — verify _download_model
+    # actually threads it through for whisper AND every pyannote sub-repo (not just the
+    # first), since that's the only way byte-level progress ever fires for real downloads.
+    _set_model_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("HF_TOKEN", "hf_faketoken")
+    hf_calls, _ = install_fake_hf_hub(monkeypatch)
+    install_fake_torch_hub(monkeypatch)
+
+    capture(backend.cmd_download_models)
+    by_repo = {c["repo_id"]: c["tqdm_class"] for c in hf_calls["snapshot"]}
+    assert by_repo[backend._WHISPER_REPO_ID] is backend._ProgressTqdm
+    for repo_id in backend._PYANNOTE_REPO_IDS:
+        assert by_repo[repo_id] is backend._ProgressTqdm
+
+
+def test_progress_tqdm_supports_the_full_tqdm_interface_thread_map_needs(monkeypatch):
+    # snapshot_download's own docstring: a custom tqdm_class "must inherit from
+    # tqdm.auto.tqdm or at least mimic its behavior" — it's ALSO used (unmodified)
+    # as tqdm.contrib.concurrent.thread_map's outer "Fetching N files" bar, which
+    # calls tqdm_class.set_lock()/get_lock() directly on the class. This project's
+    # first attempt was a minimal duck-typed stub, NOT a real tqdm subclass — it
+    # crashed with AttributeError: no set_lock against a real snapshot_download()
+    # call. This is a regression guard for that exact failure mode.
+    import tqdm.auto
+    assert issubclass(backend._ProgressTqdm, tqdm.auto.tqdm)
+    assert hasattr(backend._ProgressTqdm, "set_lock")
+    assert hasattr(backend._ProgressTqdm, "get_lock")
+
+
+def test_progress_tqdm_emit_lock_is_named_independently_of_tqdms_own_lock_classvar(monkeypatch):
+    # Naming the emit mutex `_lock` would collide with tqdm's own `_lock` classvar
+    # (set/read via set_lock()/get_lock()) — thread_map's ensure_lock() reassigns
+    # tqdm_class._lock around the outer "Fetching N files" bar (see the previous
+    # test), which would silently repurpose our emit-mutex as tqdm's write-lock
+    # instead of an independent one. Regression guard for that naming collision.
+    assert hasattr(backend._ProgressTqdm, "_emit_lock")
+    assert isinstance(backend._ProgressTqdm._emit_lock, type(threading.Lock()))
+
+
+def test_progress_tqdm_emits_model_progress_on_completion(monkeypatch):
+    # Only the aggregate "bytes downloaded" bar (unit="B") should ever emit — that's
+    # the one huggingface_hub._snapshot_download creates and relays every per-file
+    # update()/`.total +=` into (see the module-level docstring in backend.py).
+    backend._ProgressTqdm.model_id = "whisper"
+    bar = backend._ProgressTqdm(total=1000, unit="B")
+    events = capture(bar.update, 1000)
+    assert events == [{"event": "model-progress", "id": "whisper", "downloaded": 1000, "total": 1000}]
+
+
+def test_progress_tqdm_non_bytes_bar_never_emits(monkeypatch):
+    # Mimics snapshot_download's OUTER "Fetching N files" bar (driven by thread_map) —
+    # it doesn't pass unit="B" and counts files, not bytes; it must never emit.
+    backend._ProgressTqdm.model_id = "whisper"
+    bar = backend._ProgressTqdm(total=3)  # no unit="B", like the outer files bar
+    events = capture(bar.update, 3)
+    assert events == []
+
+
+def test_progress_tqdm_throttles_updates_below_the_emit_step(monkeypatch):
+    backend._ProgressTqdm.model_id = "whisper"
+    bar = backend._ProgressTqdm(total=100 * 1024 * 1024, unit="B")  # 100MB — nowhere near done
+    events = capture(bar.update, 500)  # well under the 2MB throttle step
+    assert events == [], "a sub-threshold update must not flood stdout with an event"
+
+
+def test_progress_tqdm_emits_once_the_throttle_step_is_crossed(monkeypatch):
+    backend._ProgressTqdm.model_id = "whisper"
+    bar = backend._ProgressTqdm(total=100 * 1024 * 1024, unit="B")
+    events = capture(bar.update, backend._PROGRESS_EMIT_STEP_BYTES)
+    assert len(events) == 1
+    assert events[0]["downloaded"] == backend._PROGRESS_EMIT_STEP_BYTES
+
+
+def test_progress_tqdm_total_can_grow_after_construction_like_hf_hub_does(monkeypatch):
+    # huggingface_hub's internal _AggregatedTqdm relay adds each file's size into the
+    # shared bytes-bar's .total directly (`bytes_progress.total += total`) as each
+    # file's OWN download starts — not all upfront. update() must read .total live
+    # at call time, not a value captured once at construction.
+    backend._ProgressTqdm.model_id = "whisper"
+    bar = backend._ProgressTqdm(total=1000, unit="B")
+    bar.total += 2000  # a second file just started, adding to the running total
+    events = capture(bar.update, 3000)  # both files' bytes now fully accounted for
+    assert events == [{"event": "model-progress", "id": "whisper", "downloaded": 3000, "total": 3000}]
+
+
+def test_progress_tqdm_update_swallows_emit_failures(monkeypatch):
+    # A transient emit() failure (e.g. BrokenPipeError if stdout got closed) fires
+    # inside one of snapshot_download's worker threads — it must never propagate
+    # out of update() and abort the actual file download. Progress reporting is
+    # best-effort only; byte counting itself must still happen regardless.
+    backend._ProgressTqdm.model_id = "whisper"
+
+    def raise_broken_pipe(*args, **kwargs):
+        raise BrokenPipeError("pipe gone")
+
+    monkeypatch.setattr(backend, "emit", raise_broken_pipe)
+    bar = backend._ProgressTqdm(total=10, unit="B")
+    bar.update(10)  # must not raise despite emit() blowing up
+    assert bar.n == 10, "byte counting must still happen even when emit() fails"
+
+
+def test_progress_tqdm_context_manager_protocol_is_a_no_op(monkeypatch):
+    # http_get/_AggregatedTqdm use `with progress_cm as progress:` — must not raise.
+    backend._ProgressTqdm.model_id = "whisper"
+    with backend._ProgressTqdm(total=10, unit="B") as bar:
+        bar.update(10)
+
+
+# ── model download: partial-cache cleanup on cancel/failure ────────────────
+def test_download_model_whisper_partial_dir_cleaned_up_on_failure(monkeypatch, tmp_path):
+    # A real snapshot_download creates its target dir before it can fail mid-transfer —
+    # that partial dir is exactly what makes _model_cached("whisper") lie on the NEXT
+    # run (backend.py's cache check is dir-exists-only). Simulate that by having the
+    # fake snapshot_download create the dir as a side effect, then raise.
+    whisper_dir, *_ = _set_model_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("HF_TOKEN", "hf_faketoken")
+
+    def snapshot_download(repo_id, token=None, **kwargs):
+        if repo_id == backend._WHISPER_REPO_ID:
+            whisper_dir.mkdir(parents=True, exist_ok=True)
+            raise ConnectionError("dropped mid-download")
+        return f"/fake/cache/{repo_id}"
+
+    fake = types.ModuleType("huggingface_hub")
+    fake.snapshot_download = snapshot_download
+    fake_errors = types.ModuleType("huggingface_hub.errors")
+    class FakeGatedRepoError(Exception):
+        pass
+    fake_errors.GatedRepoError = FakeGatedRepoError
+    fake.errors = fake_errors
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake)
+    monkeypatch.setitem(sys.modules, "huggingface_hub.errors", fake_errors)
+    install_fake_torch_hub(monkeypatch)
+
+    events = capture(backend.cmd_download_models, only="whisper")
+    ends = {e["stage"]: e for e in events if e["event"] == "stage_end"}
+    assert ends["model:whisper"]["status"] == "fail"
+    assert not whisper_dir.exists(), "partial whisper dir must be removed so it doesn't read as cached"
+    assert backend._model_cached("whisper") is False
+
+
+def test_download_model_diarization_partial_dirs_cleaned_up_on_failure(monkeypatch, tmp_path):
+    _set_model_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("HF_TOKEN", "hf_faketoken")
+    first_repo, second_repo = backend._PYANNOTE_REPO_IDS[0], backend._PYANNOTE_REPO_IDS[1]
+
+    def snapshot_download(repo_id, token=None, **kwargs):
+        backend._hf_cache_dir(repo_id).mkdir(parents=True, exist_ok=True)
+        if repo_id == second_repo:
+            raise ConnectionError("dropped mid-download")
+        return f"/fake/cache/{repo_id}"
+
+    fake = types.ModuleType("huggingface_hub")
+    fake.snapshot_download = snapshot_download
+    fake_errors = types.ModuleType("huggingface_hub.errors")
+    class FakeGatedRepoError(Exception):
+        pass
+    fake_errors.GatedRepoError = FakeGatedRepoError
+    fake.errors = fake_errors
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake)
+    monkeypatch.setitem(sys.modules, "huggingface_hub.errors", fake_errors)
+    install_fake_torch_hub(monkeypatch)
+
+    events = capture(backend.cmd_download_models, only="diarization")
+    ends = {e["stage"]: e for e in events if e["event"] == "stage_end"}
+    assert ends["model:diarization"]["status"] == "fail"
+    # even the repo that finished (first_repo) must be wiped — a partial diarization
+    # batch must not read as cached from ANY of its 3 sub-repos.
+    assert not backend._hf_cache_dir(first_repo).exists()
+    assert not backend._hf_cache_dir(second_repo).exists()
+    assert backend._model_cached("diarization") is False
+
+
+def test_downloading_model_id_reset_after_batch_completes(monkeypatch, tmp_path):
+    _set_model_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("HF_TOKEN", "hf_faketoken")
+    install_fake_hf_hub(monkeypatch)
+    install_fake_torch_hub(monkeypatch)
+    capture(backend.cmd_download_models)
+    assert backend._DOWNLOADING_MODEL_ID is None
+
+
+# ── model download: SIGTERM cancel path (main.js's cancel-model-download kill) ──
+def test_sigterm_during_download_cleans_up_partial_whisper_dir(monkeypatch, tmp_path):
+    # Simulates main.js's cancel path: SIGTERM to the child process mid-download.
+    # Without this handler the process just dies with the partial dir intact.
+    whisper_dir, *_ = _set_model_paths(monkeypatch, tmp_path)
+    whisper_dir.mkdir(parents=True, exist_ok=True)  # partial download in flight
+    monkeypatch.setattr(backend, "_DOWNLOADING_MODEL_ID", "whisper")
+    with pytest.raises(SystemExit):
+        backend._handle_download_sigterm(signal.SIGTERM, None)
+    assert not whisper_dir.exists()
+    assert backend._model_cached("whisper") is False
+
+
+def test_sigterm_during_download_cleans_up_partial_diarization_dirs(monkeypatch, tmp_path):
+    _set_model_paths(monkeypatch, tmp_path, pyannote_ids=backend._PYANNOTE_REPO_IDS)
+    monkeypatch.setattr(backend, "_DOWNLOADING_MODEL_ID", "diarization")
+    with pytest.raises(SystemExit):
+        backend._handle_download_sigterm(signal.SIGTERM, None)
+    assert not any(backend._hf_cache_dir(r).exists() for r in backend._PYANNOTE_REPO_IDS)
+
+
+def test_sigterm_with_no_download_in_flight_is_a_no_op(monkeypatch):
+    # e.g. a stray/duplicate signal after the batch already finished — must not crash.
+    monkeypatch.setattr(backend, "_DOWNLOADING_MODEL_ID", None)
+    with pytest.raises(SystemExit):
+        backend._handle_download_sigterm(signal.SIGTERM, None)
 
 
 def test_set_title_injects_into_frontmatter(pipe):

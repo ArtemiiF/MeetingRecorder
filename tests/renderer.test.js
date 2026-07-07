@@ -1962,6 +1962,55 @@ test("main.js: open-privacy-settings deep-links to the microphone and screen-cap
   assert.match(handler, /shell\.openExternal\(url\)/);
 });
 
+// ── keychain double-prompt fix (loadToken/isEncryptionAvailable caching) ────
+// main.js requires("electron") and can't be loaded headless (same reason as the
+// other "main.js: ..." source-text checks above) — safeStorage itself can't be
+// exercised without a real keychain either, so these assert on the guard/cache
+// structure directly rather than behavior through a mock.
+test("main.js: loadToken() short-circuits before touching safeStorage when SECRET_FILE is absent", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const loadToken = mainSrc.match(/function loadToken\(\)[\s\S]*?\n\}/)[0];
+  const guardIdx = loadToken.indexOf("if (!fs.existsSync(SECRET_FILE))");
+  const safeStorageIdx = loadToken.indexOf("safeStorage.");  // "." excludes the mention in the guard's own comment
+  assert.ok(guardIdx >= 0, "loadToken must guard on fs.existsSync(SECRET_FILE)");
+  assert.ok(safeStorageIdx > guardIdx, "the existsSync guard must precede any safeStorage access");
+});
+
+test("main.js: loadToken()/isEncryptionAvailable() are cached module-level so each launch touches the keychain at most once", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  assert.match(mainSrc, /let _tokenCache = null/);
+  assert.match(mainSrc, /let _encAvailableCache = null/);
+  const loadToken = mainSrc.match(/function loadToken\(\)[\s\S]*?\n\}/)[0];
+  assert.match(loadToken, /if \(_tokenCache !== null\) return _tokenCache;/);
+  const encAvail = mainSrc.match(/function encryptionAvailable\(\)[\s\S]*?\n\}/)[0];
+  assert.match(encAvail, /if \(_encAvailableCache === null\) _encAvailableCache = safeStorage\.isEncryptionAvailable\(\);/);
+});
+
+test("main.js: saveToken() invalidates the token cache so a changed/cleared secret is re-read next time", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const saveToken = mainSrc.match(/function saveToken\(token\)[\s\S]*?\n\}/)[0];
+  assert.match(saveToken, /_tokenCache = null/);
+});
+
+test("main.js: every safeStorage.* call site is funneled through encryptionAvailable()/saveToken()/loadToken() — no stray direct calls", () => {
+  // A regression guard: a new direct safeStorage call added elsewhere (e.g. in a
+  // future handler) would reintroduce the double keychain-prompt bug this fixes.
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const callSites = mainSrc.match(/safeStorage\.\w+\(/g) || [];
+  assert.equal(callSites.length, 3, `expected exactly 3 safeStorage.* call sites (inside encryptionAvailable/saveToken/loadToken), found ${callSites.length}`);
+});
+
+test("main.js: preflight and get-presets read the token/encryption-availability via the cached helpers, not raw safeStorage", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const preflight = mainSrc.match(/ipcMain\.handle\("preflight"[\s\S]*?\n\}\);/)[0];
+  assert.match(preflight, /loadToken\(\)/);
+  assert.ok(!/safeStorage\./.test(preflight), "preflight must not call safeStorage directly");
+  const loadPresetsData = mainSrc.match(/function loadPresetsData\(\)[\s\S]*?\n\}/)[0];
+  assert.match(loadPresetsData, /loadToken\(\)/);
+  assert.match(loadPresetsData, /encryptionAvailable\(\)/);
+  assert.ok(!/safeStorage\./.test(loadPresetsData), "loadPresetsData must not call safeStorage directly");
+});
+
 // ── settings "Модели" section (model inventory + pre-download) ─────────────
 test("Модели: renders one pf-row per model with cached/needed/locked status + detail text", async () => {
   const { window, $ } = await boot();
@@ -2086,6 +2135,87 @@ test("Модели: stage/stage_end events update the row's dot + detail live", 
   assert.match($("model-row-vad").querySelector(".pf-detail").textContent, /Скачано/);
 });
 
+// ── byte-level "model-progress" events (whisper is 1.5GB — needs a live indicator) ──
+test("Модели: model-progress event shows percent + MB in the row detail", async () => {
+  const { window, $, handlers } = await boot();
+  $("settingsOpen").click();
+  await tick(window);
+  handlers.modelDownload({ event: "model-progress", id: "vad", downloaded: 10 * 1024 * 1024, total: 35 * 1024 * 1024 });
+  const detail = $("model-row-vad").querySelector(".pf-detail").textContent;
+  assert.match(detail, /29%/);
+  assert.match(detail, /10 \/ 35 МБ/);
+});
+
+test("Модели: model-progress with total 0 falls back to a live byte count instead of dividing by zero", async () => {
+  const { window, $, handlers } = await boot();
+  $("settingsOpen").click();
+  await tick(window);
+  handlers.modelDownload({ event: "model-progress", id: "vad", downloaded: 500 * 1024, total: 0 });
+  const detail = $("model-row-vad").querySelector(".pf-detail").textContent;
+  assert.doesNotMatch(detail, /%/);
+  assert.match(detail, /скачивается/);
+});
+
+test("Модели: model-progress for whisper/vad also updates the setup gate's combined row", async () => {
+  const { window, $, handlers } = await boot({
+    appReadiness: async () => ({ backend: true, whisper: false, vad: false, models: false }),
+  });
+  await tick(window);
+  handlers.modelDownload({ event: "model-progress", id: "whisper", downloaded: 750 * 1024 * 1024, total: 1500 * 1024 * 1024 });
+  assert.match($("gateModelsStatusRow").querySelector(".pf-detail").textContent, /50%/);
+});
+
+test("Модели: model-progress for diarization does not touch the gate row (not part of the wall)", async () => {
+  const { window, $, handlers } = await boot({
+    appReadiness: async () => ({ backend: true, whisper: false, vad: false, models: false }),
+  });
+  await tick(window);
+  const before = $("gateModelsStatusRow").querySelector(".pf-detail").textContent;
+  handlers.modelDownload({ event: "model-progress", id: "diarization", downloaded: 1024, total: 31 * 1024 * 1024 });
+  assert.equal($("gateModelsStatusRow").querySelector(".pf-detail").textContent, before);
+});
+
+// ── cancel button (settings "Модели" + setup-gate step 2) ──────────────────
+test("Модели: cancel button is hidden by default, shows during a download, and calls cancelModelDownload", async () => {
+  let canceled = false;
+  const { window, $, handlers } = await boot({
+    downloadModels: async () => new Promise(() => {}), // never resolves — simulates an in-flight download
+    cancelModelDownload: async () => { canceled = true; return { ok: true }; },
+  });
+  $("settingsOpen").click();
+  await tick(window);
+  assert.ok($("modelsCancelBtn").classList.contains("hidden"), "no download running yet");
+
+  $("modelsDownloadMissing").click();
+  await tick(window);
+  assert.ok(!$("modelsCancelBtn").classList.contains("hidden"), "download running — cancel must be offered");
+
+  $("modelsCancelBtn").click();
+  await tick(window);
+  assert.ok(canceled, "cancel button must call window.api.cancelModelDownload()");
+
+  handlers.modelDownload({ event: "download-closed", code: 0, canceled: true });
+  await tick(window);
+  assert.ok($("modelsCancelBtn").classList.contains("hidden"), "must hide again once the download ends");
+});
+
+test("setup gate: step 2 cancel button shows during a download and calls cancelModelDownload", async () => {
+  let canceled = false;
+  const { window, $ } = await boot({
+    appReadiness: async () => ({ backend: true, whisper: false, vad: false, models: false }),
+    downloadModels: async () => new Promise(() => {}),
+    cancelModelDownload: async () => { canceled = true; return { ok: true }; },
+  });
+  await tick(window);
+  assert.ok($("gateModelsCancelBtn").classList.contains("hidden"));
+  $("gateModelsDownloadBtn").click();
+  await tick(window);
+  assert.ok(!$("gateModelsCancelBtn").classList.contains("hidden"));
+  $("gateModelsCancelBtn").click();
+  await tick(window);
+  assert.ok(canceled);
+});
+
 test("Модели: failed download-models call surfaces the error and re-enables buttons", async () => {
   const { window, $ } = await boot({
     downloadModels: async () => ({ ok: false, error: "Мало места на диске" }),
@@ -2114,6 +2244,44 @@ test("main.js: cancel-model-download kills modelDlProc via the same SIGTERM patt
   assert.ok(cancelModelDl, "cancel-model-download handler not found");
   assert.match(cancelProcess[0], /procProc\.kill\("SIGTERM"\)/);
   assert.match(cancelModelDl[0], /modelDlProc\.kill\("SIGTERM"\)/);
+});
+
+// A cancel/failure now wipes the interrupted model's partial cache dir (see the
+// parent-side cleanup tests below) — a resumable-blob-cache claim here would be
+// actively wrong: there's nothing left on disk for HF hub to resume from.
+test("main.js: cancel-model-download's comment no longer claims a re-click resumes where it left off, and states the real wipe+refetch behavior", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const cancelModelDl = mainSrc.match(/\/\/[^\n]*\n(\/\/[^\n]*\n)*ipcMain\.handle\("cancel-model-download"/)[0];
+  assert.doesNotMatch(cancelModelDl, /picks up where (this|it) left off/, "cleanup now wipes the partial dir — nothing is left to resume");
+  assert.match(cancelModelDl, /from scratch/, "the comment must state the corrected (wipe+refetch) behavior");
+});
+
+// ── main.js: parent-side partial-download cleanup (race-free counterpart to
+// backend.py's own best-effort SIGTERM handler — see lib/mainutil's
+// cleanupPartialModelCache tests for the actual fs-level behavior) ──────────
+test("main.js: download-models tracks the in-flight model via stage/stage_end before forwarding each event", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const handler = mainSrc.match(/ipcMain\.handle\("download-models"[\s\S]*?\n\}\);/)[0];
+  assert.match(handler, /let inFlightModelId = null/);
+  assert.match(handler, /if \(ev\.event === "stage"\) inFlightModelId = /);
+  assert.match(handler, /else if \(ev\.event === "stage_end"\) inFlightModelId = null/);
+});
+
+test("main.js: download-models' close handler cleans up ONLY when canceled or non-zero exit, and ONLY the in-flight model", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const handler = mainSrc.match(/ipcMain\.handle\("download-models"[\s\S]*?\n\}\);/)[0];
+  assert.match(handler, /if \(\(canceled \|\| code !== 0\) && inFlightModelId\) cleanupPartialModelCache\(os\.homedir\(\), inFlightModelId\)/);
+  // must run BEFORE the child's stdout/stderr are discarded (send() + modelDlProc = null),
+  // i.e. still inside the same close callback, after the child has already exited.
+  const cleanupIdx = handler.indexOf("cleanupPartialModelCache(");
+  const nullOutIdx = handler.indexOf("modelDlProc = null");
+  assert.ok(cleanupIdx >= 0 && nullOutIdx > cleanupIdx);
+});
+
+test("main.js: cleanupPartialModelCache is imported from lib/mainutil (single-sourced paths, not a local re-implementation)", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const req = mainSrc.match(/const \{[\s\S]*?\} = require\("\.\/lib\/mainutil"\);/)[0];
+  assert.match(req, /cleanupPartialModelCache/);
 });
 
 test("main.js: download-models and process-audio refuse to run while the other is active", () => {

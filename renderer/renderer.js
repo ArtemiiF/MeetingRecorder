@@ -282,6 +282,17 @@ function modelRowDetail(item) {
   return `нужно скачать (~${item.size_mb} МБ)`;
 }
 
+// Byte-level "model-progress" events (backend.py's _ProgressTqdm, whisper/pyannote
+// only — VAD has no progress hook and stays on the coarse "⏳ скачивается…" text).
+// total can be 0 momentarily right as a download starts (huggingface_hub hasn't
+// reported a file size yet) — fall back to a live byte count rather than divide by zero.
+function formatModelProgress(downloaded, total) {
+  const mb = (n) => (n / (1024 * 1024)).toFixed(0);
+  if (!total) return `⏳ скачивается… (${mb(downloaded)} МБ)`;
+  const pct = Math.min(100, Math.round((downloaded / total) * 100));
+  return `⏳ ${pct}% (${mb(downloaded)} / ${mb(total)} МБ)`;
+}
+
 function renderModelsList(items) {
   const wrap = $("modelsList");
   wrap.innerHTML = "";
@@ -332,10 +343,12 @@ function setModelsDownloadUI(running) {
   modelDlRunning = running;
   $("modelsRefresh").disabled = running;
   $("modelsDownloadMissing").disabled = running;
+  $("modelsCancelBtn").classList.toggle("hidden", !running);
   document.querySelectorAll("#modelsList .pf-retry").forEach((b) => { b.disabled = running; });
   // Gate's own download button — re-render restores its backend-first disabled
   // state afterwards (see renderSetupGate), this just covers the running state.
   $("gateModelsDownloadBtn").disabled = running;
+  $("gateModelsCancelBtn").classList.toggle("hidden", !running);
 }
 
 // only: array of model ids to (re)try, or omitted = whatever's missing and eligible.
@@ -350,10 +363,12 @@ async function startModelDownload(only) {
 }
 $("modelsRefresh").addEventListener("click", refreshModels);
 $("modelsDownloadMissing").addEventListener("click", () => startModelDownload());
+$("modelsCancelBtn").addEventListener("click", () => window.api.cancelModelDownload());
 // Gate's step 2 only ever wants the two REQUIRED models — never the full
 // "missing" batch (which would also pull pyannote if a token happens to be
 // set), reusing the same startModelDownload(only) as the per-row retry buttons.
 $("gateModelsDownloadBtn").addEventListener("click", () => startModelDownload(["whisper", "vad"]));
+$("gateModelsCancelBtn").addEventListener("click", () => window.api.cancelModelDownload());
 
 // Per-row live status while a download batch runs — ev.stage is "model:<id>"
 // (backend.py's stage/stage_end vocabulary, same as the pipeline's own stages).
@@ -378,6 +393,17 @@ window.api.onModelDownloadEvent((ev) => {
       row.querySelector(".pf-detail").textContent = icon + (ev.msg || "");
     }
     if (gateDetail) gateDetail.textContent = icon + (ev.msg || "");
+  } else if (ev.event === "model-progress") {
+    const row = $("model-row-" + ev.id);
+    const text = formatModelProgress(ev.downloaded, ev.total);
+    if (row) row.querySelector(".pf-detail").textContent = text;
+    // gateModelsStatusRow's .pf-detail only exists once renderSetupGate() has run at
+    // least once (it's built dynamically, see refreshSetupGate) — e.g. a re-download
+    // triggered from settings after the wall was already dismissed never renders it.
+    if (ev.id === "whisper" || ev.id === "vad") {
+      const gateProgressDetail = $("gateModelsStatusRow").querySelector(".pf-detail");
+      if (gateProgressDetail) gateProgressDetail.textContent = text;
+    }
   } else if (ev.event === "download-closed") {
     setModelsDownloadUI(false);
     refreshModels(); // re-check real cache state — converges cached/needed/locked either way

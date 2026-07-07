@@ -16,6 +16,7 @@ const {
   resolveOutDirOnVaultChange, trayMenuTemplate,
   resolvePythonBin, resolveFfmpegBin, resolveResourcePath, backendInstallStatus,
   whisperModelDir, vadJitPath, diarizationModelDirs, appReadinessStatus,
+  cleanupPartialModelCache,
 } = require("./lib/mainutil");
 
 // audiotee is ESM-only — load it lazily via dynamic import() from this CommonJS module.
@@ -442,20 +443,42 @@ function savePendingManifest(recordings) {
 
 // HF token is a secret → kept out of presets.json, encrypted via OS keychain (safeStorage).
 const SECRET_FILE = path.join(WRITABLE_DIR, ".secret");
+
+// Every safeStorage call (decryptString/encryptString/isEncryptionAvailable) can trigger
+// a macOS keychain-access prompt on some code-signing states. Startup alone calls
+// loadToken()/isEncryptionAvailable() from BOTH the "preflight" handler and get-presets'
+// loadPresetsData() — without caching, that's two independent keychain touches for the
+// same launch → two prompts. Cache both for the life of the process; saveToken()
+// invalidates the token cache since it's the only thing that can change it mid-run.
+let _tokenCache = null;        // null = not loaded yet; "" is a valid (no-token) cached value
+let _encAvailableCache = null;
+
+function encryptionAvailable() {
+  if (_encAvailableCache === null) _encAvailableCache = safeStorage.isEncryptionAvailable();
+  return _encAvailableCache;
+}
+
 function saveToken(token) {
   try {
-    if (!token) { try { fs.unlinkSync(SECRET_FILE); } catch {} return; }
-    const blob = encodeTokenBlob(token, safeStorage.isEncryptionAvailable(),
+    if (!token) { try { fs.unlinkSync(SECRET_FILE); } catch {} _tokenCache = null; return; }
+    const blob = encodeTokenBlob(token, encryptionAvailable(),
       (t) => safeStorage.encryptString(t));
     fs.writeFileSync(SECRET_FILE, blob, "utf-8");
+    _tokenCache = null;
   } catch {}
 }
 function loadToken() {
+  if (_tokenCache !== null) return _tokenCache;
+  // No secret on disk → never touch safeStorage at all (avoids a keychain prompt on a
+  // fresh machine / after a reset, where there's nothing to decrypt in the first place).
+  if (!fs.existsSync(SECRET_FILE)) { _tokenCache = ""; return _tokenCache; }
   try {
-    return decodeTokenBlob(fs.readFileSync(SECRET_FILE, "utf-8"),
+    _tokenCache = decodeTokenBlob(fs.readFileSync(SECRET_FILE, "utf-8"),
       (b) => safeStorage.decryptString(b));
-  } catch {}
-  return "";
+  } catch {
+    _tokenCache = "";
+  }
+  return _tokenCache;
 }
 
 // Shared by get-presets and reset-app: read presets.json (or fall back to the
@@ -469,7 +492,7 @@ function loadPresetsData() {
     try {
       data = JSON.parse(fs.readFileSync(PRESETS_EXAMPLE, "utf-8"));
     } catch {
-      return { presets: [], defaultOutDir: DEFAULT_OUT, hfToken: loadToken(), secretEncrypted: safeStorage.isEncryptionAvailable() };
+      return { presets: [], defaultOutDir: DEFAULT_OUT, hfToken: loadToken(), secretEncrypted: encryptionAvailable() };
     }
   }
   data.defaultOutDir = expandHome(data.defaultOutDir);
@@ -483,7 +506,7 @@ function loadPresetsData() {
   }
   delete data.hfToken;
   data.hfToken = token;
-  data.secretEncrypted = safeStorage.isEncryptionAvailable(); // false → token stored reversibly
+  data.secretEncrypted = encryptionAvailable(); // false → token stored reversibly
   return data;
 }
 
@@ -866,11 +889,23 @@ ipcMain.handle("download-models", async (_e, opts) => {
 
   const token = loadToken();
   modelDlCanceled = false;
+  // Tracks the model whose "stage" fired but hasn't gotten its "stage_end" yet —
+  // backend.py's own stage/stage_end event pairing already tells us exactly which
+  // model was actively downloading (or nothing, between models); no separate
+  // bookkeeping protocol needed. That's the one a cancel/crash mid-batch could
+  // leave with a partial cache dir — an already-finished (ok/skip/fail) model's
+  // dir must NOT be touched here.
+  let inFlightModelId = null;
   modelDlProc = runBackend(
     args,
-    (ev) => send("download-models-event", ev),
+    (ev) => {
+      if (ev.event === "stage") inFlightModelId = (ev.stage || "").replace(/^model:/, "") || null;
+      else if (ev.event === "stage_end") inFlightModelId = null;
+      send("download-models-event", ev);
+    },
     (code, stderr) => {
       const canceled = modelDlCanceled;
+      if ((canceled || code !== 0) && inFlightModelId) cleanupPartialModelCache(os.homedir(), inFlightModelId);
       send("download-models-event", { event: "download-closed", code, stderr, canceled });
       modelDlProc = null;
       modelDlCanceled = false;
@@ -881,8 +916,10 @@ ipcMain.handle("download-models", async (_e, opts) => {
   return { ok: true };
 });
 
-// cancel an in-flight model download; HF hub's own resumable blob cache means a
-// re-click of "Скачать все" later just picks up where this left off (see backend.py).
+// cancel an in-flight model download. The close handler above wipes the
+// interrupted model's partial cache dir (cleanupPartialModelCache) once the
+// child process has fully exited, so a re-click of "Скачать все" re-fetches
+// that model from scratch — not a resume.
 ipcMain.handle("cancel-model-download", async () => {
   if (!modelDlProc) return { ok: false, error: "Скачивание не идёт" };
   modelDlCanceled = true;
