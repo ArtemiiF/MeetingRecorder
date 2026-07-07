@@ -1567,9 +1567,187 @@ test("editing the textarea (текстом mode) re-syncs the chip list", async 
   $("glossary").value = "Mindbox, ClickHouse, Иван Петров";
   $("glossary").dispatchEvent(new window.Event("change"));
   await tick(window);
+  // "Мои" (Mindbox, Иван Петров) render before "Стандартные" (ClickHouse — a
+  // DEFAULT_GLOSSARY term) — grouped order, not raw textarea order (see V1 UX split).
   const chips = Array.from($("glossaryChips").querySelectorAll(".chip-text")).map((el) => el.textContent);
-  assert.deepEqual(chips, ["Mindbox", "ClickHouse", "Иван Петров"]);
+  assert.deepEqual(chips, ["Mindbox", "Иван Петров", "ClickHouse"]);
   assert.equal($("glossaryCount").textContent, "3 терминов");
+});
+
+// ── glossary: «Мои»/«Стандартные» split + live filter (V1 UX) ───────────────
+test("chips split into «Мои» (custom) and «Стандартные» (DEFAULT_GLOSSARY) sections, «Стандартные» collapsed by default with a count", async () => {
+  const { $, window } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru",
+      glossary: "Иван Петров, ClickHouse, Kafka",
+    }),
+  });
+  await tick(window);
+  const mine = Array.from($("glossaryChipsMine").querySelectorAll(".chip-text")).map((el) => el.textContent);
+  assert.deepEqual(mine, ["Иван Петров"]);
+  const toggle = $("glossaryDefaultToggle");
+  assert.match(toggle.textContent, /Стандартные/);
+  assert.match(toggle.textContent, /2/); // ClickHouse + Kafka
+  assert.ok($("glossaryChips").querySelector(".glossary-default-chips").classList.contains("hidden"),
+    "Стандартные collapsed by default");
+});
+
+test("clicking the «Стандартные» toggle expands and re-collapses the default-terms section", async () => {
+  const { $, window } = await boot({
+    getPresets: async () => ({ presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru", glossary: "ClickHouse" }),
+  });
+  await tick(window);
+  assert.ok($("glossaryChips").querySelector(".glossary-default-chips").classList.contains("hidden"));
+
+  $("glossaryDefaultToggle").click();
+  await tick(window);
+  let defaultBox = $("glossaryChips").querySelector(".glossary-default-chips");
+  assert.ok(!defaultBox.classList.contains("hidden"), "expands on click");
+  const chips = Array.from(defaultBox.querySelectorAll(".chip-text")).map((el) => el.textContent);
+  assert.deepEqual(chips, ["ClickHouse"]);
+
+  $("glossaryDefaultToggle").click();
+  await tick(window);
+  assert.ok($("glossaryChips").querySelector(".glossary-default-chips").classList.contains("hidden"),
+    "collapses again on a second click");
+});
+
+test("removing a chip inside the collapsed «Стандартные» section still works (closure-by-index scoped per section)", async () => {
+  let saved = null;
+  const { $, window } = await boot({
+    getPresets: async () => ({ presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru", glossary: "Иван Петров, ClickHouse" }),
+    savePresets: async (data) => { saved = data; return true; },
+  });
+  await tick(window);
+  // "ClickHouse" is the only default-section chip — its remove button is scoped to
+  // .glossary-default-chips, not the flat top-level index used before the split.
+  $("glossaryChips").querySelector(".glossary-default-chips").querySelector(".chip-remove").click();
+  await tick(window);
+  const mine = Array.from($("glossaryChipsMine").querySelectorAll(".chip-text")).map((el) => el.textContent);
+  assert.deepEqual(mine, ["Иван Петров"]);
+  assert.equal($("glossary").value, "Иван Петров");
+  assert.equal(saved.glossary, "Иван Петров");
+});
+
+test("filter input narrows chips by substring and updates the «N из M» counter live", async () => {
+  const { $, window } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru",
+      glossary: "Иван Петров, Анна Смирнова, ClickHouse",
+    }),
+  });
+  await tick(window);
+  $("glossaryFilter").value = "иван";
+  $("glossaryFilter").dispatchEvent(new window.Event("input"));
+  await tick(window);
+  assert.equal($("glossaryCount").textContent, "1 из 3 терминов");
+  const mine = Array.from($("glossaryChipsMine").querySelectorAll(".chip-text")).map((el) => el.textContent);
+  assert.deepEqual(mine, ["Иван Петров"]);
+
+  $("glossaryFilter").value = "";
+  $("glossaryFilter").dispatchEvent(new window.Event("input"));
+  await tick(window);
+  assert.equal($("glossaryCount").textContent, "3 терминов");
+});
+
+test("a non-empty filter with a match auto-expands «Стандартные»; clearing it restores the manual collapsed state", async () => {
+  const { $, window } = await boot({
+    getPresets: async () => ({ presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru", glossary: "Иван Петров, ClickHouse" }),
+  });
+  await tick(window);
+  assert.ok($("glossaryChips").querySelector(".glossary-default-chips").classList.contains("hidden"));
+
+  $("glossaryFilter").value = "click";
+  $("glossaryFilter").dispatchEvent(new window.Event("input"));
+  await tick(window);
+  assert.ok(!$("glossaryChips").querySelector(".glossary-default-chips").classList.contains("hidden"),
+    "filter with a match auto-expands the default section");
+
+  $("glossaryFilter").value = "";
+  $("glossaryFilter").dispatchEvent(new window.Event("input"));
+  await tick(window);
+  assert.ok($("glossaryChips").querySelector(".glossary-default-chips").classList.contains("hidden"),
+    "clearing the filter restores the collapsed state — the manual toggle itself was never touched");
+});
+
+test("filter with no matches shows a hint instead of two empty sections", async () => {
+  const { $, window } = await boot({
+    getPresets: async () => ({ presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru", glossary: "Иван Петров, ClickHouse" }),
+  });
+  await tick(window);
+  $("glossaryFilter").value = "zzz-no-such-term";
+  $("glossaryFilter").dispatchEvent(new window.Event("input"));
+  await tick(window);
+  assert.match($("glossaryChips").textContent, /Ничего не найдено/);
+  assert.equal($("glossaryCount").textContent, "0 из 2 терминов");
+});
+
+test("«Импорт/экспорт текстом» accepts a newline-separated paste and normalizes it to comma-joined on apply", async () => {
+  let saved = null;
+  const { $, window } = await boot({
+    getPresets: async () => ({ presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru", glossary: "Mindbox" }),
+    savePresets: async (data) => { saved = data; return true; },
+  });
+  await tick(window);
+  $("glossary").value = "Mindbox\nИван Петров\n\nClickHouse";
+  $("glossary").dispatchEvent(new window.Event("change"));
+  await tick(window);
+  assert.equal($("glossary").value, "Mindbox, Иван Петров, ClickHouse", "normalized to comma-joined on apply");
+  assert.equal(saved.glossary, "Mindbox, Иван Петров, ClickHouse");
+  const chips = Array.from($("glossaryChips").querySelectorAll(".chip-text")).map((el) => el.textContent);
+  assert.deepEqual(chips, ["Mindbox", "Иван Петров", "ClickHouse"]);
+});
+
+// ── glossary: usage badges + cumulative persistence ─────────────────────────
+test("a chip shows a usage badge («N×») when state.glossaryUsage has a count for it, and none when it doesn't", async () => {
+  const { $, window } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru",
+      glossary: "Иван Петров, Mindbox",
+      glossaryUsage: { "иван петров": 12 },
+    }),
+  });
+  await tick(window);
+  const chips = Array.from($("glossaryChipsMine").querySelectorAll(".chip-text")).map((el) => el.textContent);
+  assert.ok(chips.includes("Иван Петров 12×"), `expected a usage badge, got: ${chips}`);
+  assert.ok(chips.includes("Mindbox"), "a term with no usage count has no badge");
+});
+
+test("a 'done' event's glossary_usage merges additively into state.glossaryUsage, re-renders badges, and persists", async () => {
+  let saved = null;
+  const { $, window, handlers } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru", glossary: "Иван Петров",
+      glossaryUsage: { "иван петров": 3 },
+    }),
+    savePresets: async (data) => { saved = data; return true; },
+  });
+  await tick(window);
+  handlers.process({
+    event: "done", note: "/n.md", audio: "/a.wav", transcript: "t", summary: "s",
+    glossary_usage: { "иван петров": 2 },
+  });
+  await tick(window);
+  assert.deepEqual(saved.glossaryUsage, { "иван петров": 5 }, "merges additively, not overwrites");
+  const chips = Array.from($("glossaryChipsMine").querySelectorAll(".chip-text")).map((el) => el.textContent);
+  assert.deepEqual(chips, ["Иван Петров 5×"]);
+});
+
+test("glossaryUsage is forwarded to processAudio when running", async () => {
+  let sent = null;
+  const { window, $, handlers } = await boot({
+    getPresets: async () => ({
+      presets: [{ name: "P", prompt: "x" }], defaultOutDir: "/tmp", hfToken: "", language: "ru",
+      glossary: "Иван Петров", glossaryUsage: { "иван петров": 7 },
+    }),
+    processAudio: async (opts) => { sent = opts; return { ok: true }; },
+  });
+  await tick(window);
+  handlers.record({ event: "recorded", id: "r1", name: "Запись 1", file: "/tmp/mixed.wav", mic: "/tmp/m.wav", system: null, tracks: 1 });
+  $("historyList").querySelector(".pending-play-btn").click();
+  await tick(window);
+  assert.ok(sent, "processAudio was not called");
+  assert.deepEqual(sent.glossaryUsage, { "иван петров": 7 });
 });
 
 // ── glossary: «Предложения» inbox (auto-suggested terms from processing) ────
@@ -3627,6 +3805,16 @@ test("main.js: process-audio refuses while an update is in flight (updateProc)",
   const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
   const processAudio = mainSrc.match(/ipcMain\.handle\("process-audio"[\s\S]*?\n\}\);/)[0];
   assert.match(processAudio, /if \(updateProc\) return/);
+});
+
+test("main.js: process-audio writes glossaryUsage to a temp JSON file and passes --glossary-usage-file, only when usage data exists", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const processAudio = mainSrc.match(/ipcMain\.handle\("process-audio"[\s\S]*?\n\}\);/)[0];
+  assert.match(processAudio, /glossaryUsage/);
+  assert.match(processAudio, /if \(glossaryUsage && Object\.keys\(glossaryUsage\)\.length\)/);
+  assert.match(processAudio, /--glossary-usage-file/);
+  // cleaned up on close, mirroring promptFile's own unlink right above it.
+  assert.match(processAudio, /if \(glossaryUsageFile\) \{ try \{ fs\.unlinkSync\(glossaryUsageFile\); \} catch \{\} \}/);
 });
 
 test("main.js: download-models refuses while an update is in flight (updateProc)", () => {

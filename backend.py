@@ -12,7 +12,8 @@ Events:
   recorded  {"file": str, "size_mb": float}     recording finalized
   done      {"note": str, "audio": str, "transcript": str, "summary": str,
              "actions": {"items": [{"what","who","due"}], "decisions": [str]},
-             "suggestions": [str]}                     glossary term candidates
+             "suggestions": [str],                      glossary term candidates
+             "glossary_usage": {term_lower: count}}      per-term fires THIS run only
   error     {"msg": str}
 
 Commands (argv[1]):
@@ -560,13 +561,57 @@ def gate_llm_correction(original, corrected, terms):
     return " ".join(out)
 
 
+def _diff_term_hits(orig_tokens, new_tokens, terms):
+    """Attribute an already-accepted orig→new token swap (e.g. gate_llm_correction's
+    output vs. its input, same length by construction) to the specific glossary term
+    each changed window resolves to — mirrors fuzzy_correct's own {"from","to"}
+    replacement format, but for Stage 2 (LLM) hits, so both stages' fires can be
+    merged into one per-term usage count (see Pipeline.process's `correct` stage).
+
+    Walks longest-term-first (same strategy as fuzzy_correct/gate_llm_correction) and
+    only trusts a window that _term_or_declined_form confirms — every differing window
+    here already passed gate_llm_correction's own validation, so this never guesses at
+    a NEW match, it just re-identifies which term an already-accepted swap belongs to.
+    A window that (surprisingly) doesn't resolve to any term is skipped rather than
+    guessed at; length mismatch (should not happen — callers pass same-length token
+    lists) degrades to no hits rather than raising."""
+    if not terms or len(orig_tokens) != len(new_tokens):
+        return []
+    specs = _term_specs(terms)
+    word_counts = sorted({wc for _, wc in specs}, reverse=True)
+    hits = []
+    n = len(orig_tokens)
+    i = 0
+    while i < n:
+        if orig_tokens[i] == new_tokens[i]:
+            i += 1
+            continue
+        matched = False
+        for wc in word_counts:
+            if i + wc > n:
+                continue
+            window = new_tokens[i:i + wc]
+            joined = " ".join(tok.strip(_PUNCT_CHARS) for tok in window)
+            term = _term_or_declined_form(joined, terms)
+            if not term:
+                continue
+            old_window = orig_tokens[i:i + wc]
+            hits.append({"from": " ".join(t.strip(_PUNCT_CHARS) for t in old_window), "to": term})
+            i += wc
+            matched = True
+            break
+        if not matched:
+            i += 1
+    return hits
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # Processing pipeline (refactored from meeting_simple_v9.py)
 # ──────────────────────────────────────────────────────────────────────────
 class Pipeline:
     def __init__(self, out_dir, engine="mlx", diarize=True, cache_dir=None,
                  language="ru", do_summary=True, template="", db_path=None, glossary="",
-                 author_name="Автор", fast_model=""):
+                 author_name="Автор", fast_model="", glossary_usage=None):
         self.TEMPLATE = template
         self.db_path = db_path
         self.OBSIDIAN_PATH = Path(out_dir)
@@ -577,6 +622,11 @@ class Pipeline:
         self.LANGUAGE = language          # "ru" | "en" | "auto"
         self.DO_SUMMARY = do_summary
         self.GLOSSARY = glossary          # comma/newline-separated terms biasing Whisper initial_prompt
+        # Cumulative {term_lower: fire_count} from past runs (renderer-persisted) — used
+        # ONLY to order _build_initial_prompt's terms before the token-budget truncation
+        # (most-used survive a tight budget); never mutated here. Empty/None → today's
+        # behaviour, byte-identical (see _build_initial_prompt).
+        self.GLOSSARY_USAGE = glossary_usage or {}
         self.AUTHOR_NAME = author_name    # display name seeded for the auto-detected mic-dominant speaker
         # Overrides the loaded LM Studio model for MECHANICAL calls only (glossary
         # correction, title, glossary suggestions) — see correct_glossary_llm/
@@ -754,15 +804,21 @@ class Pipeline:
         capped to _INITIAL_PROMPT_TOKEN_BUDGET tokens so nothing is silently
         evicted. Context prompt has priority and is never truncated; if it alone
         already meets/exceeds the budget, the glossary is dropped entirely.
-        Otherwise glossary terms are dropped from the END of the list (glossary
-        is user-terms-first by chip-UX merge order) until the combined prompt
-        fits."""
+        Otherwise glossary terms are dropped from the END of the list until the
+        combined prompt fits — so ordering the list well matters. When usage data
+        is available (self.GLOSSARY_USAGE), terms are sorted by fire count
+        DESCENDING first (Python's sort is stable, so ties — including "never
+        fired", count 0 — keep the glossary's own order); a truncation then drops
+        the LEAST-used terms rather than an arbitrary tail. No usage data →
+        today's order, byte-identical."""
         context = self._context_prompt()
         terms = self._glossary_terms()
         if not terms:
             return context
         if context and self._estimate_tokens(context) >= self._INITIAL_PROMPT_TOKEN_BUDGET:
             return context
+        if self.GLOSSARY_USAGE:
+            terms = sorted(terms, key=lambda t: -self.GLOSSARY_USAGE.get(t.lower(), 0))
         kept = list(terms)
         while kept:
             glossary_prompt = "Термины: " + ", ".join(kept) + "."
@@ -1484,6 +1540,12 @@ class Pipeline:
         # worth of logging inside transcribe()'s cache-hit/cache-miss branches.
         stage("correct", "Коррекция терминов")
         terms = self._glossary_terms()
+        # Per-term fire counts for THIS run, merged across stage1 (fuzzy_correct) and
+        # stage2 (LLM, via _diff_term_hits) — feeds the done-payload's glossary_usage
+        # field (see emit("done", ...) below), which the renderer accumulates across
+        # runs and later feeds back as glossary_usage on the NEXT run's Pipeline, to
+        # order _build_initial_prompt's truncation by actual usage.
+        glossary_hits = []
         if not terms or not segments:
             stage_end("correct", "skip", "глоссарий пуст" if not terms else "нет сегментов")
         else:
@@ -1501,21 +1563,28 @@ class Pipeline:
             cached_c = self._cache_read(cj) if (cj and cj.exists()) else None
             if cached_c and cached_c.get("input_hash") == input_hash and cached_c.get("llm_ok") is True:
                 segments, transcript = cached_c["segments"], cached_c["transcript"]
+                glossary_hits = cached_c.get("term_hits", [])
                 stage_end("correct", "ok", f"{cached_c.get('count', 0)} терминов (из кеша)")
             else:
                 segments, stage1_reps = fuzzy_correct(segments, terms)
+                pre_llm_segments = segments
                 llm_segments, llm_count = self.correct_glossary_llm(segments, terms)
                 total = len(stage1_reps)
                 llm_ok = llm_segments is not None
+                llm_hits = []
                 if llm_ok:
+                    for before, after in zip(pre_llm_segments, llm_segments):
+                        llm_hits.extend(_diff_term_hits((before.get("text") or "").split(),
+                                                          (after.get("text") or "").split(), terms))
                     segments = llm_segments
                     total += llm_count
+                glossary_hits = stage1_reps + llm_hits
                 transcript = " ".join(s["text"].strip() for s in segments if s["text"].strip())
                 log(f"✅ Исправлено терминов: {total}")
                 if cj:
                     self._cache_write(cj, {"segments": segments, "transcript": transcript,
                                             "count": total, "input_hash": input_hash,
-                                            "llm_ok": llm_ok})
+                                            "llm_ok": llm_ok, "term_hits": glossary_hits})
                 if not llm_ok:
                     stage_end("correct", "fail", f"LLM недоступен — {total} по словарю")
                 else:
@@ -1658,6 +1727,15 @@ class Pipeline:
                 log(f"⚠️ Индекс не обновлён: {e}")
         stage_end("save", "ok")
 
+        # {term_lower: count}, THIS run only — the renderer merges it into its own
+        # cumulative glossaryUsage store (see mergeGlossaryUsage in renderer.js) and
+        # feeds that cumulative map back as --glossary-usage-file on the next run.
+        glossary_usage = {}
+        for hit in glossary_hits:
+            key = (hit.get("to") or "").strip().lower()
+            if key:
+                glossary_usage[key] = glossary_usage.get(key, 0) + 1
+
         emit("done",
              note=str(note_path),
              audio=str(vault_audio if keep_audio_in_obsidian else audio_file),
@@ -1666,17 +1744,25 @@ class Pipeline:
              title=title,
              speakers=speakers,
              actions=actions,
-             suggestions=suggestions)
+             suggestions=suggestions,
+             glossary_usage=glossary_usage)
 
 
 def cmd_process(args):
     prompt = Path(args.prompt_file).read_text(encoding="utf-8") if args.prompt_file else ""
     if not prompt.strip():
         prompt = "Сделай краткую структурированную сводку этой встречи в Markdown."
+    glossary_usage = {}
+    if args.glossary_usage_file:
+        try:
+            glossary_usage = json.loads(Path(args.glossary_usage_file).read_text(encoding="utf-8"))
+        except Exception:
+            glossary_usage = {}
     pipe = Pipeline(out_dir=args.out_dir, engine=args.engine, diarize=args.diarize,
                     cache_dir=args.cache_dir, language=args.language, do_summary=args.summarize,
                     template=args.template, db_path=args.db, glossary=args.glossary,
-                    author_name=args.author_name, fast_model=args.fast_model)
+                    author_name=args.author_name, fast_model=args.fast_model,
+                    glossary_usage=glossary_usage)
     try:
         pipe.process(args.infile, prompt, keep_audio_in_obsidian=args.keep_audio,
                      mic_file=args.mic, system_file=args.system, origin=args.origin)
@@ -3018,6 +3104,10 @@ def main():
     p_proc.add_argument("--cache-dir", dest="cache_dir", default=None)
     p_proc.add_argument("--language", default="ru")  # ru | en | auto
     p_proc.add_argument("--glossary", default="")  # comma/newline-separated terms → Whisper initial_prompt
+    # JSON {term_lower: count} file — cumulative usage from previous runs (renderer-
+    # persisted); orders _build_initial_prompt's terms before budget truncation. Same
+    # file-based plumbing as --prompt-file (avoids CLI arg length/escaping concerns).
+    p_proc.add_argument("--glossary-usage-file", dest="glossary_usage_file", default=None)
     p_proc.add_argument("--summarize", type=str2bool, default=True)
     p_proc.add_argument("--template", default="")
     p_proc.add_argument("--db", default=None)

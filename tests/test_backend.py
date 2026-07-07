@@ -1745,7 +1745,8 @@ def test_cmd_process_uses_default_prompt_when_file_blank(monkeypatch, tmp_path):
         prompt_file=str(blank), out_dir=str(tmp_path), engine="mlx",
         diarize=False, infile="x.wav", keep_audio=False, cache_dir=None,
         language="ru", glossary="", summarize=True, template="", db=None,
-        mic=None, system=None, author_name="Автор", origin=None, fast_model="")
+        mic=None, system=None, author_name="Автор", origin=None, fast_model="",
+        glossary_usage_file=None)
     backend.cmd_process(args)
     assert "краткую структурированную сводку" in captured["prompt"]
 
@@ -1760,7 +1761,8 @@ def test_cmd_process_forwards_user_prompt(monkeypatch, tmp_path):
         prompt_file=str(pf), out_dir=str(tmp_path), engine="mlx",
         diarize=True, infile="x.wav", keep_audio=False, cache_dir=None,
         language="ru", glossary="", summarize=True, template="", db=None,
-        mic=None, system=None, author_name="Автор", origin=None, fast_model="")
+        mic=None, system=None, author_name="Автор", origin=None, fast_model="",
+        glossary_usage_file=None)
     backend.cmd_process(args)
     assert captured["p"] == "МОЙ КАСТОМНЫЙ ПРОМПТ"
 
@@ -1964,6 +1966,47 @@ def test_glossary_truncated_when_initial_prompt_over_budget(monkeypatch, tmp_pat
     assert backend.Pipeline._estimate_tokens(prompt) <= backend.Pipeline._INITIAL_PROMPT_TOKEN_BUDGET
 
 
+def test_glossary_usage_sort_lets_heavily_used_term_survive_truncation(monkeypatch, tmp_path):
+    # Same over-budget setup as the test above (60 long terms overflow the ~224-token
+    # budget, tail normally dropped) — but the LAST term now has heavy usage. Usage
+    # sorting must move it ahead of the cut, proving terms are sorted by fire count
+    # BEFORE truncation, not after (see _build_initial_prompt).
+    terms = [f"ОченьДлинныйТерминНомер{i:03d}" for i in range(60)]
+    calls = install_fake_mlx_whisper(monkeypatch)
+    usage = {terms[-1].lower(): 50}
+    p = backend.Pipeline(out_dir=str(tmp_path / "v"), diarize=False, language="ru",
+                         glossary=", ".join(terms), glossary_usage=usage)
+    p.transcribe("mono.wav")
+    prompt = calls["kwargs"]["initial_prompt"]
+    assert terms[-1] in prompt   # heavily-used term now survives despite being last in the raw list
+    assert terms[0] in prompt    # a tied (0-usage) term near the front still survives too
+    assert backend.Pipeline._estimate_tokens(prompt) <= backend.Pipeline._INITIAL_PROMPT_TOKEN_BUDGET
+
+
+def test_glossary_usage_sort_ties_keep_glossary_order_stable(tmp_path):
+    # No term has usage yet (all counts 0, a real "first ever run" scenario) — Python's
+    # stable sort must keep every term in its original glossary order, byte-identical
+    # to no usage data at all.
+    glossary = "Иван Петров, Mindbox, ClickHouse"
+    p = backend.Pipeline(out_dir=str(tmp_path / "v"), diarize=False, language="ru",
+                         glossary=glossary, glossary_usage={"someoneelse": 5})
+    assert p._build_initial_prompt() == (
+        backend.Pipeline.CONTEXT_PROMPT_RU + " Термины: Иван Петров, Mindbox, ClickHouse.")
+
+
+def test_glossary_no_usage_data_initial_prompt_byte_identical(tmp_path):
+    # Regression lock: omitting glossary_usage entirely (today's call sites) must
+    # produce EXACTLY the same prompt as passing an empty usage map — the sort
+    # branch is skipped outright, not merely a no-op sort over falsy data.
+    glossary = "Иван Петров, Mindbox\nClickHouse"
+    p_plain = backend.Pipeline(out_dir=str(tmp_path / "v"), diarize=False, language="ru", glossary=glossary)
+    p_empty_usage = backend.Pipeline(out_dir=str(tmp_path / "v"), diarize=False, language="ru",
+                                     glossary=glossary, glossary_usage={})
+    assert p_plain._build_initial_prompt() == p_empty_usage._build_initial_prompt()
+    assert p_plain._build_initial_prompt() == (
+        backend.Pipeline.CONTEXT_PROMPT_RU + " Термины: Иван Петров, Mindbox, ClickHouse.")
+
+
 def test_glossary_dropped_entirely_when_context_alone_meets_budget(monkeypatch, tmp_path):
     # If the context prompt alone already meets/exceeds the budget there is no
     # room left for glossary — keep the context untouched (never silently
@@ -2046,7 +2089,8 @@ def test_cmd_process_forwards_glossary_to_pipeline(monkeypatch, tmp_path):
         prompt_file=None, out_dir=str(tmp_path), engine="mlx",
         diarize=False, infile="x.wav", keep_audio=False, cache_dir=None,
         language="ru", glossary="Иван Петров, Mindbox", summarize=True, template="", db=None,
-        mic=None, system=None, author_name="Автор", origin=None, fast_model="")
+        mic=None, system=None, author_name="Автор", origin=None, fast_model="",
+        glossary_usage_file=None)
     backend.cmd_process(args)
     assert captured["glossary"] == "Иван Петров, Mindbox"
 
@@ -2066,9 +2110,77 @@ def test_cmd_process_forwards_fast_model_to_pipeline(monkeypatch, tmp_path):
         prompt_file=None, out_dir=str(tmp_path), engine="mlx",
         diarize=False, infile="x.wav", keep_audio=False, cache_dir=None,
         language="ru", glossary="", summarize=True, template="", db=None,
-        mic=None, system=None, author_name="Автор", origin=None, fast_model="google/gemma-3-4b")
+        mic=None, system=None, author_name="Автор", origin=None, fast_model="google/gemma-3-4b",
+        glossary_usage_file=None)
     backend.cmd_process(args)
     assert captured["fast_model"] == "google/gemma-3-4b"
+
+
+def test_cmd_process_forwards_glossary_usage_file_contents_to_pipeline(monkeypatch, tmp_path):
+    captured = {}
+    orig_init = backend.Pipeline.__init__
+
+    def spy_init(self, *a, **kw):
+        captured["glossary_usage"] = kw.get("glossary_usage")
+        orig_init(self, *a, **kw)
+
+    monkeypatch.setattr(backend.Pipeline, "__init__", spy_init)
+    monkeypatch.setattr(backend.Pipeline, "process",
+                        lambda self, a, p, keep_audio_in_obsidian=True, mic_file=None, system_file=None, origin=None: None)
+    usage_file = tmp_path / "usage.json"
+    usage_file.write_text(json.dumps({"антон": 3, "clickhouse": 1}), encoding="utf-8")
+    args = types.SimpleNamespace(
+        prompt_file=None, out_dir=str(tmp_path), engine="mlx",
+        diarize=False, infile="x.wav", keep_audio=False, cache_dir=None,
+        language="ru", glossary="Антон, ClickHouse", summarize=True, template="", db=None,
+        mic=None, system=None, author_name="Автор", origin=None, fast_model="",
+        glossary_usage_file=str(usage_file))
+    backend.cmd_process(args)
+    assert captured["glossary_usage"] == {"антон": 3, "clickhouse": 1}
+
+
+def test_cmd_process_glossary_usage_file_absent_defaults_to_empty_dict(monkeypatch, tmp_path):
+    captured = {}
+    orig_init = backend.Pipeline.__init__
+
+    def spy_init(self, *a, **kw):
+        captured["glossary_usage"] = kw.get("glossary_usage")
+        orig_init(self, *a, **kw)
+
+    monkeypatch.setattr(backend.Pipeline, "__init__", spy_init)
+    monkeypatch.setattr(backend.Pipeline, "process",
+                        lambda self, a, p, keep_audio_in_obsidian=True, mic_file=None, system_file=None, origin=None: None)
+    args = types.SimpleNamespace(
+        prompt_file=None, out_dir=str(tmp_path), engine="mlx",
+        diarize=False, infile="x.wav", keep_audio=False, cache_dir=None,
+        language="ru", glossary="", summarize=True, template="", db=None,
+        mic=None, system=None, author_name="Автор", origin=None, fast_model="",
+        glossary_usage_file=None)
+    backend.cmd_process(args)
+    assert captured["glossary_usage"] == {}
+
+
+def test_cmd_process_glossary_usage_file_malformed_json_degrades_to_empty(monkeypatch, tmp_path):
+    captured = {}
+    orig_init = backend.Pipeline.__init__
+
+    def spy_init(self, *a, **kw):
+        captured["glossary_usage"] = kw.get("glossary_usage")
+        orig_init(self, *a, **kw)
+
+    monkeypatch.setattr(backend.Pipeline, "__init__", spy_init)
+    monkeypatch.setattr(backend.Pipeline, "process",
+                        lambda self, a, p, keep_audio_in_obsidian=True, mic_file=None, system_file=None, origin=None: None)
+    bad_file = tmp_path / "bad.json"
+    bad_file.write_text("{not valid json", encoding="utf-8")
+    args = types.SimpleNamespace(
+        prompt_file=None, out_dir=str(tmp_path), engine="mlx",
+        diarize=False, infile="x.wav", keep_audio=False, cache_dir=None,
+        language="ru", glossary="", summarize=True, template="", db=None,
+        mic=None, system=None, author_name="Автор", origin=None, fast_model="",
+        glossary_usage_file=str(bad_file))
+    backend.cmd_process(args)
+    assert captured["glossary_usage"] == {}
 
 
 def test_copy_atomic_roundtrip_no_tmp_left(tmp_path):
@@ -3252,6 +3364,107 @@ def test_correct_stage_old_format_cache_without_llm_ok_not_served(monkeypatch, t
     assert llm_calls["n"] == 1  # recomputed — old-format cache without llm_ok is not trusted
     ends = {e["stage"]: e for e in events if e["event"] == "stage_end"}
     assert "из кеша" not in ends["correct"]["msg"]
+
+
+# ── _diff_term_hits (attributes an already-gated LLM swap back to its term) ──
+def test_diff_term_hits_identifies_swapped_term():
+    orig = "Позвал Онтон на встречу".split()
+    new = "Позвал Антон на встречу".split()
+    assert backend._diff_term_hits(orig, new, ["Антон"]) == [{"from": "Онтон", "to": "Антон"}]
+
+
+def test_diff_term_hits_ignores_unchanged_tokens():
+    same = "Всё в порядке".split()
+    assert backend._diff_term_hits(same, list(same), ["Антон"]) == []
+
+
+def test_diff_term_hits_multi_word_term():
+    orig = "Встретил Ивана Петрова вчера".split()
+    new = "Встретил Иван Петров вчера".split()
+    hits = backend._diff_term_hits(orig, new, ["Иван Петров"])
+    assert hits == [{"from": "Ивана Петрова", "to": "Иван Петров"}]
+
+
+def test_diff_term_hits_length_mismatch_returns_empty():
+    assert backend._diff_term_hits(["a", "b"], ["a"], ["b"]) == []
+
+
+def test_diff_term_hits_no_terms_returns_empty():
+    assert backend._diff_term_hits(["a"], ["b"], []) == []
+
+
+# ── `correct` stage: per-term glossary_usage counts land in the done event ──
+def test_correct_stage_glossary_usage_merges_stage1_and_llm_hits(monkeypatch, tmp_path):
+    src = tmp_path / "in.wav"; src.write_bytes(b"x")
+    p = backend.Pipeline(out_dir=str(tmp_path / "v"), diarize=False, glossary="Антон")
+    monkeypatch.setattr(p, "convert_to_mono", lambda f: f)
+    monkeypatch.setattr(p, "remove_silence_vad", lambda f: (f, None))
+    monkeypatch.setattr(p, "transcribe", lambda f: {
+        # segment 0: "Онтон" is within stage1's fuzzy threshold — fixed by fuzzy_correct
+        # alone. segment 1: "жжжжж" bears no resemblance to "Антон" at all — stage1 must
+        # leave it untouched; the (mocked) LLM pass fixes it instead.
+        "segments": [seg("Позвал Онтон на встречу", 0, 3), seg("Потом заглянул жжжжж снова", 3, 6)],
+        "text": "x",
+    })
+    monkeypatch.setattr(p, "summarize", lambda t, pr: None)
+
+    def fake_llm_correct(segs, terms):
+        new_segs = [dict(s) for s in segs]
+        new_segs[1]["text"] = new_segs[1]["text"].replace("жжжжж", "Антон")
+        return new_segs, 1
+
+    monkeypatch.setattr(p, "correct_glossary_llm", fake_llm_correct)
+    events = capture(p.process, str(src), "prompt")
+    done = [e for e in events if e["event"] == "done"][0]
+    assert done["glossary_usage"] == {"антон": 2}  # 1 stage1 hit + 1 LLM hit, merged case-insensitively
+
+
+def test_correct_stage_glossary_usage_stage1_only_when_llm_down(monkeypatch, tmp_path):
+    src = tmp_path / "in.wav"; src.write_bytes(b"x")
+    p = backend.Pipeline(out_dir=str(tmp_path / "v"), diarize=False, glossary="Антон")
+    monkeypatch.setattr(p, "convert_to_mono", lambda f: f)
+    monkeypatch.setattr(p, "remove_silence_vad", lambda f: (f, None))
+    monkeypatch.setattr(p, "transcribe", lambda f: {"segments": [seg("привет Онтон тут", 0, 3)], "text": "x"})
+    monkeypatch.setattr(p, "summarize", lambda t, pr: None)
+    monkeypatch.setattr(p, "correct_glossary_llm", lambda segs, terms: (None, 0))  # LM Studio down
+    events = capture(p.process, str(src), "prompt")
+    done = [e for e in events if e["event"] == "done"][0]
+    assert done["glossary_usage"] == {"антон": 1}  # stage1's fix still counted despite LLM outage
+
+
+def test_correct_stage_glossary_usage_empty_when_glossary_empty(monkeypatch, tmp_path):
+    src = tmp_path / "in.wav"; src.write_bytes(b"x")
+    p = backend.Pipeline(out_dir=str(tmp_path / "v"), diarize=False, glossary="")
+    monkeypatch.setattr(p, "convert_to_mono", lambda f: f)
+    monkeypatch.setattr(p, "remove_silence_vad", lambda f: (f, None))
+    monkeypatch.setattr(p, "transcribe", lambda f: {"segments": [seg("привет Онтон тут", 0, 3)], "text": "x"})
+    monkeypatch.setattr(p, "summarize", lambda t, pr: None)
+    events = capture(p.process, str(src), "prompt")
+    done = [e for e in events if e["event"] == "done"][0]
+    assert done["glossary_usage"] == {}
+
+
+def test_correct_stage_glossary_usage_cache_hit_reuses_cached_counts(monkeypatch, tmp_path):
+    src = tmp_path / "in.wav"; src.write_bytes(b"x")
+    cache = tmp_path / "cache"
+    monkeypatch.setattr(backend.Pipeline, "correct_glossary_llm", lambda self, segs, terms: (segs, 0))
+
+    def fresh_pipe():
+        p = backend.Pipeline(out_dir=str(tmp_path / "v"), diarize=False,
+                              cache_dir=str(cache), glossary="Антон")
+        monkeypatch.setattr(p, "convert_to_mono", lambda f: f)
+        monkeypatch.setattr(p, "remove_silence_vad", lambda f: (f, None))
+        monkeypatch.setattr(p, "transcribe", lambda f: {"segments": [seg("привет Онтон тут", 0, 3)], "text": "x"})
+        monkeypatch.setattr(p, "summarize", lambda t, pr: None)
+        return p
+
+    capture(fresh_pipe().process, str(src), "p")               # first run → corrects + caches term_hits
+    events = capture(fresh_pipe().process, str(src), "p")      # retry, same cache_dir → resumes from cache
+
+    ends = {e["stage"]: e for e in events if e["event"] == "stage_end"}
+    assert "из кеша" in ends["correct"]["msg"]
+    done = [e for e in events if e["event"] == "done"][0]
+    assert done["glossary_usage"] == {"антон": 1}
 
 
 # ── suggest_glossary_terms (glossary auto-enrichment LLM pass) + `suggest` stage ──
