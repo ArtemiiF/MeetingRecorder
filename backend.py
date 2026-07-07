@@ -215,6 +215,35 @@ _PUNCT_CHARS = ".,!?;:\"'«»()[]{}—–-…"
 # one doesn't silently retune the other.
 _CORRECT_CHUNK_CHARS = 2000
 
+# correct_glossary_llm's request budget scales with what we actually send —
+# a fixed max_tokens=4000/timeout=120 measured wrong on a real reasoning model
+# (gemma-4-26b via LM Studio): a 1712-char chunk burned 3999 of 4000 tokens on
+# *reasoning* alone (finish_reason=length) over 157.2s wall — request wall-time
+# is bounded by max_tokens/generation-rate, not input size, so a fixed timeout
+# reads a slow-but-working model as "LLM недоступен". Reasoning headroom of
+# 2500 tokens follows k2-lmstudio-reasoning-tokens (reasoning models need
+# ≥1500-2500 tokens of "thinking" room even for a short final answer); the
+# chars/3 term for the visible-output budget mirrors _estimate_tokens's
+# chars/3 heuristic above. Timeout floor of 30s covers prefill+network; the
+# 15 tok/s rate is a conservative floor under the ~25 tok/s measured on the
+# same model, so the computed timeout has headroom instead of hugging the
+# measured wall-time.
+_CORRECT_REASONING_BUDGET = 2500
+_LLM_TIMEOUT_BASE = 30
+_LLM_RATE_MIN_TPS = 15
+
+
+def _llm_correct_budget(chunk_len):
+    """Pure helper: (max_tokens, timeout_seconds) for a correct_glossary_llm
+    request over a chunk of `chunk_len` characters. max_tokens scales with
+    chunk size (chars/3, ceil); timeout scales transitively with max_tokens
+    via the conservative min generation rate — so a bigger ask always gets a
+    longer clock, instead of a request racing a clock sized for something
+    else entirely."""
+    max_tokens = _CORRECT_REASONING_BUDGET + -(-chunk_len // 3)  # ceil(chunk_len/3)
+    timeout = _LLM_TIMEOUT_BASE + max_tokens / _LLM_RATE_MIN_TPS
+    return max_tokens, timeout
+
 
 # Best-effort Cyrillic→Latin transliteration so a slangy phonetic spelling of an
 # anglicism (e.g. "слэк") lands close to its Latin glossary term ("Slack") under
@@ -823,13 +852,14 @@ class Pipeline:
                 chunk = " ".join(texts)
                 if not chunk.strip():
                     continue
+                max_tokens, timeout = _llm_correct_budget(len(chunk))
                 resp = requests.post(self.LMSTUDIO_API, json={
                     "messages": [
                         {"role": "system", "content": sys_msg},
                         {"role": "user", "content": chunk},
                     ],
-                    "temperature": 0.0, "max_tokens": 4000,
-                }, timeout=120)
+                    "temperature": 0.0, "max_tokens": max_tokens,
+                }, timeout=timeout)
                 if resp.status_code != 200:
                     continue
                 msg = (resp.json().get("choices") or [{}])[0].get("message", {})
@@ -846,6 +876,12 @@ class Pipeline:
                     n = word_counts[local_i]
                     new_segments[i]["text"] = " ".join(gated_tokens[pos:pos + n])
                     pos += n
+        except requests.exceptions.Timeout:
+            log(f"⚠️ LLM не ответил за {timeout:.0f}с — коррекция терминов только по словарю")
+            return None, 0
+        except requests.exceptions.ConnectionError as e:
+            log(f"⚠️ LLM недоступен — коррекция терминов только по словарю: {e}")
+            return None, 0
         except Exception as e:
             log(f"⚠️ LLM недоступен — коррекция терминов только по словарю: {e}")
             return None, 0
@@ -1429,23 +1465,30 @@ class Pipeline:
             # a plain cache-hit here would silently serve corrected text for the
             # WRONG transcript. Guard with a hash of the pre-correction segments.
             input_hash = _segments_text_hash(segments)
+            # A cache hit is only honored when the LLM pass actually succeeded
+            # (llm_ok) — a transient timeout/outage must not lock a degraded,
+            # dictionary-only result in forever; missing key (pre-existing
+            # caches from before this field existed) is treated as not-ok too,
+            # so old caches recompute once rather than being trusted blindly.
             cached_c = self._cache_read(cj) if (cj and cj.exists()) else None
-            if cached_c and cached_c.get("input_hash") == input_hash:
+            if cached_c and cached_c.get("input_hash") == input_hash and cached_c.get("llm_ok") is True:
                 segments, transcript = cached_c["segments"], cached_c["transcript"]
                 stage_end("correct", "ok", f"{cached_c.get('count', 0)} терминов (из кеша)")
             else:
                 segments, stage1_reps = fuzzy_correct(segments, terms)
                 llm_segments, llm_count = self.correct_glossary_llm(segments, terms)
                 total = len(stage1_reps)
-                if llm_segments is not None:
+                llm_ok = llm_segments is not None
+                if llm_ok:
                     segments = llm_segments
                     total += llm_count
                 transcript = " ".join(s["text"].strip() for s in segments if s["text"].strip())
                 log(f"✅ Исправлено терминов: {total}")
                 if cj:
                     self._cache_write(cj, {"segments": segments, "transcript": transcript,
-                                            "count": total, "input_hash": input_hash})
-                if llm_segments is None:
+                                            "count": total, "input_hash": input_hash,
+                                            "llm_ok": llm_ok})
+                if not llm_ok:
                     stage_end("correct", "fail", f"LLM недоступен — {total} по словарю")
                 else:
                     stage_end("correct", "ok", f"Исправлено терминов: {total}")

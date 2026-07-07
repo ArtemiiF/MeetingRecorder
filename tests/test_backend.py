@@ -102,6 +102,12 @@ def _no_real_lmstudio_by_default(monkeypatch):
 
     fake.post = lambda *a, **k: _DefaultResp()
     fake.get = lambda *a, **k: _DefaultResp()
+    # see install_fake_requests below for why .exceptions must exist even
+    # though this default stub never raises. Module-level names resolve at
+    # call time, so referencing the classes defined further down the file is
+    # safe here.
+    fake.exceptions = types.SimpleNamespace(
+        Timeout=FakeRequestsTimeout, ConnectionError=FakeRequestsConnectionError)
     monkeypatch.setitem(sys.modules, "requests", fake)
 
 
@@ -201,6 +207,20 @@ def test_basic_note_has_frontmatter_and_heading(pipe):
 
 
 # ── summarize (mock LM Studio over requests) ────────────────────────────────
+class FakeRequestsTimeout(Exception):
+    """Stand-in for requests.exceptions.Timeout. Real requests's exception
+    hierarchy is unrelated to the builtin TimeoutError (verified against the
+    installed requests package), so a test that wants to exercise
+    correct_glossary_llm's Timeout-specific branch must raise THIS class —
+    install_fake_requests registers it as the fake module's
+    `.exceptions.Timeout` so `except requests.exceptions.Timeout` matches it
+    exactly like it would the real thing."""
+
+
+class FakeRequestsConnectionError(Exception):
+    """Stand-in for requests.exceptions.ConnectionError — see FakeRequestsTimeout."""
+
+
 def install_fake_requests(monkeypatch, *, status=200, payload=None, raise_exc=None):
     fake = types.ModuleType("requests")
     calls = {}
@@ -213,11 +233,21 @@ def install_fake_requests(monkeypatch, *, status=200, payload=None, raise_exc=No
     def post(url, json=None, timeout=None):
         calls["url"] = url
         calls["json"] = json
+        calls["timeout"] = timeout
         if raise_exc:
             raise raise_exc
         return Resp()
 
     fake.post = post
+    # correct_glossary_llm's except clauses match requests.exceptions.Timeout /
+    # .ConnectionError by name — Python evaluates that attribute lookup to
+    # check for a match on EVERY exception raised in the try block, so the
+    # fake module needs this shape even for tests that raise some other
+    # exception entirely (e.g. a plain builtin ConnectionError), or the
+    # lookup itself blows up with AttributeError before the real except
+    # clause is ever reached.
+    fake.exceptions = types.SimpleNamespace(
+        Timeout=FakeRequestsTimeout, ConnectionError=FakeRequestsConnectionError)
     monkeypatch.setitem(sys.modules, "requests", fake)
     return calls
 
@@ -2736,6 +2766,29 @@ def test_gate_empty_terms_is_noop_passthrough():
     assert backend.gate_llm_correction(original, "Позвал Антон на встречу", []) == original
 
 
+# ── _llm_correct_budget (adaptive max_tokens/timeout for correct_glossary_llm) ──
+def test_llm_correct_budget_known_value():
+    max_tokens, timeout = backend._llm_correct_budget(300)
+    assert max_tokens == 2500 + 100  # reasoning headroom + ceil(300/3)
+    assert timeout == pytest.approx(30 + 2600 / 15)
+
+
+def test_llm_correct_budget_floor_at_zero_chars():
+    # even an empty chunk gets the full reasoning headroom — that's the floor,
+    # not zero, because a reasoning model burns tokens on "thinking" before it
+    # emits any visible output regardless of input size.
+    max_tokens, timeout = backend._llm_correct_budget(0)
+    assert max_tokens == 2500
+    assert timeout == pytest.approx(30 + 2500 / 15)
+
+
+def test_llm_correct_budget_monotonic_in_chunk_len():
+    small_tokens, small_timeout = backend._llm_correct_budget(100)
+    large_tokens, large_timeout = backend._llm_correct_budget(5000)
+    assert large_tokens > small_tokens
+    assert large_timeout > small_timeout
+
+
 # ── correct_glossary_llm (Stage 2 I/O) + the `correct` pipeline stage ───────
 def test_correct_glossary_llm_applies_accepted_correction_to_matching_segment(monkeypatch, pipe):
     payload = {"choices": [{"message": {"content": "Позвал Антон на встречу"}}]}
@@ -2763,6 +2816,20 @@ def test_correct_glossary_llm_returns_none_and_logs_when_requests_raises(monkeyp
     events = capture(pipe.correct_glossary_llm, segs, ["Антон"])
     logs = [e["msg"] for e in events if e["event"] == "log"]
     assert any("LLM недоступен" in m for m in logs)
+
+
+def test_correct_glossary_llm_timeout_logs_specific_message_not_generic_down(monkeypatch, pipe):
+    # A slow-but-working model (Timeout) must NOT be reported the same way as
+    # a genuinely unreachable one (ConnectionError/generic) — that mislabeling
+    # is exactly the bug this fix addresses (a 157s real generation reported
+    # as "LLM недоступен" under the old fixed 120s timeout).
+    install_fake_requests(monkeypatch, raise_exc=FakeRequestsTimeout("Read timed out"))
+    segs = [seg("привет Онтон тут", 0, 3)]
+    assert pipe.correct_glossary_llm(segs, ["Антон"]) == (None, 0)
+    events = capture(pipe.correct_glossary_llm, segs, ["Антон"])
+    logs = [e["msg"] for e in events if e["event"] == "log"]
+    assert any("LLM не ответил за" in m for m in logs)
+    assert not any("недоступен" in m for m in logs)
 
 
 def test_correct_stage_skipped_when_glossary_empty_byte_identical_no_llm_call(monkeypatch, tmp_path):
@@ -2819,12 +2886,99 @@ def test_correct_stage_cache_honored_on_retry_skips_llm_recompute(monkeypatch, t
         monkeypatch.setattr(p, "summarize", lambda t, pr: None)
         return p
 
-    capture(fresh_pipe().process, str(src), "p")           # first run → corrects + caches
-    events = capture(fresh_pipe().process, str(src), "p")  # retry, same cache_dir → resumes from cache
+    p1 = fresh_pipe()
+    capture(p1.process, str(src), "p")                      # first run → corrects + caches
+    events = capture(fresh_pipe().process, str(src), "p")   # retry, same cache_dir → resumes from cache
 
     assert llm_calls["n"] == 1  # Stage-2 LLM ran ONCE; the retry reused the cache
     ends = {e["stage"]: e for e in events if e["event"] == "stage_end"}
     assert "из кеша" in ends["correct"]["msg"]
+
+    cj = p1._cache(f"correct-ru{p1._glossary_cache_suffix()}.json")
+    assert json.loads(cj.read_text(encoding="utf-8"))["llm_ok"] is True
+
+
+def test_correct_stage_degraded_cache_writes_llm_ok_false(monkeypatch, tmp_path):
+    src = tmp_path / "in.wav"; src.write_bytes(b"x")
+    cache = tmp_path / "cache"
+    p = backend.Pipeline(out_dir=str(tmp_path / "v"), diarize=False,
+                          cache_dir=str(cache), glossary="Антон")
+    monkeypatch.setattr(p, "convert_to_mono", lambda f: f)
+    monkeypatch.setattr(p, "remove_silence_vad", lambda f: (f, None))
+    monkeypatch.setattr(p, "transcribe", lambda f: {"segments": [seg("привет Онтон тут", 0, 3)], "text": "x"})
+    monkeypatch.setattr(p, "summarize", lambda t, pr: None)
+    monkeypatch.setattr(p, "correct_glossary_llm", lambda segs, terms: (None, 0))  # LM Studio down
+
+    capture(p.process, str(src), "prompt")
+
+    cj = p._cache(f"correct-ru{p._glossary_cache_suffix()}.json")
+    assert json.loads(cj.read_text(encoding="utf-8"))["llm_ok"] is False
+
+
+def test_correct_stage_degraded_cache_not_reused_on_retry(monkeypatch, tmp_path):
+    # A transient LLM outage/timeout must not lock the degraded, dictionary-only
+    # result in forever — each retry should try the LLM again until it succeeds.
+    src = tmp_path / "in.wav"; src.write_bytes(b"x")
+    cache = tmp_path / "cache"
+    llm_calls = {"n": 0}
+
+    def fake_correct_llm(self, segs, terms):
+        llm_calls["n"] += 1
+        return None, 0  # LM Studio down every time
+
+    monkeypatch.setattr(backend.Pipeline, "correct_glossary_llm", fake_correct_llm)
+
+    def fresh_pipe():
+        p = backend.Pipeline(out_dir=str(tmp_path / "v"), diarize=False,
+                              cache_dir=str(cache), glossary="Антон")
+        monkeypatch.setattr(p, "convert_to_mono", lambda f: f)
+        monkeypatch.setattr(p, "remove_silence_vad", lambda f: (f, None))
+        monkeypatch.setattr(p, "transcribe", lambda f: {"segments": [seg("привет Онтон тут", 0, 3)], "text": "x"})
+        monkeypatch.setattr(p, "summarize", lambda t, pr: None)
+        return p
+
+    capture(fresh_pipe().process, str(src), "p")            # first run → degraded, cached w/ llm_ok=False
+    events = capture(fresh_pipe().process, str(src), "p")   # retry → must NOT trust the degraded cache
+
+    assert llm_calls["n"] == 2  # both runs actually invoked the LLM stage — no false cache hit
+    ends = {e["stage"]: e for e in events if e["event"] == "stage_end"}
+    assert ends["correct"]["status"] == "fail"
+    assert "из кеша" not in ends["correct"]["msg"]
+
+
+def test_correct_stage_old_format_cache_without_llm_ok_not_served(monkeypatch, tmp_path):
+    # A cache file written before llm_ok existed lacks the key entirely — must
+    # be treated as not-ok (recompute once) rather than trusted blindly.
+    src = tmp_path / "in.wav"; src.write_bytes(b"x")
+    cache = tmp_path / "cache"
+    llm_calls = {"n": 0}
+
+    def fake_correct_llm(self, segs, terms):
+        llm_calls["n"] += 1
+        return segs, 0
+
+    monkeypatch.setattr(backend.Pipeline, "correct_glossary_llm", fake_correct_llm)
+
+    p = backend.Pipeline(out_dir=str(tmp_path / "v"), diarize=False,
+                          cache_dir=str(cache), glossary="Антон")
+    monkeypatch.setattr(p, "convert_to_mono", lambda f: f)
+    monkeypatch.setattr(p, "remove_silence_vad", lambda f: (f, None))
+    monkeypatch.setattr(p, "transcribe", lambda f: {"segments": [seg("привет Онтон тут", 0, 3)], "text": "x"})
+    monkeypatch.setattr(p, "summarize", lambda t, pr: None)
+
+    stub_segments = [seg("привет Онтон тут", 0, 3)]
+    input_hash = backend._segments_text_hash(stub_segments)
+    cj = p._cache(f"correct-ru{p._glossary_cache_suffix()}.json")
+    backend.Pipeline._cache_write(cj, {  # pre-existing cache from before llm_ok existed
+        "segments": stub_segments, "transcript": "привет Онтон тут",
+        "count": 0, "input_hash": input_hash,
+    })
+
+    events = capture(p.process, str(src), "prompt")
+
+    assert llm_calls["n"] == 1  # recomputed — old-format cache without llm_ok is not trusted
+    ends = {e["stage"]: e for e in events if e["event"] == "stage_end"}
+    assert "из кеша" not in ends["correct"]["msg"]
 
 
 # ── suggest_glossary_terms (glossary auto-enrichment LLM pass) + `suggest` stage ──
