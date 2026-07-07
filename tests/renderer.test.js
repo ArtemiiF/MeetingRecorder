@@ -1713,7 +1713,8 @@ test("auto-«Я» inputs are absent when processing an imported file (History �
   const { window, $ } = await boot({ processAudio: async (opts) => { sent = opts; return { ok: true }; } });
   window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
   $("historyList").querySelector(".rail-item").click(); await tick(window);
-  $("noteView").querySelector("#nvReprocess").click(); await tick(window);
+  $("noteView").querySelector("#nvReprocess").click(); await tick(window); // opens the template picker
+  $("noteView").querySelector("#reprocessConfirm").click(); await tick(window); // confirm → run
   assert.ok(sent, "processAudio was not called");
   assert.equal(sent.micFile, undefined);
   assert.equal(sent.systemFile, undefined);
@@ -2137,6 +2138,16 @@ test("main.js: loadPresetsData() gates every encryptionAvailable() call on token
   // returning, so the ternary above actually has a `token` binding to gate on.
   const fallbackBranch = loadPresetsData.match(/catch \{\s*const token = loadToken\(\);\s*\n[\s\S]*?\n\s*\}\s*\n\s*\}/);
   assert.ok(fallbackBranch, "expected `const token = loadToken()` bound before the fallback's gated return");
+});
+
+// ── stable per-preset ids (prompts-tab / reprocess-picker feature) ──────────
+test("main.js: loadPresetsData() backfills crypto.randomUUID() ids onto presets missing one, and persists the backfill", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const loadPresetsData = mainSrc.match(/function loadPresetsData\(\)[\s\S]*?\n\}/)[0];
+  assert.match(loadPresetsData, /!p\.id/, "expected a check for presets missing an id");
+  assert.match(loadPresetsData, /crypto\.randomUUID\(\)/, "expected the backfill to mint a crypto.randomUUID()");
+  assert.match(loadPresetsData, /writeJsonAtomic\(PRESETS_FILE/, "backfill must be persisted, not just held in memory");
+  assert.ok(!/safeStorage\./.test(loadPresetsData), "the backfill must not touch safeStorage");
 });
 
 // ── settings "Модели" section (model inventory + pre-download) ─────────────
@@ -2618,12 +2629,13 @@ test("batch import: per-row retry is blocked while another item in the batch is 
   assert.ok(rows[0].classList.contains("queue-failed"), "the blocked row's status must stay untouched");
 });
 
-test("reprocessHistory() still triggers an immediate single run (queue-of-1 regression guard)", async () => {
+test("reprocessHistory() still triggers a single run once confirmed in the picker (queue-of-1 regression guard)", async () => {
   let calls = 0;
   const { window, $ } = await boot({ processAudio: async () => { calls++; return { ok: true }; } });
   window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
   $("historyList").querySelector(".rail-item").click(); await tick(window);
-  $("noteView").querySelector("#nvReprocess").click(); await tick(window);
+  $("noteView").querySelector("#nvReprocess").click(); await tick(window); // opens the template picker
+  $("noteView").querySelector("#reprocessConfirm").click(); await tick(window); // confirm → run
   assert.equal(calls, 1);
   const rows = $("importQueue").querySelectorAll(".queue-item");
   assert.equal(rows.length, 1);
@@ -3464,4 +3476,197 @@ test("main.js: runUpdateInstall detects EXDEV on the swap-in rename and reports 
   const runUpdate = mainSrc.match(/async function runUpdateInstall\(\) \{[\s\S]*?\n\}\n/)[0];
   assert.match(runUpdate, /e\.code === "EXDEV"/);
   assert.match(runUpdate, /Обновление не поддерживается, когда приложение установлено на другом томе/);
+});
+
+// ── «Промпты» tab: template CRUD relocated off the record card ─────────────
+test("Промпты tab: renders one rail item per preset, and switching to it doesn't disturb the record-card compact select", async () => {
+  const { window, $ } = await boot({
+    getPresets: async () => ({
+      presets: [{ id: "p1", name: "A", prompt: "prompt A" }, { id: "p2", name: "B", prompt: "prompt B" }],
+      defaultOutDir: "/tmp", hfToken: "", language: "ru",
+    }),
+  });
+  await tick(window);
+  window.document.querySelector('.topbtn[data-view="prompts"]').click();
+  await tick(window);
+  const rows = $("promptsList").querySelectorAll(".rail-item");
+  assert.equal(rows.length, 2);
+  assert.deepEqual(Array.from(rows).map((r) => r.textContent), ["A", "B"]);
+  assert.ok(rows[0].classList.contains("active"), "first preset is selected by default (selectPreset(0) on boot)");
+  assert.equal($("presetSelect").value, "0", "record-card compact select is unaffected by viewing the tab");
+});
+
+test("Промпты tab: clicking a rail item loads it into the editor and syncs the compact record-card select", async () => {
+  const { window, $ } = await boot({
+    getPresets: async () => ({
+      presets: [{ id: "p1", name: "A", prompt: "prompt A" }, { id: "p2", name: "B", prompt: "prompt B" }],
+      defaultOutDir: "/tmp", hfToken: "", language: "ru",
+    }),
+  });
+  await tick(window);
+  window.document.querySelector('.topbtn[data-view="prompts"]').click();
+  await tick(window);
+  $("promptsList").querySelectorAll(".rail-item")[1].click();
+  await tick(window);
+  assert.equal($("promptsName").value, "B");
+  assert.equal($("promptsPrompt").value, "prompt B");
+  assert.equal($("presetSelect").value, "1", "compact select follows the tab's selection");
+  const rows = $("promptsList").querySelectorAll(".rail-item");
+  assert.ok(rows[1].classList.contains("active"));
+  assert.ok(!rows[0].classList.contains("active"));
+});
+
+test("record-card compact select drives state.currentPreset and the prompt/template actually sent to processAudio", async () => {
+  let sent = null;
+  const { window, $ } = await boot({
+    getPresets: async () => ({
+      presets: [{ id: "p1", name: "A", prompt: "prompt A" }, { id: "p2", name: "B", prompt: "prompt B" }],
+      defaultOutDir: "/tmp", hfToken: "", language: "ru",
+    }),
+    pickAudio: async () => ["/tmp/a.wav"],
+    processAudio: async (opts) => { sent = opts; return { ok: true }; },
+  });
+  await tick(window);
+  $("presetSelect").value = "1";
+  $("presetSelect").dispatchEvent(new window.Event("change"));
+  await tick(window);
+  goImportTab(window);
+  $("pickBtn").click(); await tick(window);
+  $("runBtn").click(); await tick(window);
+  assert.ok(sent, "processAudio was not called");
+  assert.equal(sent.prompt, "prompt B");
+  assert.equal(sent.template, "B");
+});
+
+test("Промпты tab: adding a template appends a preset with a generated id and persists it", async () => {
+  let saved = null;
+  const { window, $ } = await boot({
+    getPresets: async () => ({ presets: [{ id: "p1", name: "A", prompt: "prompt A" }], defaultOutDir: "/tmp", hfToken: "", language: "ru" }),
+    savePresets: async (data) => { saved = data; return true; },
+  });
+  await tick(window);
+  window.document.querySelector('.topbtn[data-view="prompts"]').click();
+  await tick(window);
+  $("promptsNewBtn").click();
+  await tick(window);
+  assert.ok(saved, "savePresets was not called");
+  assert.equal(saved.presets.length, 2);
+  assert.equal(saved.presets[1].name, "Новый пресет");
+  assert.ok(saved.presets[1].id, "the new preset must carry a generated id");
+  assert.notEqual(saved.presets[1].id, "p1");
+  const rows = $("promptsList").querySelectorAll(".rail-item");
+  assert.equal(rows.length, 2);
+});
+
+test("Промпты tab: renaming the selected template persists the new name under the same id", async () => {
+  let saved = null;
+  const { window, $ } = await boot({
+    getPresets: async () => ({ presets: [{ id: "p1", name: "A", prompt: "prompt A" }], defaultOutDir: "/tmp", hfToken: "", language: "ru" }),
+    savePresets: async (data) => { saved = data; return true; },
+  });
+  await tick(window);
+  window.document.querySelector('.topbtn[data-view="prompts"]').click();
+  await tick(window);
+  $("promptsName").value = "Renamed";
+  $("promptsName").dispatchEvent(new window.Event("change"));
+  await tick(window);
+  assert.ok(saved, "savePresets was not called");
+  assert.equal(saved.presets[0].id, "p1");
+  assert.equal(saved.presets[0].name, "Renamed");
+  assert.equal($("presetSelect").selectedOptions[0].textContent, "Renamed", "compact record-card select reflects the rename");
+});
+
+test("Промпты tab: deleting the selected template removes it and persists", async () => {
+  let saved = null;
+  const { window, $ } = await boot({
+    getPresets: async () => ({
+      presets: [{ id: "p1", name: "A", prompt: "a" }, { id: "p2", name: "B", prompt: "b" }],
+      defaultOutDir: "/tmp", hfToken: "", language: "ru",
+    }),
+    savePresets: async (data) => { saved = data; return true; },
+  });
+  await tick(window);
+  window.document.querySelector('.topbtn[data-view="prompts"]').click();
+  await tick(window);
+  $("promptsDelBtn").click();
+  await tick(window);
+  assert.ok(saved, "savePresets was not called");
+  assert.equal(saved.presets.length, 1);
+  assert.equal(saved.presets[0].id, "p2");
+});
+
+// ── История reprocess picker (owner decision: no more silent reuse of whatever the
+// record card last held) ────────────────────────────────────────────────────
+test("reprocess picker pre-selects the note's own template when a matching preset still exists", async () => {
+  const { window, $ } = await boot({
+    getPresets: async () => ({
+      presets: [{ id: "p1", name: "Митинг", prompt: "prompt M" }, { id: "p2", name: "Интервью", prompt: "prompt I" }],
+      defaultOutDir: "/tmp", hfToken: "", language: "ru",
+    }),
+    listHistory: async () => [{ name: "2026-01-01", title: "Синк", template: "Интервью", note: "/o/x.md", audio: "/o/x.wav" }],
+  });
+  await tick(window);
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  $("historyList").querySelector(".rail-item:not(.pending)").click(); await tick(window);
+  $("noteView").querySelector("#nvReprocess").click(); await tick(window);
+  const sel = $("noteView").querySelector("#reprocessPresetSelect");
+  assert.ok(sel, "picker select must be rendered");
+  assert.equal(sel.value, "p2", "pre-selected to the note's own template (Интервью)");
+});
+
+test("reprocess picker falls back to the current global template when the note's template no longer exists", async () => {
+  const { window, $ } = await boot({
+    getPresets: async () => ({
+      presets: [{ id: "p1", name: "Митинг", prompt: "prompt M" }, { id: "p2", name: "Интервью", prompt: "prompt I" }],
+      defaultOutDir: "/tmp", hfToken: "", language: "ru",
+    }),
+    listHistory: async () => [{ name: "2026-01-01", title: "Синк", template: "Удалённый шаблон", note: "/o/x.md", audio: "/o/x.wav" }],
+  });
+  await tick(window);
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  $("historyList").querySelector(".rail-item:not(.pending)").click(); await tick(window);
+  $("noteView").querySelector("#nvReprocess").click(); await tick(window);
+  const sel = $("noteView").querySelector("#reprocessPresetSelect");
+  assert.equal(sel.value, "p1", "falls back to state.currentPreset (index 0 by default)");
+});
+
+test("reprocess picker: confirming sends the CHOSEN preset's prompt/template to processAudio, not the current global preset", async () => {
+  let sent = null;
+  const { window, $ } = await boot({
+    getPresets: async () => ({
+      presets: [{ id: "p1", name: "Митинг", prompt: "prompt M" }, { id: "p2", name: "Интервью", prompt: "prompt I" }],
+      defaultOutDir: "/tmp", hfToken: "", language: "ru",
+    }),
+    listHistory: async () => [{ name: "2026-01-01", title: "Синк", template: "Интервью", note: "/o/x.md", audio: "/o/x.wav" }],
+    processAudio: async (opts) => { sent = opts; return { ok: true }; },
+  });
+  await tick(window);
+  // state.currentPreset defaults to 0 ("Митинг") on boot — the picker must still send
+  // the explicitly chosen "Интервью" preset, not the global default.
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  $("historyList").querySelector(".rail-item:not(.pending)").click(); await tick(window);
+  $("noteView").querySelector("#nvReprocess").click(); await tick(window);
+  $("noteView").querySelector("#reprocessConfirm").click(); await tick(window);
+  assert.ok(sent, "processAudio was not called");
+  assert.equal(sent.prompt, "prompt I");
+  assert.equal(sent.template, "Интервью");
+});
+
+test("reprocess picker: cancel closes the panel and runs nothing", async () => {
+  let calls = 0;
+  const { window, $ } = await boot({
+    getPresets: async () => ({
+      presets: [{ id: "p1", name: "Митинг", prompt: "prompt M" }], defaultOutDir: "/tmp", hfToken: "", language: "ru",
+    }),
+    listHistory: async () => [{ name: "2026-01-01", title: "Синк", template: "Митинг", note: "/o/x.md", audio: "/o/x.wav" }],
+    processAudio: async () => { calls++; return { ok: true }; },
+  });
+  await tick(window);
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  $("historyList").querySelector(".rail-item:not(.pending)").click(); await tick(window);
+  $("noteView").querySelector("#nvReprocess").click(); await tick(window);
+  assert.ok($("noteView").querySelector("#reprocessPresetSelect"), "picker must be open before cancel");
+  $("noteView").querySelector("#reprocessCancel").click(); await tick(window);
+  assert.equal(calls, 0, "cancel must not trigger a run");
+  assert.ok(!$("noteView").querySelector("#reprocessPresetSelect"), "panel must be removed on cancel");
 });
