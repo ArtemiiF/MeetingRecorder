@@ -31,6 +31,9 @@ const state = {
   glossary: "",
   glossarySuggestions: [], // pending candidates from the "suggest" pipeline stage — accept/dismiss
   glossaryDismissed: [],   // dismissed candidates (original case; compared lowercased) — never re-suggested
+  glossaryUsage: {},       // cumulative {termLower: fireCount} — merged in from each "done" event
+                           // (see mergeGlossaryUsage), fed back to backend.py to order the
+                           // Whisper initial_prompt's terms before its token-budget truncation.
   para: null, // { root, folders: {projects, areas, resources, archives} }
 };
 
@@ -596,6 +599,7 @@ async function init() {
   state.glossary = data.glossary || DEFAULT_GLOSSARY;
   state.glossarySuggestions = data.glossarySuggestions || [];
   state.glossaryDismissed = data.glossaryDismissed || [];
+  state.glossaryUsage = data.glossaryUsage || {};
   state.para = data.para || null;
   state.secretEncrypted = data.secretEncrypted !== false;
   $("outDir").value = state.outDir;
@@ -708,6 +712,7 @@ async function persistPresets() {
     glossary: state.glossary,
     glossarySuggestions: state.glossarySuggestions,
     glossaryDismissed: state.glossaryDismissed,
+    glossaryUsage: state.glossaryUsage,
     para: state.para,
   });
 }
@@ -737,10 +742,13 @@ $("fastModel").addEventListener("change", (e) => {
   persistPresets();
 });
 
+// Textarea accepts either a comma- OR newline-separated paste ("Импорт/экспорт
+// текстом") — parseGlossaryTerms already splits on both, and routing through
+// setGlossaryTerms normalizes whatever was pasted back into the canonical
+// ", "-joined form (both in state.glossary and mirrored into the textarea
+// itself), rather than storing the raw pasted text verbatim.
 $("glossary").addEventListener("change", (e) => {
-  state.glossary = e.target.value || "";
-  renderGlossaryChips();
-  persistPresets();
+  setGlossaryTerms(parseGlossaryTerms(e.target.value));
 });
 
 // ── glossary: chip list (add / remove / merge defaults) ─────────────────────
@@ -764,24 +772,91 @@ function showGlossaryHint(msg) {
   el.classList.toggle("hidden", !msg);
 }
 
+// Case-insensitive membership check — same normalization mergeDefaultGlossary
+// already uses (compare lowercased) — so a term classifies into the SAME
+// section ("Мои" vs "Стандартные") whether it arrived via chip-add, textarea
+// paste, or "Дополнить распространёнными".
+const DEFAULT_GLOSSARY_TERMS_LOWER = new Set(parseGlossaryTerms(DEFAULT_GLOSSARY).map((t) => t.toLowerCase()));
+
+let glossaryFilterQuery = "";        // transient live-filter text — UI-only, never persisted
+let glossaryDefaultCollapsed = true; // "Стандартные" starts collapsed each session — UI-only, never persisted
+
+function usageBadge(term) {
+  const n = (state.glossaryUsage || {})[term.toLowerCase()] || 0;
+  return n > 0 ? ` <span class="chip-usage">${n}×</span>` : "";
+}
+
+function glossaryChipHtml(t) {
+  return `<span class="chip"><span class="chip-text">${escapeHtml(t)}${usageBadge(t)}</span>` +
+    `<button type="button" class="chip-remove" aria-label="Удалить">×</button></span>`;
+}
+
+// Chips split into "Мои" (custom terms, always shown) and "Стандартные" (terms
+// that are also in DEFAULT_GLOSSARY — there can be 100+, so collapsed by
+// default with a toggle). A live substring filter narrows both sections and
+// forces "Стандартные" open while it has matches, so a hidden default term is
+// still reachable by typing instead of manually expanding first.
 function renderGlossaryChips() {
   const terms = parseGlossaryTerms(state.glossary);
   const box = $("glossaryChips");
-  box.innerHTML = terms.length
-    ? terms.map((t) =>
-        `<span class="chip"><span class="chip-text">${escapeHtml(t)}</span>` +
-        `<button type="button" class="chip-remove" aria-label="Удалить">×</button></span>`
-      ).join("")
-    : '<p class="hint">Список пуст — добавь термин ниже.</p>';
-  // Term is captured via closure (index into `terms`, the same array that produced
-  // this innerHTML, in the same order) rather than round-tripped through a
-  // data-* attribute — a term containing a `"` would otherwise break out of the
-  // attribute (escapeHtml only escapes &<>, not quotes) and also desync removal,
-  // since the garbled attribute value would no longer match the original term.
-  box.querySelectorAll(".chip-remove").forEach((btn, i) =>
-    btn.addEventListener("click", () => removeGlossaryTerm(terms[i])));
-  $("glossaryCount").textContent = terms.length + " терминов";
+  const q = glossaryFilterQuery.trim().toLowerCase();
+  const matches = (t) => !q || t.toLowerCase().includes(q);
+
+  if (!terms.length) {
+    box.innerHTML = '<p class="hint">Список пуст — добавь термин ниже.</p>';
+    $("glossaryCount").textContent = "0 терминов";
+    return;
+  }
+
+  const mineTerms = terms.filter((t) => !DEFAULT_GLOSSARY_TERMS_LOWER.has(t.toLowerCase()));
+  const defaultTerms = terms.filter((t) => DEFAULT_GLOSSARY_TERMS_LOWER.has(t.toLowerCase()));
+  const mineShown = mineTerms.filter(matches);
+  const defaultShown = defaultTerms.filter(matches);
+  const totalShown = mineShown.length + defaultShown.length;
+
+  if (q && !totalShown) {
+    box.innerHTML = '<p class="hint">Ничего не найдено по фильтру.</p>';
+  } else {
+    const expandDefault = !glossaryDefaultCollapsed || (!!q && defaultShown.length > 0);
+    const defaultCountLabel = q ? `${defaultShown.length} из ${defaultTerms.length}` : `${defaultTerms.length}`;
+    box.innerHTML =
+      `<div id="glossaryChipsMine" class="chip-list">${mineShown.map(glossaryChipHtml).join("")}</div>` +
+      (defaultTerms.length
+        ? `<div class="glossary-section-default">` +
+          `<button type="button" id="glossaryDefaultToggle" class="glossary-section-toggle">` +
+          `<span class="glossary-caret">${expandDefault ? "▾" : "▸"}</span> Стандартные ` +
+          `<span class="glossary-count">${defaultCountLabel}</span></button>` +
+          `<div class="chip-list glossary-default-chips${expandDefault ? "" : " hidden"}">` +
+          `${defaultShown.map(glossaryChipHtml).join("")}</div></div>`
+        : "");
+    // Term is captured via closure (index into the SHOWN array that produced
+    // each section's innerHTML) rather than round-tripped through a data-*
+    // attribute — a term containing a `"` would otherwise break out of the
+    // attribute (escapeHtml only escapes &<>, not quotes) and also desync
+    // removal, since the garbled attribute value would no longer match the
+    // original term.
+    box.querySelector("#glossaryChipsMine").querySelectorAll(".chip-remove").forEach((btn, i) =>
+      btn.addEventListener("click", () => removeGlossaryTerm(mineShown[i])));
+    const defaultBox = box.querySelector(".glossary-default-chips");
+    if (defaultBox) {
+      defaultBox.querySelectorAll(".chip-remove").forEach((btn, i) =>
+        btn.addEventListener("click", () => removeGlossaryTerm(defaultShown[i])));
+    }
+    const toggleBtn = box.querySelector("#glossaryDefaultToggle");
+    if (toggleBtn) {
+      toggleBtn.addEventListener("click", () => {
+        glossaryDefaultCollapsed = !glossaryDefaultCollapsed;
+        renderGlossaryChips();
+      });
+    }
+  }
+  $("glossaryCount").textContent = q ? `${totalShown} из ${terms.length} терминов` : `${terms.length} терминов`;
 }
+
+$("glossaryFilter").addEventListener("input", (e) => {
+  glossaryFilterQuery = e.target.value || "";
+  renderGlossaryChips();
+});
 
 function addGlossaryTerm() {
   const input = $("glossaryNewTerm");
@@ -902,6 +977,21 @@ function acceptAllGlossarySuggestions() {
 }
 
 $("glossaryAcceptAll").addEventListener("click", acceptAllGlossarySuggestions);
+
+// ── glossary: cumulative usage counts (badges + initial_prompt ordering) ────
+// `delta` is THIS run's {termLower: count} from the done event (see backend.py's
+// glossary_usage field) — merged additively into the cumulative store so a chip's
+// "12×" badge (see usageBadge) reflects fires across every run, not just the last.
+function mergeGlossaryUsage(delta) {
+  if (!delta || typeof delta !== "object") return;
+  const keys = Object.keys(delta);
+  if (!keys.length) return;
+  const usage = Object.assign({}, state.glossaryUsage || {});
+  keys.forEach((k) => { usage[k] = (usage[k] || 0) + (delta[k] || 0); });
+  state.glossaryUsage = usage;
+  renderGlossaryChips();
+  persistPresets();
+}
 
 function updateTokenWarn() {
   const warn = $("tokenWarn");
@@ -1407,6 +1497,7 @@ async function startProcessing(fresh, item, override) {
     fresh: !!fresh,
     language: state.language,
     glossary: state.glossary,
+    glossaryUsage: state.glossaryUsage,
     fastModel: state.fastModel,
     summarize: !$("noSummary").checked,
     template: override ? override.template : (activePreset.name || ""),
@@ -1462,6 +1553,7 @@ window.api.onProcessEvent((ev) => {
   } else if (ev.event === "done") {
     showResult(ev);
     mergeGlossarySuggestions(ev.suggestions);
+    mergeGlossaryUsage(ev.glossary_usage);
     runEnded = true;
     finishProcessing();
     refreshHistory();
