@@ -336,6 +336,18 @@
       </section>
 
       <section class="modal-sec">
+        <h3>Обновления <button id="updateCheckBtn" class="btn small">⟳ Проверить обновления</button></h3>
+        <div id="updateStatusRow" class="pf-row"></div>
+        <div class="out-row">
+          <button id="updateInstallBtn" class="btn small hidden">⬇ Скачать и установить</button>
+          <button id="updateCancelBtn" class="btn small danger hidden">Отменить</button>
+          <span id="updateInstallStatus" class="hint"></span>
+        </div>
+        <p id="updateDevHint" class="hint hidden">Установка обновлений доступна только в собранном приложении — в режиме разработки только проверка.</p>
+        <p class="hint">После обновления macOS может заново спросить разрешения (ad-hoc подпись меняется между сборками).</p>
+      </section>
+
+      <section class="modal-sec">
         <h3>Сброс</h3>
         <p class="hint">Заметки и записи в Obsidian не пострадают — сброс касается только настроек приложения.</p>
         <button id="resetAppBtn" class="btn small danger">Сбросить и настроить заново</button>

@@ -16,7 +16,7 @@ const {
   resolveOutDirOnVaultChange, trayMenuTemplate,
   resolvePythonBin, resolveFfmpegBin, resolveResourcePath, resolveAudioTeeBin, resolveAssetPath, backendInstallStatus,
   whisperModelDir, vadJitPath, diarizationModelDirs, appReadinessStatus,
-  cleanupPartialModelCache,
+  cleanupPartialModelCache, compareVersions, pickUpdateAsset,
 } = require("./lib/mainutil");
 
 // audiotee is ESM-only — load it lazily via dynamic import() from this CommonJS module.
@@ -309,6 +309,7 @@ function refreshTray() {
 
 app.whenReady().then(() => {
   try { pruneTemp(7 * 24 * 3600 * 1000); } catch {}
+  try { cleanupUpdateLeftovers(); } catch {}
   createWindow();
   createTray();
 });
@@ -334,13 +335,15 @@ app.on("before-quit", async (e) => {
     if (modelDlProc) modelDlProc.kill();
     if (searchProc) searchProc.kill();
     if (installBackendProc) installBackendProc.kill();
+    if (updateProc) updateProc.kill();
     app.quit();
-  } else if (procProc || autoIndexProc || modelDlProc || searchProc || installBackendProc) {
+  } else if (procProc || autoIndexProc || modelDlProc || searchProc || installBackendProc || updateProc) {
     if (procProc) procProc.kill();
     if (autoIndexProc) autoIndexProc.kill();
     if (modelDlProc) modelDlProc.kill();
     if (searchProc) searchProc.kill();
     if (installBackendProc) installBackendProc.kill();
+    if (updateProc) updateProc.kill();
   }
 });
 app.on("window-all-closed", () => {
@@ -994,16 +997,21 @@ const FFMPEG_STATIC_SHA256 = "ebb82529562b71170807bbc6b0e7eb4f0b13af8cbb0e085bb9
 const BACKEND_INSTALL_REFUSE_BYTES = 4 * 1024 * 1024 * 1024; // < 4 GiB free → refuse to start
 const BACKEND_INSTALL_WARN_BYTES = 6 * 1024 * 1024 * 1024;   // < 6 GiB free → start, but warn
 
-// Stream a URL to destPath, verifying its sha256 against expectedSha256 and
-// following redirects (GitHub release assets 302 to a signed blob URL). Tracks
-// itself in installBackendProc so cancel-install-backend can abort mid-download.
-// onProgress(pct) fires at most once per whole percentage point.
-function downloadToFile(url, destPath, expectedSha256, onProgress) {
+// Stream a URL to destPath, optionally verifying its sha256 against
+// expectedSha256 (pass null/undefined to skip verification — the in-app
+// updater's own call site below intentionally does, see its comment there)
+// and following redirects (GitHub release assets 302 to a signed blob URL).
+// onKillable(obj), if given, hands the caller a { kill() } to store in ITS OWN
+// cancel-tracking variable (installBackendProc for the backend installer,
+// updateProc for the in-app updater — see their respective call sites) so a
+// cancel call aborts the underlying request. onProgress(pct) fires at most
+// once per whole percentage point.
+function downloadToFile(url, destPath, expectedSha256, onProgress, onKillable) {
   return new Promise((resolve, reject) => {
     const req = https.get(url, { headers: { "User-Agent": "MeetingRecorder" } }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         res.resume();
-        resolve(downloadToFile(res.headers.location, destPath, expectedSha256, onProgress));
+        resolve(downloadToFile(res.headers.location, destPath, expectedSha256, onProgress, onKillable));
         return;
       }
       if (res.statusCode !== 200) {
@@ -1039,17 +1047,19 @@ function downloadToFile(url, destPath, expectedSha256, onProgress) {
       file.on("error", (e) => { try { fs.unlinkSync(destPath); } catch {} reject(e); });
     });
     req.on("error", (e) => { try { fs.unlinkSync(destPath); } catch {} reject(e); });
-    installBackendProc = { kill: () => req.destroy(new Error("отменено")) };
+    if (onKillable) onKillable({ kill: () => req.destroy(new Error("отменено")) });
   });
 }
 
-// Spawn cmd/args to completion, tracked in installBackendProc for cancellation.
-// opts.onLine(text), if given, gets both stdout lines and raw stderr chunks —
-// pip interleaves progress on both streams.
+// Spawn cmd/args to completion. opts.onProc(proc), if given, hands the caller
+// the live child so it can track it in ITS OWN cancel-tracking variable
+// (installBackendProc / updateProc — mirrors downloadToFile's onKillable
+// above). opts.onLine(text), if given, gets both stdout lines and raw stderr
+// chunks — pip interleaves progress on both streams.
 function runInstallStep(cmd, args, opts = {}) {
   return new Promise((resolve, reject) => {
     const proc = spawn(cmd, args, { cwd: opts.cwd });
-    installBackendProc = proc;
+    if (opts.onProc) opts.onProc(proc);
     let stderr = "";
     if (opts.onLine && proc.stdout) {
       readline.createInterface({ input: proc.stdout }).on("line", opts.onLine);
@@ -1109,19 +1119,21 @@ async function runInstallBackend() {
     await withInstallStage("python", "Скачиваю Python…", async () => {
       const pyTarball = path.join(tmpDir, "python.tar.gz");
       await downloadToFile(PYTHON_STANDALONE_URL, pyTarball, PYTHON_STANDALONE_SHA256,
-        (pct) => send("install-backend-event", { event: "download-progress", stage: "python", pct }));
+        (pct) => send("install-backend-event", { event: "download-progress", stage: "python", pct }),
+        (k) => { installBackendProc = k; });
       if (installBackendCanceled) throw new Error("отменено");
-      await runInstallStep("tar", ["-xzf", pyTarball, "-C", BACKEND_ENV_STAGING]);
+      await runInstallStep("tar", ["-xzf", pyTarball, "-C", BACKEND_ENV_STAGING], { onProc: (p) => { installBackendProc = p; } });
     });
 
     await withInstallStage("ffmpeg", "Скачиваю ffmpeg…", async () => {
       const ffmpegZip = path.join(tmpDir, "ffmpeg.zip");
       await downloadToFile(FFMPEG_STATIC_URL, ffmpegZip, FFMPEG_STATIC_SHA256,
-        (pct) => send("install-backend-event", { event: "download-progress", stage: "ffmpeg", pct }));
+        (pct) => send("install-backend-event", { event: "download-progress", stage: "ffmpeg", pct }),
+        (k) => { installBackendProc = k; });
       if (installBackendCanceled) throw new Error("отменено");
       const extractDir = path.join(tmpDir, "ffmpeg-extract");
       fs.mkdirSync(extractDir, { recursive: true });
-      await runInstallStep("unzip", ["-o", ffmpegZip, "-d", extractDir]);
+      await runInstallStep("unzip", ["-o", ffmpegZip, "-d", extractDir], { onProc: (p) => { installBackendProc = p; } });
       fs.mkdirSync(path.join(BACKEND_ENV_STAGING, "bin"), { recursive: true });
       fs.copyFileSync(path.join(extractDir, "ffmpeg"), stagingFfmpeg);
       fs.chmodSync(stagingFfmpeg, 0o755);
@@ -1130,7 +1142,7 @@ async function runInstallBackend() {
     await withInstallStage("pip", "Устанавливаю зависимости (~1.3 ГБ, несколько минут)…", () =>
       runInstallStep(stagingPython,
         ["-m", "pip", "install", "--no-cache-dir", "--find-links", VENDOR_WHEELS_DIR, "-r", REQUIREMENTS_FILE],
-        { onLine: (line) => send("install-backend-event", { event: "log", msg: line }) }));
+        { onProc: (p) => { installBackendProc = p; }, onLine: (line) => send("install-backend-event", { event: "log", msg: line }) }));
 
     const reqText = fs.readFileSync(REQUIREMENTS_FILE, "utf-8");
     writeJsonAtomic(stagingMarker, {
@@ -1223,6 +1235,181 @@ ipcMain.handle("uninstall-backend", async () => {
     return { ok: false, error: String((e && e.message) || e) };
   }
 });
+
+// ── in-app updater (settings "Обновления" section) ──────────────────────────
+// DIY updater over GitHub Releases' public API (no auth token needed for a
+// public repo) — the app is ad-hoc signed (no Developer ID), so
+// electron-updater/Squirrel.Mac (both require a valid code signature) aren't
+// usable here. Manual check + install only for v1 — no auto-check on startup.
+// No signature verification of the downloaded zip: TLS-only trust, a
+// conscious owner-accepted decision (out of scope for v1, see task contract).
+const UPDATE_REPO = "ArtemiiF/MeetingRecorder";
+const UPDATES_DIR = path.join(app.getPath("userData"), "updates");
+let updateProc = null;      // current killable step of an in-flight update download/install
+let updateCanceled = false; // set when the user cancels an in-flight update
+
+// GET .../releases/latest — no auth, subject to GitHub's unauthenticated rate
+// limit (60 req/h/IP), which a manual "check for updates" button never gets
+// close to. Throws on network error / non-2xx / 404 (no releases published
+// yet) — callers catch this and turn it into an honest {ok:false, error}
+// rather than ever throwing across the IPC boundary to the renderer.
+async function fetchLatestRelease() {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 8000);
+  try {
+    const res = await fetch(`https://api.github.com/repos/${UPDATE_REPO}/releases/latest`, {
+      headers: { "User-Agent": "MeetingRecorder", Accept: "application/vnd.github+json" },
+      signal: ctrl.signal,
+    });
+    if (res.status === 404) throw new Error("Релизы не найдены");
+    if (!res.ok) throw new Error(`GitHub вернул ${res.status}`);
+    return await res.json();
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+ipcMain.handle("check-app-update", async () => {
+  const current = app.getVersion();
+  try {
+    const release = await fetchLatestRelease();
+    const latest = release.tag_name || "";
+    const cmp = compareVersions(latest, current);
+    if (cmp === null) {
+      return {
+        ok: false, current, latest, hasUpdate: false, assetUrl: null, releaseNotes: null,
+        isPackaged: app.isPackaged, error: "Не удалось разобрать версию релиза",
+      };
+    }
+    const assetUrl = pickUpdateAsset(release.assets || []);
+    const releaseNotes = ((release.body || "").split("\n")[0] || "").trim() || null;
+    return {
+      ok: true, current, latest, hasUpdate: cmp === 1 && !!assetUrl, assetUrl, releaseNotes,
+      isPackaged: app.isPackaged,
+    };
+  } catch (e) {
+    return {
+      ok: false, current, latest: null, hasUpdate: false, assetUrl: null, releaseNotes: null,
+      isPackaged: app.isPackaged, error: String((e && e.message) || e),
+    };
+  }
+});
+
+// Downloads the latest release's arm64 zip, unpacks it, and swaps it in for the
+// running .app bundle, then relaunches. Re-fetches the release fresh (rather
+// than trusting a possibly-stale assetUrl the renderer got from an earlier
+// check-app-update call) so a user who waits before clicking install still
+// gets whatever is actually latest at click time.
+async function runUpdateInstall() {
+  let zipPath = null;
+  let extractDir = null;
+  try {
+    let release;
+    try {
+      release = await fetchLatestRelease();
+    } catch (e) {
+      throw new Error("Не удалось проверить обновление: " + String((e && e.message) || e));
+    }
+    const assetUrl = pickUpdateAsset(release.assets || []);
+    if (!assetUrl) throw new Error("В последнем релизе нет файла обновления (arm64 .zip)");
+
+    fs.mkdirSync(UPDATES_DIR, { recursive: true });
+    zipPath = path.join(UPDATES_DIR, "update.zip");
+    extractDir = path.join(UPDATES_DIR, "extract");
+    fs.rmSync(extractDir, { recursive: true, force: true }); // clear a stale leftover from a crashed prior attempt
+    fs.rmSync(zipPath, { force: true });
+
+    send("app-update-event", { event: "stage", stage: "download", msg: "Скачиваю обновление…" });
+    // expectedSha256 is intentionally null — see the module-level comment above
+    // this block on TLS-only trust for downloaded updates.
+    await downloadToFile(assetUrl, zipPath, null,
+      (pct) => send("app-update-event", { event: "download-progress", pct }),
+      (k) => { updateProc = k; });
+    if (updateCanceled) throw new Error("отменено");
+    if (!fs.statSync(zipPath).size) throw new Error("Скачан пустой файл обновления");
+
+    send("app-update-event", { event: "stage", stage: "unpack", msg: "Распаковываю…" });
+    fs.mkdirSync(extractDir, { recursive: true });
+    // ditto (not unzip) — preserves the ad-hoc signature/xattrs the .app bundle needs.
+    await runInstallStep("ditto", ["-xk", zipPath, extractDir], { onProc: (p) => { updateProc = p; } });
+    if (updateCanceled) throw new Error("отменено");
+
+    const appEntry = fs.readdirSync(extractDir).find((n) => n.endsWith(".app"));
+    if (!appEntry) throw new Error("В архиве обновления не найден .app");
+    const newAppPath = path.join(extractDir, appEntry);
+    // The zip travelled over the network — macOS quarantines it; without lifting
+    // that, Gatekeeper would re-prompt (or refuse) on the very first relaunch.
+    await runInstallStep("xattr", ["-dr", "com.apple.quarantine", newAppPath], { onProc: (p) => { updateProc = p; } });
+
+    send("app-update-event", { event: "stage", stage: "swap", msg: "Устанавливаю…" });
+    // app.getPath("exe") = "<App>.app/Contents/MacOS/<App>" — three levels up is the bundle itself.
+    const currentAppPath = path.dirname(path.dirname(path.dirname(app.getPath("exe"))));
+    const oldAppPath = currentAppPath + ".old";
+    fs.rmSync(oldAppPath, { recursive: true, force: true });
+    fs.renameSync(currentAppPath, oldAppPath);
+    try {
+      fs.renameSync(newAppPath, currentAppPath);
+    } catch (e) {
+      // Roll back immediately — the app must stay launchable even if this fails.
+      fs.renameSync(oldAppPath, currentAppPath);
+      throw e;
+    }
+
+    send("app-update-event", { event: "install-closed", code: 0, canceled: false });
+    app.relaunch();
+    app.exit(0);
+  } catch (e) {
+    const canceled = updateCanceled;
+    send("app-update-event", {
+      event: "install-closed",
+      code: canceled ? null : 1,
+      canceled,
+      error: canceled ? null : String((e && e.message) || e),
+    });
+  } finally {
+    // Never leave a half-downloaded/half-unpacked update behind for the next attempt
+    // to trip over — mirrors runInstallBackend's own staging cleanup above.
+    if (zipPath) { try { fs.rmSync(zipPath, { force: true }); } catch {} }
+    if (extractDir) { try { fs.rmSync(extractDir, { recursive: true, force: true }); } catch {} }
+    updateProc = null;
+    updateCanceled = false;
+  }
+}
+
+ipcMain.handle("download-and-install-update", async () => {
+  if (!app.isPackaged) return { ok: false, error: "только в собранном приложении" };
+  if (updateProc) return { ok: false, error: "Обновление уже идёт" };
+  if (recordProc || tee) return { ok: false, error: "Дождитесь окончания записи" };
+  if (procProc) return { ok: false, error: "Дождитесь окончания обработки" };
+  if (modelDlProc) return { ok: false, error: "Дождитесь окончания скачивания моделей" };
+  if (installBackendProc) return { ok: false, error: "Дождитесь окончания установки бэкенда" };
+
+  updateCanceled = false;
+  // Placeholder so a second call sees "busy" immediately — same pattern as
+  // install-backend's own guard (the real killable object replaces this once
+  // the download actually starts).
+  updateProc = { kill: () => { updateCanceled = true; } };
+  runUpdateInstall().catch(() => { updateProc = null; updateCanceled = false; });
+  return { ok: true };
+});
+
+ipcMain.handle("cancel-app-update", async () => {
+  if (!updateProc) return { ok: false, error: "Обновление не идёт" };
+  updateCanceled = true;
+  updateProc.kill();
+  return { ok: true };
+});
+
+// One-time startup sweep: a successful update swap leaves the old bundle at
+// "<App>.app.old" (kept only long enough to roll back on THAT run) and the
+// zip/extract dir it downloaded into userData/updates — if the app got this
+// far, the new bundle is already running fine, so both are safe to delete now.
+function cleanupUpdateLeftovers() {
+  if (!app.isPackaged) return;
+  const appPath = path.dirname(path.dirname(path.dirname(app.getPath("exe"))));
+  fs.rmSync(appPath + ".old", { recursive: true, force: true });
+  fs.rmSync(UPDATES_DIR, { recursive: true, force: true });
+}
 
 // Past recordings: query the backend's SQLite index (reconciled against the notes dir),
 // merged with still-pending recordings (--pending-file) so the История rail can show them

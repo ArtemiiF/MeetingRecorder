@@ -12,6 +12,7 @@ const {
   resolvePythonBin, resolveFfmpegBin, resolveResourcePath, resolveAudioTeeBin, resolveAssetPath, backendInstallStatus,
   hfCacheDir, whisperModelDir, vadJitPath, diarizationModelDirs, appReadinessStatus,
   modelCacheDirsFor, cleanupPartialModelCache,
+  compareVersions, pickUpdateAsset,
 } = require("../lib/mainutil");
 
 // ── WAV header ──────────────────────────────────────────────────────────────
@@ -568,4 +569,53 @@ test("cleanupPartialModelCache: an unknown model id touches nothing and does not
   const home = tmpHomedir("unknown-model");
   assert.doesNotThrow(() => cleanupPartialModelCache(home, "not-a-model"));
   fs.rmSync(home, { recursive: true, force: true });
+});
+
+// ── in-app updater: version comparator (settings "Обновления" section) ──────
+test("compareVersions: equal versions (tag vs plain, 'v' prefix optional)", () => {
+  assert.equal(compareVersions("v1.0.0", "1.0.0"), 0);
+  assert.equal(compareVersions("1.2.3", "1.2.3"), 0);
+});
+test("compareVersions: newer tag beats the running version", () => {
+  assert.equal(compareVersions("v1.2.0", "1.0.0"), 1);
+  assert.equal(compareVersions("v1.0.1", "1.0.0"), 1);
+  assert.equal(compareVersions("v2.0.0", "1.9.9"), 1);
+});
+test("compareVersions: older tag loses to the running version", () => {
+  assert.equal(compareVersions("v0.9.0", "1.0.0"), -1);
+  assert.equal(compareVersions("v1.0.0", "1.0.1"), -1);
+});
+test("compareVersions: malformed tag (non-numeric, too few/many segments, empty) returns null, not a guess", () => {
+  assert.equal(compareVersions("not-a-version", "1.0.0"), null);
+  assert.equal(compareVersions("v1.2", "1.0.0"), null);
+  assert.equal(compareVersions("v1.2.3.4", "1.0.0"), null);
+  assert.equal(compareVersions("", "1.0.0"), null);
+  assert.equal(compareVersions(null, "1.0.0"), null);
+});
+test("compareVersions: malformed current version also returns null, even with a well-formed tag", () => {
+  assert.equal(compareVersions("v1.0.0", "abc"), null);
+});
+
+// ── in-app updater: arm64-zip asset picker ──────────────────────────────────
+test("pickUpdateAsset: picks the arm64 .zip among a dmg + zip release", () => {
+  const assets = [
+    { name: "Meeting Recorder-1.0.0-arm64.dmg", browser_download_url: "https://x/dmg" },
+    { name: "Meeting Recorder-1.0.0-arm64.zip", browser_download_url: "https://x/zip" },
+  ];
+  assert.equal(pickUpdateAsset(assets), "https://x/zip");
+});
+test("pickUpdateAsset: is case-insensitive on both 'arm64' and the .zip extension", () => {
+  const assets = [{ name: "Meeting-Recorder-ARM64.ZIP", browser_download_url: "https://x/zip" }];
+  assert.equal(pickUpdateAsset(assets), "https://x/zip");
+});
+test("pickUpdateAsset: missing arm64 asset (dmg-only release) returns null", () => {
+  const assets = [{ name: "Meeting Recorder-1.0.0-arm64.dmg", browser_download_url: "https://x/dmg" }];
+  assert.equal(pickUpdateAsset(assets), null);
+});
+test("pickUpdateAsset: empty assets array returns null", () => {
+  assert.equal(pickUpdateAsset([]), null);
+});
+test("pickUpdateAsset: non-array input returns null (defensive, never throws)", () => {
+  assert.equal(pickUpdateAsset(null), null);
+  assert.equal(pickUpdateAsset(undefined), null);
 });

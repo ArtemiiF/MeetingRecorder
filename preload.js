@@ -25,6 +25,9 @@ contextBridge.exposeInMainWorld("api", {
   installBackend: () => ipcRenderer.invoke("install-backend"),
   cancelInstallBackend: () => ipcRenderer.invoke("cancel-install-backend"),
   uninstallBackend: () => ipcRenderer.invoke("uninstall-backend"),
+  checkAppUpdate: () => ipcRenderer.invoke("check-app-update"),
+  downloadAndInstallUpdate: () => ipcRenderer.invoke("download-and-install-update"),
+  cancelAppUpdate: () => ipcRenderer.invoke("cancel-app-update"),
   reveal: (p) => ipcRenderer.invoke("reveal", p),
   renameSpeakers: (notePath, map) => ipcRenderer.invoke("rename-speakers", { notePath, map }),
   listHistory: (outDir) => ipcRenderer.invoke("list-history", outDir),
@@ -44,5 +47,6 @@ contextBridge.exposeInMainWorld("api", {
   onParaReindexEvent: (cb) => ipcRenderer.on("para-reindex-event", (_e, ev) => cb(ev)),
   onModelDownloadEvent: (cb) => ipcRenderer.on("download-models-event", (_e, ev) => cb(ev)),
   onInstallBackendEvent: (cb) => ipcRenderer.on("install-backend-event", (_e, ev) => cb(ev)),
+  onAppUpdateEvent: (cb) => ipcRenderer.on("app-update-event", (_e, ev) => cb(ev)),
   onTrayRecordToggle: (cb) => ipcRenderer.on("tray-record-toggle", () => cb()),
 });
