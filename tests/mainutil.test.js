@@ -9,6 +9,7 @@ const {
   pairHistory, encodeTokenBlob, decodeTokenBlob, isStale,
   rewriteNoteSpeakers, isOutsideRoot, indexRunReducer, diskGuardVerdict,
   resolveOutDirOnVaultChange, trayMenuTemplate,
+  resolvePythonBin, resolveFfmpegBin, resolveResourcePath, backendInstallStatus,
 } = require("../lib/mainutil");
 
 // ── WAV header ──────────────────────────────────────────────────────────────
@@ -323,4 +324,87 @@ test("trayMenuTemplate: exactly one toggle item regardless of recording state (n
     const items = trayMenuTemplate({ recording });
     assert.equal(items.filter((i) => i.id === "toggle-record").length, 1);
   }
+});
+
+// ── backend installer resolvers (settings "Бэкенд" section) ──────────────────
+test("resolvePythonBin: installed env wins when it exists AND the completion marker is present", () => {
+  assert.equal(
+    resolvePythonBin("/userdata/backend-env/python/bin/python3.11", true, true, "/proj/venv/bin/python", true),
+    "/userdata/backend-env/python/bin/python3.11"
+  );
+});
+test("resolvePythonBin: falls back to dev venv when installed doesn't exist", () => {
+  assert.equal(
+    resolvePythonBin("/userdata/backend-env/python/bin/python3.11", false, false, "/proj/venv/bin/python", true),
+    "/proj/venv/bin/python"
+  );
+});
+test("resolvePythonBin: falls back to bare python3 when neither exists", () => {
+  assert.equal(
+    resolvePythonBin("/userdata/backend-env/python/bin/python3.11", false, false, "/proj/venv/bin/python", false),
+    "python3"
+  );
+});
+// ── regression lock: the blocker this session fixed ──────────────────────────
+// install-backend extracts python BEFORE running pip and only writes the
+// completion marker after pip succeeds, so a failed/cancelled install (or,
+// pre-fix, any window where the interpreter briefly existed without the
+// marker) must NOT be treated as an installed backend — it must fall through
+// exactly as if nothing were installed at all.
+test("resolvePythonBin: python file exists but marker is ABSENT (partial/cancelled install) → falls through to dev venv, never the depless interpreter", () => {
+  assert.equal(
+    resolvePythonBin("/userdata/backend-env/python/bin/python3.11", true, false, "/proj/venv/bin/python", true),
+    "/proj/venv/bin/python"
+  );
+});
+test("resolvePythonBin: python file exists but marker is ABSENT, and no dev venv either → falls through to bare python3, not the depless interpreter", () => {
+  assert.equal(
+    resolvePythonBin("/userdata/backend-env/python/bin/python3.11", true, false, "/proj/venv/bin/python", false),
+    "python3"
+  );
+});
+
+test("resolveFfmpegBin: installed static ffmpeg wins when it exists", () => {
+  assert.equal(resolveFfmpegBin("/userdata/backend-env/bin/ffmpeg", true), "/userdata/backend-env/bin/ffmpeg");
+});
+test("resolveFfmpegBin: falls back to bare ffmpeg (resolved via $PATH) when not installed", () => {
+  assert.equal(resolveFfmpegBin("/userdata/backend-env/bin/ffmpeg", false), "ffmpeg");
+});
+
+test("resolveResourcePath: dev checkout resolves directly under appDir", () => {
+  assert.equal(resolveResourcePath(false, "/Contents/Resources", "/dev/app", "backend.py"), path.join("/dev/app", "backend.py"));
+});
+test("resolveResourcePath: packaged app resolves under resourcesPath, ignoring appDir", () => {
+  assert.equal(
+    resolveResourcePath(true, "/Contents/Resources", "/dev/app", "requirements.txt"),
+    path.join("/Contents/Resources", "requirements.txt")
+  );
+});
+test("resolveResourcePath: works for a nested relative path (vendor/wheels)", () => {
+  assert.equal(resolveResourcePath(false, "/res", "/dev/app", "vendor/wheels"), path.join("/dev/app", "vendor/wheels"));
+});
+
+test("backendInstallStatus: no marker + interpreter missing → not installed", () => {
+  assert.deepEqual(backendInstallStatus(null, "abc123", false), { installed: false, pythonVersion: null, stale: false });
+});
+test("backendInstallStatus: marker present but interpreter missing (manually deleted env) → not installed", () => {
+  assert.deepEqual(
+    backendInstallStatus({ pythonVersion: "3.11.15", requirementsHash: "abc123" }, "abc123", false),
+    { installed: false, pythonVersion: null, stale: false }
+  );
+});
+test("backendInstallStatus: marker + interpreter present, hash matches current requirements → installed, not stale", () => {
+  assert.deepEqual(
+    backendInstallStatus({ pythonVersion: "3.11.15", requirementsHash: "abc123" }, "abc123", true),
+    { installed: true, pythonVersion: "3.11.15", stale: false }
+  );
+});
+test("backendInstallStatus: hash mismatch (requirements.txt changed since install) → installed but stale", () => {
+  assert.deepEqual(
+    backendInstallStatus({ pythonVersion: "3.11.15", requirementsHash: "old-hash" }, "new-hash", true),
+    { installed: true, pythonVersion: "3.11.15", stale: true }
+  );
+});
+test("backendInstallStatus: interpreter present but no marker at all → not installed (not a false 'stale')", () => {
+  assert.deepEqual(backendInstallStatus(null, "abc123", true), { installed: false, pythonVersion: null, stale: false });
 });

@@ -105,6 +105,7 @@ async function refreshPreflight() {
   const ok = (b) => (b ? "ok" : "bad");
   const perm = (s) => (s === "granted" ? "ok" : s === "denied" ? "bad" : "warn");
   const rows = [
+    ["Бэкенд", ok(p.backendInstalled), p.backendInstalled ? "установлен" : "не установлен — см. раздел «Бэкенд» ниже"],
     ["LM Studio (сводка)", ok(p.lmStudio), p.lmStudio ? "запущен" : "не отвечает на :1234 — сводки не будет"],
     ["Микрофон", perm(p.mic), p.mic],
     ["Системный звук (запись экрана)", perm(p.screen), p.screen === "granted" ? "разрешено" : "проверится при записи"],
@@ -120,13 +121,14 @@ async function refreshPreflight() {
     row.innerHTML = `<span class="pf-dot ${state}"></span><span class="pf-label">${label}</span><span class="pf-detail">${detail}</span>`;
     wrap.appendChild(row);
   });
-  // overall verdict: critical = LM Studio + ffmpeg + mic; rest are warnings only
+  // overall verdict: critical = бэкенд + LM Studio + ffmpeg + mic; rest are warnings only
   const v = $("preflightVerdict");
   if (v) {
-    const critical = p.lmStudio && p.ffmpeg && p.mic === "granted";
+    const critical = p.backendInstalled && p.lmStudio && p.ffmpeg && p.mic === "granted";
     if (critical) { v.className = "pf-verdict ok"; v.textContent = "✅ Всё готово к работе."; }
     else {
       const miss = [];
+      if (!p.backendInstalled) miss.push("бэкенд");
       if (!p.lmStudio) miss.push("LM Studio");
       if (!p.ffmpeg) miss.push("ffmpeg");
       if (p.mic !== "granted") miss.push("микрофон");
@@ -135,6 +137,91 @@ async function refreshPreflight() {
   }
 }
 $("preflightRefresh").addEventListener("click", refreshPreflight);
+
+// ── backend installer (settings "Бэкенд" section: installs the Python/ffmpeg
+// env backend.py actually runs in — the app ships without it, see README) ──────
+// Separate from preflight's "ffmpeg" row (that one just reflects backend.py's own
+// shutil.which check) — this section drives the one-button installer itself.
+let backendInstallRunning = false;
+let backendInstallLogLines = 0;
+const BACKEND_INSTALL_LOG_MAX_LINES = 500;
+
+function renderBackendStatus(status) {
+  const row = $("backendStatusRow");
+  const dotClass = !status.installed ? "bad" : status.stale ? "warn" : "ok";
+  const detail = !status.installed
+    ? "не установлен"
+    : status.stale
+    ? `установлен Python ${status.pythonVersion} — требования изменились, рекомендуется переустановить`
+    : `установлен Python ${status.pythonVersion}`;
+  row.innerHTML = `<span class="pf-dot ${dotClass}"></span><span class="pf-label">Бэкенд</span><span class="pf-detail"></span>`;
+  row.querySelector(".pf-detail").textContent = detail;
+  $("backendInstallBtn").textContent = status.installed ? "⟳ Переустановить" : "⬇ Установить бэкенд";
+}
+
+async function refreshBackendStatus() {
+  const row = $("backendStatusRow");
+  row.innerHTML = '<span class="pf-dot warn"></span><span class="pf-label">Бэкенд</span><span class="pf-detail">Проверяю…</span>';
+  const status = await window.api.backendStatus();
+  renderBackendStatus(status);
+  return status;
+}
+
+function setBackendInstallUI(running) {
+  backendInstallRunning = running;
+  $("backendRefresh").disabled = running;
+  $("backendInstallBtn").disabled = running;
+  $("backendCancelBtn").classList.toggle("hidden", !running);
+}
+
+function backendLog(msg) {
+  const box = $("backendInstallLog");
+  box.classList.remove("hidden");
+  box.textContent += msg + "\n";
+  backendInstallLogLines++;
+  if (backendInstallLogLines > BACKEND_INSTALL_LOG_MAX_LINES) {
+    const lines = box.textContent.split("\n");
+    box.textContent = lines.slice(lines.length - BACKEND_INSTALL_LOG_MAX_LINES).join("\n");
+    backendInstallLogLines = BACKEND_INSTALL_LOG_MAX_LINES;
+  }
+  box.scrollTop = box.scrollHeight;
+}
+
+$("backendRefresh").addEventListener("click", refreshBackendStatus);
+$("backendInstallBtn").addEventListener("click", async () => {
+  if (backendInstallRunning) return;
+  setBackendInstallUI(true);
+  $("backendInstallLog").textContent = "";
+  $("backendInstallStatus").textContent = "";
+  backendInstallLogLines = 0;
+  const res = await window.api.installBackend();
+  if (res && res.ok === false) {
+    setBackendInstallUI(false);
+    alert(res.error);
+  }
+});
+$("backendCancelBtn").addEventListener("click", () => window.api.cancelInstallBackend());
+
+window.api.onInstallBackendEvent((ev) => {
+  if (ev.event === "stage") {
+    $("backendInstallStatus").textContent = ev.msg;
+    backendLog("▶ " + ev.msg);
+  } else if (ev.event === "download-progress") {
+    $("backendInstallStatus").textContent = `${ev.stage}: ${ev.pct}%`;
+  } else if (ev.event === "stage_end") {
+    const icon = ev.status === "ok" ? "✅ " : ev.status === "skip" ? "⏭ " : "⚠️ ";
+    backendLog(icon + ev.msg);
+  } else if (ev.event === "log") {
+    backendLog(ev.msg);
+  } else if (ev.event === "install-closed") {
+    setBackendInstallUI(false);
+    $("backendInstallStatus").textContent = "";
+    refreshBackendStatus();
+    refreshPreflight(); // backendInstalled feeds preflight's readiness verdict too
+  } else if (ev.event === "disk-warning") {
+    alert(ev.msg);
+  }
+});
 
 // ── models (settings "Модели" section: cache status + on-demand pre-download) ──
 // Additive, separate from the "Готовность" preflight section above — reuses its
@@ -242,7 +329,7 @@ window.api.onModelDownloadEvent((ev) => {
 });
 
 // settings / readiness modal
-function openSettings() { $("settingsOverlay").classList.remove("hidden"); refreshPreflight(); refreshModels(); }
+function openSettings() { $("settingsOverlay").classList.remove("hidden"); refreshPreflight(); refreshBackendStatus(); refreshModels(); }
 function closeSettings() { $("settingsOverlay").classList.add("hidden"); }
 $("settingsOpen").addEventListener("click", openSettings);
 $("settingsClose").addEventListener("click", closeSettings);

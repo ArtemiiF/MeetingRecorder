@@ -21,7 +21,7 @@ async function boot(apiOverrides = {}) {
   // jsdom doesn't implement the Clipboard API — default no-op mock, tests override writeText to spy.
   window.navigator.clipboard = { writeText: async () => {} };
   window.api = Object.assign({
-    preflight: async () => ({ lmStudio: false, mic: "granted", screen: "unknown", ffmpeg: true, whisperCached: true, hfToken: false }),
+    preflight: async () => ({ lmStudio: false, mic: "granted", screen: "unknown", ffmpeg: true, whisperCached: true, hfToken: false, backendInstalled: true }),
     renameSpeakers: async () => ({ ok: true }),
     listDevices: async () => [{ index: 0, name: "MacBook Mic", default: true }],
     getPresets: async () => ({ presets: [{ name: "P", prompt: "x" }], defaultOutDir: "/tmp/out", hfToken: "", language: "ru" }),
@@ -51,6 +51,10 @@ async function boot(apiOverrides = {}) {
     ]),
     downloadModels: async () => ({ ok: true }),
     cancelModelDownload: async () => ({ ok: true }),
+    backendStatus: async () => ({ installed: true, pythonVersion: "3.11.15", stale: false }),
+    installBackend: async () => ({ ok: true }),
+    cancelInstallBackend: async () => ({ ok: true }),
+    uninstallBackend: async () => ({ ok: true }),
     paraExtract: async () => ({ content: "x" }),
     paraReindex: async () => ({ indexed: 0, skipped: 0, removed: 0 }),
     paraSearch: async (_root, _messages) => ({ found: false, answer: "Не нашёл по этому вопросу записей в заметках.", citations: [] }),
@@ -61,6 +65,7 @@ async function boot(apiOverrides = {}) {
     onProcessEvent: (cb) => { handlers.process = cb; },
     onParaReindexEvent: (cb) => { handlers.reindex = cb; },
     onModelDownloadEvent: (cb) => { handlers.modelDownload = cb; },
+    onInstallBackendEvent: (cb) => { handlers.installBackend = cb; },
     onTrayRecordToggle: (cb) => { handlers.trayRecordToggle = cb; },
   }, apiOverrides);
 
@@ -298,13 +303,13 @@ test("history label shows title when present", async () => {
 
 test("preflight panel renders status rows", async () => {
   const { window, $ } = await boot({
-    preflight: async () => ({ lmStudio: true, mic: "granted", screen: "denied", ffmpeg: true, whisperCached: false, hfToken: false, embedModel: true }),
+    preflight: async () => ({ lmStudio: true, mic: "granted", screen: "denied", ffmpeg: true, whisperCached: false, hfToken: false, embedModel: true, backendInstalled: true }),
   });
   // refreshPreflight() is only triggered by openSettings() or the refresh button, not by init()
   $("settingsOpen").click(); await tick(window);
   const rows = $("preflightList").querySelectorAll(".pf-row");
-  assert.equal(rows.length, 7);
-  assert.equal($("preflightList").querySelectorAll(".pf-dot.ok").length, 4); // lmStudio, mic, ffmpeg, embedModel
+  assert.equal(rows.length, 8);
+  assert.equal($("preflightList").querySelectorAll(".pf-dot.ok").length, 5); // backendInstalled, lmStudio, mic, ffmpeg, embedModel
 });
 
 test("history rail renders items; selecting one renders the note markdown", async () => {
@@ -1620,6 +1625,252 @@ test("PARA chat degraded badge: backend.py's log wording matches main.js's exact
     backendSrc.includes(marker),
     `backend.py no longer emits the exact string main.js matches on: ${JSON.stringify(marker)}`
   );
+});
+
+// ── settings "Бэкенд" section (installs the Python/ffmpeg env, see main.js) ──
+test("Бэкенд: not-installed status renders a bad dot and the install button's default label", async () => {
+  const { window, $ } = await boot({
+    backendStatus: async () => ({ installed: false, pythonVersion: null, stale: false }),
+  });
+  $("settingsOpen").click();
+  await tick(window);
+  const row = $("backendStatusRow");
+  assert.ok(row.querySelector(".pf-dot").classList.contains("bad"));
+  assert.match(row.querySelector(".pf-detail").textContent, /не установлен/);
+  assert.match($("backendInstallBtn").textContent, /Установить бэкенд/);
+});
+
+test("Бэкенд: installed + fresh status renders an ok dot with the python version, button relabels to reinstall", async () => {
+  const { window, $ } = await boot({
+    backendStatus: async () => ({ installed: true, pythonVersion: "3.11.15", stale: false }),
+  });
+  $("settingsOpen").click();
+  await tick(window);
+  const row = $("backendStatusRow");
+  assert.ok(row.querySelector(".pf-dot").classList.contains("ok"));
+  assert.match(row.querySelector(".pf-detail").textContent, /3\.11\.15/);
+  assert.match($("backendInstallBtn").textContent, /Переустановить/);
+});
+
+test("Бэкенд: installed but stale (requirements.txt changed since install) renders a warn dot", async () => {
+  const { window, $ } = await boot({
+    backendStatus: async () => ({ installed: true, pythonVersion: "3.11.15", stale: true }),
+  });
+  $("settingsOpen").click();
+  await tick(window);
+  const row = $("backendStatusRow");
+  assert.ok(row.querySelector(".pf-dot").classList.contains("warn"));
+  assert.match(row.querySelector(".pf-detail").textContent, /требования изменились/);
+});
+
+test("Бэкенд: install button click calls installBackend and disables refresh/install until install-closed", async () => {
+  let called = false;
+  const { window, $, handlers } = await boot({
+    installBackend: async () => { called = true; return { ok: true }; },
+  });
+  $("settingsOpen").click();
+  await tick(window);
+  $("backendInstallBtn").click();
+  await tick(window);
+  assert.equal(called, true);
+  assert.equal($("backendRefresh").disabled, true);
+  assert.equal($("backendInstallBtn").disabled, true);
+  assert.ok(!$("backendCancelBtn").classList.contains("hidden"));
+
+  handlers.installBackend({ event: "install-closed", code: 0, canceled: false });
+  await tick(window);
+  assert.equal($("backendRefresh").disabled, false);
+  assert.equal($("backendInstallBtn").disabled, false);
+  assert.ok($("backendCancelBtn").classList.contains("hidden"));
+});
+
+test("Бэкенд: cancel button calls cancelInstallBackend while a run is in flight", async () => {
+  let canceled = false;
+  const { window, $ } = await boot({
+    installBackend: async () => new Promise(() => {}), // never resolves — simulates an in-flight install
+    cancelInstallBackend: async () => { canceled = true; return { ok: true }; },
+  });
+  $("settingsOpen").click();
+  await tick(window);
+  $("backendInstallBtn").click();
+  await tick(window);
+  $("backendCancelBtn").click();
+  await tick(window);
+  assert.equal(canceled, true);
+});
+
+test("Бэкенд: stage/stage_end/log events populate the scrolling log and live status text", async () => {
+  const { window, $, handlers } = await boot();
+  $("settingsOpen").click();
+  await tick(window);
+  $("backendInstallBtn").click();
+  await tick(window);
+  handlers.installBackend({ event: "stage", stage: "python", msg: "Скачиваю Python…" });
+  assert.equal($("backendInstallStatus").textContent, "Скачиваю Python…");
+  assert.match($("backendInstallLog").textContent, /Скачиваю Python…/);
+
+  handlers.installBackend({ event: "download-progress", stage: "python", pct: 42 });
+  assert.equal($("backendInstallStatus").textContent, "python: 42%");
+
+  handlers.installBackend({ event: "stage_end", stage: "python", status: "ok", msg: "готово" });
+  assert.match($("backendInstallLog").textContent, /✅ готово/);
+
+  handlers.installBackend({ event: "log", msg: "Collecting torch==2.11.0" });
+  assert.match($("backendInstallLog").textContent, /Collecting torch==2\.11\.0/);
+});
+
+test("Бэкенд: install-closed re-checks status and preflight (backendInstalled feeds the readiness verdict)", async () => {
+  let statusCalls = 0;
+  let preflightCalls = 0;
+  const { window, $, handlers } = await boot({
+    backendStatus: async () => { statusCalls++; return { installed: true, pythonVersion: "3.11.15", stale: false }; },
+    preflight: async () => { preflightCalls++; return { lmStudio: true, mic: "granted", screen: "granted", ffmpeg: true, whisperCached: true, hfToken: true, embedModel: true, backendInstalled: true }; },
+  });
+  $("settingsOpen").click();
+  await tick(window);
+  const before = statusCalls;
+  const beforePf = preflightCalls;
+  handlers.installBackend({ event: "install-closed", code: 0, canceled: false });
+  await tick(window);
+  assert.ok(statusCalls > before, "backendStatus must be re-queried after install-closed");
+  assert.ok(preflightCalls > beforePf, "preflight must be re-queried after install-closed (feeds the readiness verdict)");
+});
+
+test("Бэкенд: a failed installBackend() call surfaces the error and re-enables buttons", async () => {
+  const { window, $ } = await boot({
+    installBackend: async () => ({ ok: false, error: "Мало места на диске" }),
+  });
+  let alerted = null;
+  window.alert = (msg) => { alerted = msg; };
+  $("settingsOpen").click();
+  await tick(window);
+  $("backendInstallBtn").click();
+  await tick(window);
+  assert.equal(alerted, "Мало места на диске");
+  assert.equal($("backendInstallBtn").disabled, false);
+});
+
+test("Бэкенд: disk-warning event alerts the message", async () => {
+  const { window, $, handlers } = await boot();
+  let alerted = null;
+  window.alert = (msg) => { alerted = msg; };
+  $("settingsOpen").click();
+  await tick(window);
+  handlers.installBackend({ event: "disk-warning", msg: "⚠️ Мало места на диске (свободно 4.2 ГБ)" });
+  assert.equal(alerted, "⚠️ Мало места на диске (свободно 4.2 ГБ)");
+});
+
+// ── main.js backend-installer wiring (source-text checks — see the model-download
+// block above for why: main.js requires("electron") and can't load headless) ──
+test("main.js: install-backend refuses while recording/processing/model-download/another install is active", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const installBackend = mainSrc.match(/ipcMain\.handle\("install-backend"[\s\S]*?\n\}\);/)[0];
+  assert.match(installBackend, /if \(installBackendProc\) return/);
+  assert.match(installBackend, /if \(recordProc \|\| tee\) return/);
+  assert.match(installBackend, /if \(procProc\) return/);
+  assert.match(installBackend, /if \(modelDlProc\) return/);
+});
+
+test("main.js: cancel-install-backend sets installBackendCanceled and kills the tracked step", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const cancel = mainSrc.match(/ipcMain\.handle\("cancel-install-backend"[\s\S]*?\n\}\);/)[0];
+  assert.match(cancel, /installBackendCanceled = true/);
+  assert.match(cancel, /installBackendProc\.kill\(\)/);
+});
+
+test("main.js: backend-status and uninstall-backend handlers exist", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  assert.match(mainSrc, /ipcMain\.handle\("backend-status"/);
+  assert.match(mainSrc, /ipcMain\.handle\("uninstall-backend"/);
+});
+
+test("main.js: process-audio refuses when no backend interpreter is available, and while an install is in flight", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const processAudio = mainSrc.match(/ipcMain\.handle\("process-audio"[\s\S]*?\n\}\);/)[0];
+  assert.match(processAudio, /if \(installBackendProc\) return/);
+  assert.match(processAudio, /if \(!backendAvailable\(\)\) return/);
+});
+
+test("main.js: start-recording and download-models also refuse while a backend install is in flight (both spawn pythonBin())", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const startRecording = mainSrc.match(/ipcMain\.handle\("start-recording"[\s\S]*?\n  const micDevice/)[0];
+  const downloadModels = mainSrc.match(/ipcMain\.handle\("download-models"[\s\S]*?\n\}\);/)[0];
+  assert.match(startRecording, /if \(installBackendProc\) return/);
+  assert.match(downloadModels, /if \(installBackendProc\) return/);
+});
+
+test("main.js: installBackendProc is killed in before-quit alongside the other tracked children", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const beforeQuit = mainSrc.match(/app\.on\("before-quit"[\s\S]*?\n\}\);/)[0];
+  assert.match(beforeQuit, /installBackendProc/);
+});
+
+test("main.js: pythonBin/ffmpegBin resolve through the installed userData backend env before falling back", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  assert.match(mainSrc, /function pythonBin\(\) \{\s*\n\s*return resolvePythonBin\(/);
+  assert.match(mainSrc, /function ffmpegBin\(\) \{\s*\n\s*return resolveFfmpegBin\(INSTALLED_FFMPEG,/);
+  assert.match(mainSrc, /const BACKEND_ENV = path\.join\(app\.getPath\("userData"\), "backend-env"\)/);
+});
+
+// ── regression lock: partial/cancelled install must never read as "installed"
+// or shadow the dev venv (critic-flagged blocker) ───────────────────────────
+test("main.js: pythonBin() gates the installed interpreter on BACKEND_MARKER too, not existence alone", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const pythonBinFn = mainSrc.match(/function pythonBin\(\) \{[\s\S]*?\n\}/)[0];
+  assert.match(pythonBinFn, /fs\.existsSync\(INSTALLED_PYTHON\)/);
+  assert.match(pythonBinFn, /fs\.existsSync\(BACKEND_MARKER\)/);
+});
+
+test("main.js: backendAvailable() requires BOTH the installed interpreter and the marker for the userData path (agrees with backend-status)", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const fn = mainSrc.match(/function backendAvailable\(\) \{[\s\S]*?\n\}/)[0];
+  assert.match(fn, /fs\.existsSync\(INSTALLED_PYTHON\)\s*&&\s*fs\.existsSync\(BACKEND_MARKER\)/);
+  assert.match(fn, /fs\.existsSync\(VENV_PYTHON\)/, "dev-venv fallback must still work");
+});
+
+test("main.js: install-backend stages into a sibling dir and only atomic-renames onto BACKEND_ENV after the marker is written — a partial install never lands at the resolved path", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const runInstall = mainSrc.match(/async function runInstallBackend\(\) \{[\s\S]*?\n\}\n/)[0];
+  assert.match(runInstall, /BACKEND_ENV_STAGING/, "must stage into a separate dir, not write BACKEND_ENV directly");
+  // marker written before the rename, rename happens after
+  const markerIdx = runInstall.indexOf("writeJsonAtomic(stagingMarker");
+  const renameIdx = runInstall.indexOf("fs.renameSync(BACKEND_ENV_STAGING, BACKEND_ENV)");
+  assert.ok(markerIdx > 0, "marker must be written into staging");
+  assert.ok(renameIdx > markerIdx, "the swap-in rename must happen AFTER the marker is written, not before");
+});
+
+test("main.js: a failed/cancelled install cleans up the staging dir (no partial env survives)", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const runInstall = mainSrc.match(/async function runInstallBackend\(\) \{[\s\S]*?\n\}\n/)[0];
+  const finallyBlock = runInstall.match(/\} finally \{[\s\S]*?\n  \}/)[0];
+  assert.match(finallyBlock, /fs\.rmSync\(BACKEND_ENV_STAGING,/);
+});
+
+test("main.js: mkdtempSync lives inside runInstallBackend's own try (a throw there must still clear installBackendProc/Canceled)", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const runInstall = mainSrc.match(/async function runInstallBackend\(\) \{[\s\S]*?\n\}\n/)[0];
+  const tryIdx = runInstall.indexOf("try {");
+  const mkdtempIdx = runInstall.indexOf("fs.mkdtempSync(");
+  assert.ok(tryIdx >= 0 && mkdtempIdx > tryIdx, "mkdtempSync must appear after the try { so a throw there is still caught");
+});
+
+test("main.js: install-backend's fire-and-forget runInstallBackend() call has a .catch() safety net", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const handler = mainSrc.match(/ipcMain\.handle\("install-backend"[\s\S]*?\n\}\);/)[0];
+  assert.match(handler, /runInstallBackend\(\)\s*\n?\s*\.catch\(/);
+});
+
+test("main.js: runBackend prepends the resolved ffmpeg's dir to PATH so backend.py's shutil.which finds it", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const runBackend = mainSrc.match(/function runBackend\([\s\S]*?\n\}/)[0];
+  assert.match(runBackend, /ffmpegBin\(\)/);
+  assert.match(runBackend, /env\.PATH = /);
+});
+
+test("main.js: preflight reports backendInstalled via backendAvailable()", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const preflight = mainSrc.match(/ipcMain\.handle\("preflight"[\s\S]*?\n\}\);/)[0];
+  assert.match(preflight, /backendInstalled: backendAvailable\(\)/);
 });
 
 // ── settings "Модели" section (model inventory + pre-download) ─────────────

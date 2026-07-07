@@ -6,12 +6,15 @@ const { spawn } = require("child_process");
 const path = require("path");
 const fs = require("fs");
 const os = require("os");
+const https = require("https");
+const crypto = require("crypto");
 const readline = require("readline");
 const {
   WavWriter, rmsLevel, cacheKey, pairHistory,
   encodeTokenBlob, decodeTokenBlob, isStale,
   rewriteNoteSpeakers, isOutsideRoot, indexRunReducer, diskGuardVerdict,
   resolveOutDirOnVaultChange, trayMenuTemplate,
+  resolvePythonBin, resolveFfmpegBin, resolveResourcePath, backendInstallStatus,
 } = require("./lib/mainutil");
 
 // audiotee is ESM-only — load it lazily via dynamic import() from this CommonJS module.
@@ -37,7 +40,27 @@ function waitFor(cond, timeoutMs) {
 const APP_DIR = __dirname;
 const PROJECT_DIR = path.dirname(APP_DIR); // MeetingRecorder/
 const VENV_PYTHON = path.join(PROJECT_DIR, "venv", "bin", "python");
-const BACKEND = path.join(APP_DIR, "backend.py");
+// backend.py/requirements.txt/vendor-wheels ship as app resources — packaged under
+// process.resourcesPath (electron-builder config is a later chunk, not wired yet),
+// dev checkout has them directly in APP_DIR. See resolveResourcePath (lib/mainutil).
+const BACKEND = resolveResourcePath(app.isPackaged, process.resourcesPath, APP_DIR, "backend.py");
+const REQUIREMENTS_FILE = resolveResourcePath(app.isPackaged, process.resourcesPath, APP_DIR, "requirements.txt");
+const VENDOR_WHEELS_DIR = resolveResourcePath(app.isPackaged, process.resourcesPath, APP_DIR, "vendor/wheels");
+// Backend installer (settings "Бэкенд" section) — the heavy Python/ML stack (~1.3GB)
+// is installed on-demand into userData rather than bundled into the .app, so the
+// app itself stays thin and trivially code-signable (see install-backend below).
+const BACKEND_ENV = path.join(app.getPath("userData"), "backend-env");
+// install-backend stages a full install here first (python extract → ffmpeg →
+// pip → marker write), then atomic-renames it onto BACKEND_ENV only once
+// complete — a half-finished install can never be observed at BACKEND_ENV's
+// resolved path, so pythonBin()/backendAvailable() never see a depless
+// interpreter or a stale/partial ffmpeg. Sibling of BACKEND_ENV (same
+// userData volume) so the final rename is a real, near-atomic POSIX rename,
+// not a cross-device copy.
+const BACKEND_ENV_STAGING = path.join(app.getPath("userData"), "backend-env.staging");
+const INSTALLED_PYTHON = path.join(BACKEND_ENV, "python", "bin", "python3.11");
+const INSTALLED_FFMPEG = path.join(BACKEND_ENV, "bin", "ffmpeg");
+const BACKEND_MARKER = path.join(BACKEND_ENV, ".installed.json");
 const PRESETS_FILE = path.join(APP_DIR, "presets.json");
 const PRESETS_EXAMPLE = path.join(APP_DIR, "presets.example.json");
 const DB_PATH = path.join(APP_DIR, "index.db"); // derived SQLite index (gitignored)
@@ -63,12 +86,34 @@ let modelDlProc = null;    // live model-download subprocess (settings "Моде
 let modelDlCanceled = false; // set when the user cancels a model download
 let searchProc = null;      // live para-search subprocess (chat/search chunk)
 let searchCanceled = false; // set when the user cancels an in-flight search
+let installBackendProc = null;    // current killable step of an in-flight backend install (settings "Бэкенд")
+let installBackendCanceled = false; // set when the user cancels an in-flight backend install
 let tee = null;        // AudioTee instance (system audio)
 let sysWav = null;     // WavWriter for system.wav
 let session = null;    // { dir, micPath, sysPath, mixedPath, micRecorded }
 
 function pythonBin() {
-  return fs.existsSync(VENV_PYTHON) ? VENV_PYTHON : "python3";
+  return resolvePythonBin(
+    INSTALLED_PYTHON, fs.existsSync(INSTALLED_PYTHON), fs.existsSync(BACKEND_MARKER),
+    VENV_PYTHON, fs.existsSync(VENV_PYTHON)
+  );
+}
+
+function ffmpegBin() {
+  return resolveFfmpegBin(INSTALLED_FFMPEG, fs.existsSync(INSTALLED_FFMPEG));
+}
+
+// Whether a backend interpreter capable of actually running backend.py's ML
+// pipeline is available at all — either a COMPLETE userData install (python +
+// completion marker both present — see resolvePythonBin's comment for why the
+// marker check matters), or (dev machines) the ../venv checkout. Bare
+// "python3" fallback doesn't count: it almost never has the heavy deps, so
+// callers use this to refuse outright rather than spawn a doomed
+// process-audio/recording run. Kept in sync with backend-status's
+// marker-based backendInstallStatus() below — both must agree on what
+// "installed" means for the userData env specifically.
+function backendAvailable() {
+  return (fs.existsSync(INSTALLED_PYTHON) && fs.existsSync(BACKEND_MARKER)) || fs.existsSync(VENV_PYTHON);
 }
 
 // Send to renderer only if the window is still alive (avoids throw on close/reload).
@@ -94,9 +139,19 @@ function shutdownChildren() {
 // Spawn backend, stream parsed json events to the renderer over `channel`.
 // Returns the child process. onDone(lastEvent) fires when it exits.
 function runBackend(args, onEvent, onClose, extraEnv = {}) {
+  const env = { ...process.env, PYTHONUNBUFFERED: "1", ...extraEnv };
+  // backend.py resolves ffmpeg via shutil.which("ffmpeg") (convert_to_mono/cmd_mix/
+  // cmd_preflight) — never touched directly. Prepending ffmpegBin()'s dir to PATH
+  // here makes an installed static ffmpeg win over a brew-installed one with no
+  // backend.py changes at all; when nothing is installed, ffmpegBin() returns the
+  // bare "ffmpeg" and PATH is left untouched (shutil.which falls back as before).
+  const resolvedFfmpeg = ffmpegBin();
+  if (resolvedFfmpeg !== "ffmpeg") {
+    env.PATH = `${path.dirname(resolvedFfmpeg)}${path.delimiter}${env.PATH || ""}`;
+  }
   const proc = spawn(pythonBin(), [BACKEND, ...args], {
     cwd: APP_DIR,
-    env: { ...process.env, PYTHONUNBUFFERED: "1", ...extraEnv },
+    env,
   });
   const rl = readline.createInterface({ input: proc.stdout });
   rl.on("line", (line) => {
@@ -240,12 +295,14 @@ app.on("before-quit", async (e) => {
     if (autoIndexProc) autoIndexProc.kill();
     if (modelDlProc) modelDlProc.kill();
     if (searchProc) searchProc.kill();
+    if (installBackendProc) installBackendProc.kill();
     app.quit();
-  } else if (procProc || autoIndexProc || modelDlProc || searchProc) {
+  } else if (procProc || autoIndexProc || modelDlProc || searchProc || installBackendProc) {
     if (procProc) procProc.kill();
     if (autoIndexProc) autoIndexProc.kill();
     if (modelDlProc) modelDlProc.kill();
     if (searchProc) searchProc.kill();
+    if (installBackendProc) installBackendProc.kill();
   }
 });
 app.on("window-all-closed", () => {
@@ -287,6 +344,7 @@ ipcMain.handle("preflight", async () => {
   return {
     lmStudio, mic, screen, embedModel,
     ffmpeg: !!be.ffmpeg, whisperCached: !!be.whisper_cached, hfToken: !!be.hf_token,
+    backendInstalled: backendAvailable(),
   };
 });
 
@@ -429,6 +487,9 @@ ipcMain.handle("pick-out-dir", async () => {
 // recording: start — mic (python/pyaudio) + system audio (AudioTee), in parallel
 ipcMain.handle("start-recording", async (_e, opts) => {
   if (recordProc || tee) return { ok: false, error: "Запись уже идёт" };
+  // Recording spawns pythonBin() too (mic capture) — a concurrent install-backend
+  // run can be actively overwriting that same interpreter file underneath it.
+  if (installBackendProc) return { ok: false, error: "Дождитесь окончания установки бэкенда" };
 
   // Disk guard: session dirs live under RECORDINGS_DIR (permanent — see PENDING_FILE
   // above) — check that volume's free space before committing to a recording. statfs
@@ -632,6 +693,10 @@ ipcMain.handle("process-audio", async (_e, opts) => {
   const { audioFile, prompt, diarize, outDir, engine, hfToken, fresh, language, glossary, summarize, template, micFile, systemFile, authorName } = opts;
   if (procProc) return { ok: false, error: "Обработка уже идёт" };
   if (modelDlProc) return { ok: false, error: "Дождитесь окончания скачивания моделей" };
+  // Same reasoning as start-recording's guard above: processing spawns pythonBin(),
+  // which an in-flight install may be actively replacing on disk.
+  if (installBackendProc) return { ok: false, error: "Дождитесь окончания установки бэкенда" };
+  if (!backendAvailable()) return { ok: false, error: "Бэкенд не установлен — откройте Настройки → Бэкенд" };
 
   const cacheDir = cacheDirFor(audioFile);
   if (fresh) {
@@ -719,6 +784,9 @@ ipcMain.handle("download-models", async (_e, opts) => {
   if (modelDlProc) return { ok: false, error: "Скачивание уже идёт" };
   if (procProc) return { ok: false, error: "Дождитесь окончания обработки" };
   if (recordProc || tee) return { ok: false, error: "Дождитесь окончания записи" };
+  // Model download also spawns pythonBin() (backend.py's download-models command) —
+  // same install-in-progress hazard as start-recording/process-audio above.
+  if (installBackendProc) return { ok: false, error: "Дождитесь окончания установки бэкенда" };
 
   // Disk guard: models download into ~/.cache, not TMP_DIR — check that volume.
   let diskVerdict = { action: "ok", msg: null };
@@ -756,6 +824,256 @@ ipcMain.handle("cancel-model-download", async () => {
   modelDlCanceled = true;
   modelDlProc.kill("SIGTERM");
   return { ok: true };
+});
+
+// ── backend installer (settings "Бэкенд" section) ───────────────────────────
+// Installs the heavy Python/ML stack (~1.3GB: torch/MLX/pyannote) into userData
+// on button press — see BACKEND_ENV above. Pinned artifact versions: bump
+// deliberately, and re-verify (download + run/import) before bumping, same bar
+// as the original step-0 checks this feature was gated on.
+const PYTHON_STANDALONE_VERSION = "3.11.15";
+const PYTHON_STANDALONE_RELEASE_TAG = "20260623";
+const PYTHON_STANDALONE_URL =
+  `https://github.com/astral-sh/python-build-standalone/releases/download/${PYTHON_STANDALONE_RELEASE_TAG}/` +
+  `cpython-${PYTHON_STANDALONE_VERSION}%2B${PYTHON_STANDALONE_RELEASE_TAG}-aarch64-apple-darwin-install_only.tar.gz`;
+const PYTHON_STANDALONE_SHA256 = "d2324bfd1a7b9fc44ccd884c3a2505bcab6691dbfd4f8270e10c50aaa4e19506";
+// osxexperts.net ffmpeg81arm: genuinely arm64-native (verified via `file`/otool — no
+// /opt/homebrew or /usr/local deps, only Apple system frameworks + /usr/lib). Chosen
+// over evermeet.cx, which explicitly ships x86_64-only builds (Rosetta) for macOS.
+const FFMPEG_STATIC_URL = "https://www.osxexperts.net/ffmpeg81arm.zip";
+const FFMPEG_STATIC_SHA256 = "ebb82529562b71170807bbc6b0e7eb4f0b13af8cbb0e085bb9e8f6fe709598ad";
+// Rough floor for python(~30MB)+ffmpeg(~25MB)+pip installs(~1.3GB)+build overhead.
+const BACKEND_INSTALL_REFUSE_BYTES = 4 * 1024 * 1024 * 1024; // < 4 GiB free → refuse to start
+const BACKEND_INSTALL_WARN_BYTES = 6 * 1024 * 1024 * 1024;   // < 6 GiB free → start, but warn
+
+// Stream a URL to destPath, verifying its sha256 against expectedSha256 and
+// following redirects (GitHub release assets 302 to a signed blob URL). Tracks
+// itself in installBackendProc so cancel-install-backend can abort mid-download.
+// onProgress(pct) fires at most once per whole percentage point.
+function downloadToFile(url, destPath, expectedSha256, onProgress) {
+  return new Promise((resolve, reject) => {
+    const req = https.get(url, { headers: { "User-Agent": "MeetingRecorder" } }, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        res.resume();
+        resolve(downloadToFile(res.headers.location, destPath, expectedSha256, onProgress));
+        return;
+      }
+      if (res.statusCode !== 200) {
+        res.resume();
+        reject(new Error(`HTTP ${res.statusCode} скачивая ${url}`));
+        return;
+      }
+      const hash = crypto.createHash("sha256");
+      const file = fs.createWriteStream(destPath);
+      const total = parseInt(res.headers["content-length"] || "0", 10);
+      let received = 0;
+      let lastPct = -1;
+      res.on("data", (chunk) => {
+        hash.update(chunk);
+        received += chunk.length;
+        if (onProgress && total) {
+          const pct = Math.round((received / total) * 100);
+          if (pct !== lastPct) { lastPct = pct; onProgress(pct); }
+        }
+      });
+      res.pipe(file);
+      file.on("finish", () => {
+        file.close(() => {
+          const actual = hash.digest("hex");
+          if (expectedSha256 && actual !== expectedSha256) {
+            fs.unlink(destPath, () => {});
+            reject(new Error(`контрольная сумма не совпала (${path.basename(destPath)})`));
+          } else {
+            resolve();
+          }
+        });
+      });
+      file.on("error", (e) => { try { fs.unlinkSync(destPath); } catch {} reject(e); });
+    });
+    req.on("error", (e) => { try { fs.unlinkSync(destPath); } catch {} reject(e); });
+    installBackendProc = { kill: () => req.destroy(new Error("отменено")) };
+  });
+}
+
+// Spawn cmd/args to completion, tracked in installBackendProc for cancellation.
+// opts.onLine(text), if given, gets both stdout lines and raw stderr chunks —
+// pip interleaves progress on both streams.
+function runInstallStep(cmd, args, opts = {}) {
+  return new Promise((resolve, reject) => {
+    const proc = spawn(cmd, args, { cwd: opts.cwd });
+    installBackendProc = proc;
+    let stderr = "";
+    if (opts.onLine && proc.stdout) {
+      readline.createInterface({ input: proc.stdout }).on("line", opts.onLine);
+    }
+    proc.stderr.on("data", (d) => {
+      const text = d.toString();
+      stderr += text;
+      if (opts.onLine) text.trim().split("\n").forEach((l) => l && opts.onLine(l));
+    });
+    proc.on("close", (code) => (code === 0 ? resolve() : reject(new Error(stderr || `${cmd} завершился с кодом ${code}`))));
+    proc.on("error", reject);
+  });
+}
+
+// Runs fn() bracketed by stage/stage_end events on the "Бэкенд" section's own
+// channel — same stage/stage_end vocabulary backend.py's download-models uses,
+// so the renderer's per-row rendering idiom (see renderer.js) carries over.
+async function withInstallStage(stageName, startMsg, fn) {
+  send("install-backend-event", { event: "stage", stage: stageName, msg: startMsg });
+  try {
+    const result = await fn();
+    send("install-backend-event", { event: "stage_end", stage: stageName, status: "ok", msg: "готово" });
+    return result;
+  } catch (e) {
+    const canceled = installBackendCanceled;
+    send("install-backend-event", {
+      event: "stage_end", stage: stageName,
+      status: canceled ? "skip" : "fail",
+      msg: canceled ? "отменено" : String((e && e.message) || e),
+    });
+    throw e;
+  }
+}
+
+async function runInstallBackend() {
+  // mkdtempSync deliberately lives INSIDE the try: if it throws, the catch/finally
+  // below still run and clear installBackendProc/installBackendCanceled — outside
+  // the try, a throw here would reject this fire-and-forget promise and leave the
+  // app permanently refusing record/process/download until restart (main.js's
+  // install-backend handler also wraps its call in .catch() as a second line of
+  // defense against a bug in this function's own error handling).
+  let tmpDir = null;
+  try {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "mr-backend-install-"));
+    // Stage the whole install in a sibling-of-BACKEND_ENV dir; nothing is ever
+    // written to BACKEND_ENV itself until the atomic rename at the very end, once
+    // pip has succeeded and the marker is written. A crash/cancel at any point
+    // before that leaves BACKEND_ENV exactly as it was (untouched, or absent) —
+    // never partially overwritten — so pythonBin()/backendAvailable() can never
+    // observe a depless interpreter or a stale ffmpeg.
+    fs.rmSync(BACKEND_ENV_STAGING, { recursive: true, force: true }); // clear a stale leftover from a crashed prior attempt
+    fs.mkdirSync(BACKEND_ENV_STAGING, { recursive: true });
+    const stagingPython = path.join(BACKEND_ENV_STAGING, "python", "bin", "python3.11");
+    const stagingFfmpeg = path.join(BACKEND_ENV_STAGING, "bin", "ffmpeg");
+    const stagingMarker = path.join(BACKEND_ENV_STAGING, ".installed.json");
+
+    await withInstallStage("python", "Скачиваю Python…", async () => {
+      const pyTarball = path.join(tmpDir, "python.tar.gz");
+      await downloadToFile(PYTHON_STANDALONE_URL, pyTarball, PYTHON_STANDALONE_SHA256,
+        (pct) => send("install-backend-event", { event: "download-progress", stage: "python", pct }));
+      if (installBackendCanceled) throw new Error("отменено");
+      await runInstallStep("tar", ["-xzf", pyTarball, "-C", BACKEND_ENV_STAGING]);
+    });
+
+    await withInstallStage("ffmpeg", "Скачиваю ffmpeg…", async () => {
+      const ffmpegZip = path.join(tmpDir, "ffmpeg.zip");
+      await downloadToFile(FFMPEG_STATIC_URL, ffmpegZip, FFMPEG_STATIC_SHA256,
+        (pct) => send("install-backend-event", { event: "download-progress", stage: "ffmpeg", pct }));
+      if (installBackendCanceled) throw new Error("отменено");
+      const extractDir = path.join(tmpDir, "ffmpeg-extract");
+      fs.mkdirSync(extractDir, { recursive: true });
+      await runInstallStep("unzip", ["-o", ffmpegZip, "-d", extractDir]);
+      fs.mkdirSync(path.join(BACKEND_ENV_STAGING, "bin"), { recursive: true });
+      fs.copyFileSync(path.join(extractDir, "ffmpeg"), stagingFfmpeg);
+      fs.chmodSync(stagingFfmpeg, 0o755);
+    });
+
+    await withInstallStage("pip", "Устанавливаю зависимости (~1.3 ГБ, несколько минут)…", () =>
+      runInstallStep(stagingPython,
+        ["-m", "pip", "install", "--no-cache-dir", "--find-links", VENDOR_WHEELS_DIR, "-r", REQUIREMENTS_FILE],
+        { onLine: (line) => send("install-backend-event", { event: "log", msg: line }) }));
+
+    const reqText = fs.readFileSync(REQUIREMENTS_FILE, "utf-8");
+    writeJsonAtomic(stagingMarker, {
+      pythonVersion: PYTHON_STANDALONE_VERSION,
+      requirementsHash: cacheKey(reqText),
+      installedAt: new Date().toISOString(),
+    });
+
+    // Atomic(-ish) swap-in. fs.renameSync onto an existing NON-EMPTY directory
+    // fails (ENOTEMPTY on POSIX), so a reinstall must move the previous
+    // BACKEND_ENV aside first. If the process dies between these two renames,
+    // BACKEND_ENV simply doesn't exist for a moment — which resolves as "not
+    // installed" (falls through to dev venv), never a false "available".
+    const backupEnv = BACKEND_ENV + ".old";
+    fs.rmSync(backupEnv, { recursive: true, force: true });
+    if (fs.existsSync(BACKEND_ENV)) fs.renameSync(BACKEND_ENV, backupEnv);
+    fs.renameSync(BACKEND_ENV_STAGING, BACKEND_ENV);
+    fs.rmSync(backupEnv, { recursive: true, force: true });
+
+    send("install-backend-event", { event: "install-closed", code: 0, canceled: false });
+  } catch (e) {
+    send("install-backend-event", {
+      event: "install-closed",
+      code: installBackendCanceled ? null : 1,
+      canceled: installBackendCanceled,
+    });
+  } finally {
+    if (tmpDir) { try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {} }
+    // Never leave a half-populated staging dir behind — a failed/cancelled
+    // install must not survive as anything a later run could mistake for
+    // progress (and BACKEND_ENV itself was never touched on this path).
+    try { fs.rmSync(BACKEND_ENV_STAGING, { recursive: true, force: true }); } catch {}
+    installBackendProc = null;
+    installBackendCanceled = false;
+  }
+}
+
+ipcMain.handle("install-backend", async () => {
+  if (installBackendProc) return { ok: false, error: "Установка уже идёт" };
+  if (recordProc || tee) return { ok: false, error: "Дождитесь окончания записи" };
+  if (procProc) return { ok: false, error: "Дождитесь окончания обработки" };
+  if (modelDlProc) return { ok: false, error: "Дождитесь окончания скачивания моделей" };
+
+  let diskVerdict = { action: "ok", msg: null };
+  try {
+    const st = fs.statfsSync(app.getPath("userData"));
+    diskVerdict = diskGuardVerdict(st.bavail * st.bsize, BACKEND_INSTALL_REFUSE_BYTES, BACKEND_INSTALL_WARN_BYTES);
+  } catch {}
+  if (diskVerdict.action === "refuse") return { ok: false, error: diskVerdict.msg };
+
+  installBackendCanceled = false;
+  // Placeholder so a second install-backend call sees "busy" immediately — the
+  // real killable object replaces this once the first download/step starts.
+  installBackendProc = { kill: () => { installBackendCanceled = true; } };
+  // Fire-and-forget — progress streams over install-backend-event. runInstallBackend
+  // itself never rethrows (its own try/catch/finally always clears these flags), but
+  // .catch() here is a last-resort safety net against a bug in that handling itself,
+  // so the app can never get stuck permanently refusing record/process/download.
+  runInstallBackend().catch(() => {
+    installBackendProc = null;
+    installBackendCanceled = false;
+  });
+  if (diskVerdict.action === "warn") send("install-backend-event", { event: "disk-warning", msg: diskVerdict.msg });
+  return { ok: true };
+});
+
+ipcMain.handle("cancel-install-backend", async () => {
+  if (!installBackendProc) return { ok: false, error: "Установка не идёт" };
+  installBackendCanceled = true;
+  installBackendProc.kill();
+  return { ok: true };
+});
+
+// Status only — marker/cache inspection, no network (mirrors "models" above).
+ipcMain.handle("backend-status", async () => {
+  let marker = null;
+  try { marker = JSON.parse(fs.readFileSync(BACKEND_MARKER, "utf-8")); } catch {}
+  let reqHash = null;
+  try { reqHash = cacheKey(fs.readFileSync(REQUIREMENTS_FILE, "utf-8")); } catch {}
+  return backendInstallStatus(marker, reqHash, fs.existsSync(INSTALLED_PYTHON));
+});
+
+ipcMain.handle("uninstall-backend", async () => {
+  if (installBackendProc) return { ok: false, error: "Установка идёт" };
+  if (recordProc || tee || procProc) return { ok: false, error: "Нельзя удалить бэкенд во время записи или обработки" };
+  try {
+    fs.rmSync(BACKEND_ENV, { recursive: true, force: true });
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: String((e && e.message) || e) };
+  }
 });
 
 // Past recordings: query the backend's SQLite index (reconciled against the notes dir).

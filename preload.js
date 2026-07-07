@@ -17,6 +17,10 @@ contextBridge.exposeInMainWorld("api", {
   getModels: () => ipcRenderer.invoke("models"),
   downloadModels: (opts) => ipcRenderer.invoke("download-models", opts),
   cancelModelDownload: () => ipcRenderer.invoke("cancel-model-download"),
+  backendStatus: () => ipcRenderer.invoke("backend-status"),
+  installBackend: () => ipcRenderer.invoke("install-backend"),
+  cancelInstallBackend: () => ipcRenderer.invoke("cancel-install-backend"),
+  uninstallBackend: () => ipcRenderer.invoke("uninstall-backend"),
   reveal: (p) => ipcRenderer.invoke("reveal", p),
   renameSpeakers: (notePath, map) => ipcRenderer.invoke("rename-speakers", { notePath, map }),
   listHistory: (outDir) => ipcRenderer.invoke("list-history", outDir),
@@ -35,5 +39,6 @@ contextBridge.exposeInMainWorld("api", {
   onProcessEvent: (cb) => ipcRenderer.on("process-event", (_e, ev) => cb(ev)),
   onParaReindexEvent: (cb) => ipcRenderer.on("para-reindex-event", (_e, ev) => cb(ev)),
   onModelDownloadEvent: (cb) => ipcRenderer.on("download-models-event", (_e, ev) => cb(ev)),
+  onInstallBackendEvent: (cb) => ipcRenderer.on("install-backend-event", (_e, ev) => cb(ev)),
   onTrayRecordToggle: (cb) => ipcRenderer.on("tray-record-toggle", () => cb()),
 });
