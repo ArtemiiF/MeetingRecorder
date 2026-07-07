@@ -10,6 +10,7 @@ const {
   rewriteNoteSpeakers, isOutsideRoot, indexRunReducer, diskGuardVerdict,
   resolveOutDirOnVaultChange, trayMenuTemplate,
   resolvePythonBin, resolveFfmpegBin, resolveResourcePath, backendInstallStatus,
+  hfCacheDir, whisperModelDir, vadJitPath, diarizationModelDirs, appReadinessStatus,
 } = require("../lib/mainutil");
 
 // ── WAV header ──────────────────────────────────────────────────────────────
@@ -407,4 +408,53 @@ test("backendInstallStatus: hash mismatch (requirements.txt changed since instal
 });
 test("backendInstallStatus: interpreter present but no marker at all → not installed (not a false 'stale')", () => {
   assert.deepEqual(backendInstallStatus(null, "abc123", true), { installed: false, pythonVersion: null, stale: false });
+});
+
+// ── setup-gate model cache paths (mirrors backend.py's MODEL_SPECS) ──────────
+// Load-bearing correctness point: a mismatch here means the setup gate never
+// dismisses (or dismisses wrongly) — these must match backend.py's
+// _WHISPER_MODEL_DIR/_VAD_JIT_PATH/_PYANNOTE_REPO_IDS EXACTLY (backend.py:2623-2634):
+//   _WHISPER_MODEL_DIR = Path.home() / ".cache/huggingface/hub/models--mlx-community--whisper-large-v3-turbo"
+//   _VAD_JIT_PATH      = Path.home() / ".cache/torch/hub/snakers4_silero-vad_master/src/silero_vad/data/silero_vad.jit"
+//   _PYANNOTE_REPO_IDS = ["pyannote/speaker-diarization-3.1", "pyannote/segmentation-3.0",
+//                         "pyannote/wespeaker-voxceleb-resnet34-LM"]  (each via _hf_cache_dir)
+test("whisperModelDir matches backend.py's _WHISPER_MODEL_DIR exactly", () => {
+  assert.equal(
+    whisperModelDir("/Users/x"),
+    path.join("/Users/x", ".cache/huggingface/hub/models--mlx-community--whisper-large-v3-turbo")
+  );
+});
+test("vadJitPath matches backend.py's _VAD_JIT_PATH exactly", () => {
+  assert.equal(
+    vadJitPath("/Users/x"),
+    path.join("/Users/x", ".cache/torch/hub/snakers4_silero-vad_master/src/silero_vad/data/silero_vad.jit")
+  );
+});
+test("diarizationModelDirs matches backend.py's _PYANNOTE_REPO_IDS (via _hf_cache_dir) exactly", () => {
+  assert.deepEqual(diarizationModelDirs("/Users/x"), [
+    path.join("/Users/x", ".cache/huggingface/hub/models--pyannote--speaker-diarization-3.1"),
+    path.join("/Users/x", ".cache/huggingface/hub/models--pyannote--segmentation-3.0"),
+    path.join("/Users/x", ".cache/huggingface/hub/models--pyannote--wespeaker-voxceleb-resnet34-LM"),
+  ]);
+});
+test("hfCacheDir replaces every '/' in the repo id (not just the first)", () => {
+  assert.equal(hfCacheDir("/h", "a/b/c"), path.join("/h", ".cache/huggingface/hub/models--a--b--c"));
+});
+
+// ── appReadinessStatus (wall verdict: backend + whisper + vad, diarization excluded) ──
+test("appReadinessStatus: neither backend nor models ready", () => {
+  assert.deepEqual(appReadinessStatus(false, false, false), { backend: false, whisper: false, vad: false, models: false });
+});
+test("appReadinessStatus: backend ready, models missing", () => {
+  assert.deepEqual(appReadinessStatus(true, false, false), { backend: true, whisper: false, vad: false, models: false });
+});
+test("appReadinessStatus: models ready (whisper+vad), backend not (edge case — predicate doesn't couple them)", () => {
+  assert.deepEqual(appReadinessStatus(false, true, true), { backend: false, whisper: true, vad: true, models: true });
+});
+test("appReadinessStatus: both backend and models ready", () => {
+  assert.deepEqual(appReadinessStatus(true, true, true), { backend: true, whisper: true, vad: true, models: true });
+});
+test("appReadinessStatus: models is false unless BOTH whisper and vad are cached (partial doesn't count)", () => {
+  assert.deepEqual(appReadinessStatus(true, true, false), { backend: true, whisper: true, vad: false, models: false });
+  assert.deepEqual(appReadinessStatus(true, false, true), { backend: true, whisper: false, vad: true, models: false });
 });

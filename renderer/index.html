@@ -332,6 +332,39 @@
     </div>
   </div>
 
+  <!-- SETUP GATE (hard wall): full-cover overlay shown until the backend is
+       installed AND whisper+vad are cached (app-readiness IPC). Diarization
+       stays optional — not required to dismiss this wall, see main.js. -->
+  <!-- defaults VISIBLE (fail-closed): refreshSetupGate() hides it only on a
+       confirmed-ready result, so a slow/failed readiness check never flashes the app. -->
+  <div id="setupGate" class="overlay">
+    <div class="modal" role="dialog" aria-modal="true">
+      <div class="modal-head">
+        <h2>Настройка Meeting Recorder</h2>
+      </div>
+      <p class="hint">Перед первым запуском один раз установите бэкенд и скачайте базовые модели.</p>
+
+      <section class="modal-sec">
+        <h3>1 · Бэкенд</h3>
+        <div id="gateBackendStatusRow" class="pf-row"></div>
+        <div class="out-row">
+          <button id="gateBackendInstallBtn" class="btn small primary">⬇ Установить бэкенд</button>
+          <button id="gateBackendCancelBtn" class="btn small danger hidden">Отменить</button>
+          <span id="gateBackendInstallStatus" class="hint"></span>
+        </div>
+      </section>
+
+      <section class="modal-sec">
+        <h3>2 · Модели (Whisper + VAD)</h3>
+        <div id="gateModelsStatusRow" class="pf-row"></div>
+        <div class="out-row">
+          <button id="gateModelsDownloadBtn" class="btn small primary">⬇ Скачать модели</button>
+        </div>
+        <p class="hint">Диаризация (имена спикеров) — отдельная опциональная модель, её можно скачать позже в Настройках.</p>
+      </section>
+    </div>
+  </div>
+
   <script src="renderer.js"></script>
 </body>
 </html>

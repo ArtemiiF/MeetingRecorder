@@ -15,6 +15,7 @@ const {
   rewriteNoteSpeakers, isOutsideRoot, indexRunReducer, diskGuardVerdict,
   resolveOutDirOnVaultChange, trayMenuTemplate,
   resolvePythonBin, resolveFfmpegBin, resolveResourcePath, backendInstallStatus,
+  whisperModelDir, vadJitPath, diarizationModelDirs, appReadinessStatus,
 } = require("./lib/mainutil");
 
 // audiotee is ESM-only — load it lazily via dynamic import() from this CommonJS module.
@@ -123,6 +124,20 @@ function ffmpegBin() {
 function backendAvailable() {
   return (fs.existsSync(INSTALLED_PYTHON) && fs.existsSync(BACKEND_MARKER)) || fs.existsSync(VENV_PYTHON);
 }
+
+// ── setup-gate readiness (renderer's #setupGate hard wall) ──────────────────
+// Cache-existence checks for the wall's two REQUIRED models (whisper, vad) plus
+// diarization (used only by process-audio's per-run diarize gate below, NOT
+// part of the wall itself — see appReadinessStatus's comment in lib/mainutil).
+// Paths come from lib/mainutil's whisperModelDir/vadJitPath/diarizationModelDirs,
+// which mirror backend.py's MODEL_SPECS/_model_cached (backend.py:2623-2663).
+const WHISPER_MODEL_DIR = whisperModelDir(os.homedir());
+const VAD_JIT_PATH = vadJitPath(os.homedir());
+const DIARIZATION_MODEL_DIRS = diarizationModelDirs(os.homedir());
+
+function whisperCached() { return fs.existsSync(WHISPER_MODEL_DIR); }
+function vadCached() { return fs.existsSync(VAD_JIT_PATH); }
+function diarizationCached() { return DIARIZATION_MODEL_DIRS.every((d) => fs.existsSync(d)); }
 
 // Send to renderer only if the window is still alive (avoids throw on close/reload).
 function send(channel, payload) {
@@ -359,6 +374,16 @@ ipcMain.handle("preflight", async () => {
     ffmpeg: !!be.ffmpeg, whisperCached: !!be.whisper_cached, hfToken: !!be.hf_token,
     backendInstalled: backendAvailable(),
   };
+});
+
+// Setup-gate readiness (renderer's #setupGate hard wall) — unlike preflight's
+// whisperCached above, this never spawns pythonBin(): before the backend is
+// installed there may be no working interpreter at all (bare "python3" fallback
+// can lack every ML dep, or not exist), so the model-cache check is plain
+// Node fs, not a backend.py round-trip. See appReadinessStatus's comment in
+// lib/mainutil for why diarization is excluded from `models`.
+ipcMain.handle("app-readiness", async () => {
+  return appReadinessStatus(backendAvailable(), whisperCached(), vadCached());
 });
 
 // macOS can only prompt for mic access while status is "not-determined" — once
@@ -728,6 +753,14 @@ ipcMain.handle("process-audio", async (_e, opts) => {
   // which an in-flight install may be actively replacing on disk.
   if (installBackendProc) return { ok: false, error: "Дождитесь окончания установки бэкенда" };
   if (!backendAvailable()) return { ok: false, error: "Бэкенд не установлен — откройте Настройки → Бэкенд" };
+  // Diarization is optional-by-design (not part of the setup-gate wall — see
+  // appReadinessStatus's comment in lib/mainutil) but still needs its own
+  // per-run guard: pyannote's repos are gated behind an HF token, so a run
+  // requesting diarize without the models cached would otherwise fail deep
+  // inside backend.py instead of refusing upfront here.
+  if (diarize && !diarizationCached()) {
+    return { ok: false, error: "Модели диаризации не скачаны — Настройки → Модели, или выключите определение спикеров" };
+  }
 
   const cacheDir = cacheDirFor(audioFile);
   if (fresh) {

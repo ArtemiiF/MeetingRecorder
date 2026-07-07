@@ -22,6 +22,9 @@ async function boot(apiOverrides = {}) {
   window.navigator.clipboard = { writeText: async () => {} };
   window.api = Object.assign({
     preflight: async () => ({ lmStudio: false, mic: "granted", screen: "unknown", ffmpeg: true, whisperCached: true, hfToken: false, backendInstalled: true }),
+    // Ready by default so the setup gate stays hidden and doesn't interfere with
+    // the other ~230 tests below — gate-specific tests override this.
+    appReadiness: async () => ({ backend: true, whisper: true, vad: true, models: true }),
     requestMicAccess: async () => true,
     openPrivacySettings: async () => {},
     renameSpeakers: async () => ({ ok: true }),
@@ -1849,6 +1852,20 @@ test("main.js: process-audio refuses when no backend interpreter is available, a
   assert.match(processAudio, /if \(!backendAvailable\(\)\) return/);
 });
 
+// ── setup gate (hard wall) ───────────────────────────────────────────────────
+test("main.js: process-audio refuses diarize when pyannote models aren't cached (per-run gate, separate from the setup wall)", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const processAudio = mainSrc.match(/ipcMain\.handle\("process-audio"[\s\S]*?\n\}\);/)[0];
+  assert.match(processAudio, /if \(diarize && !diarizationCached\(\)\) \{\s*\n\s*return \{ ok: false/);
+});
+
+test("main.js: app-readiness IPC exists and derives its verdict from appReadinessStatus(backendAvailable(), whisperCached(), vadCached())", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const handler = mainSrc.match(/ipcMain\.handle\("app-readiness"[\s\S]*?\n\}\);/);
+  assert.ok(handler, "app-readiness handler not found");
+  assert.match(handler[0], /appReadinessStatus\(backendAvailable\(\), whisperCached\(\), vadCached\(\)\)/);
+});
+
 test("main.js: start-recording and download-models also refuse while a backend install is in flight (both spawn pythonBin())", () => {
   const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
   const startRecording = mainSrc.match(/ipcMain\.handle\("start-recording"[\s\S]*?\n  const micDevice/)[0];
@@ -2775,4 +2792,116 @@ test("recording is allowed while record-mode processing is running (gate relaxed
   assert.equal($("recBtn").disabled, false, "recBtn must not be disabled by processing alone");
   $("recBtn").click(); await tick(window);
   assert.equal(startCalls, 1, "a new recording must be able to start while processing runs");
+});
+
+// ── setup gate (hard wall) ───────────────────────────────────────────────────
+test("setup gate: visible when backend/models aren't ready", async () => {
+  const { window, $ } = await boot({
+    appReadiness: async () => ({ backend: false, whisper: false, vad: false, models: false }),
+  });
+  await tick(window);
+  assert.equal($("setupGate").classList.contains("hidden"), false);
+});
+
+test("setup gate: hidden once appReadiness reports backend+models ready (default boot state)", async () => {
+  const { window, $ } = await boot();
+  await tick(window);
+  assert.equal($("setupGate").classList.contains("hidden"), true);
+});
+
+test("setup gate: fails CLOSED — an appReadiness IPC error keeps the wall up, never exposes the app", async () => {
+  const { window, $ } = await boot({
+    appReadiness: async () => { throw new Error("ipc boom"); },
+  });
+  await tick(window);
+  assert.equal($("setupGate").classList.contains("hidden"), false);
+});
+
+test("setup gate: step 2 (models) stays disabled until backend is ready — backend-first ordering", async () => {
+  const { window, $ } = await boot({
+    appReadiness: async () => ({ backend: false, whisper: false, vad: false, models: false }),
+  });
+  await tick(window);
+  assert.ok($("gateModelsDownloadBtn").disabled, "download-models spawns pythonBin(), which lacks deps until the backend is installed");
+  assert.ok(!$("gateBackendInstallBtn").disabled);
+});
+
+test("setup gate: step 2 unlocks once backend is ready but models are still missing", async () => {
+  const { window, $ } = await boot({
+    appReadiness: async () => ({ backend: true, whisper: false, vad: false, models: false }),
+  });
+  await tick(window);
+  assert.ok(!$("gateModelsDownloadBtn").disabled);
+  assert.ok($("gateBackendInstallBtn").disabled, "nothing to install once backend is already ready");
+});
+
+test("setup gate: re-checks readiness after install-backend completes, hiding the wall once ready", async () => {
+  let ready = false;
+  const { window, $, handlers } = await boot({
+    appReadiness: async () => (ready
+      ? { backend: true, whisper: true, vad: true, models: true }
+      : { backend: false, whisper: false, vad: false, models: false }),
+  });
+  await tick(window);
+  assert.equal($("setupGate").classList.contains("hidden"), false);
+  ready = true;
+  handlers.installBackend({ event: "install-closed", code: 0, canceled: false });
+  await tick(window);
+  assert.equal($("setupGate").classList.contains("hidden"), true);
+});
+
+test("setup gate: re-checks readiness after download-models completes, hiding the wall once ready", async () => {
+  let ready = false;
+  const { window, $, handlers } = await boot({
+    appReadiness: async () => (ready
+      ? { backend: true, whisper: true, vad: true, models: true }
+      : { backend: true, whisper: false, vad: false, models: false }),
+  });
+  await tick(window);
+  assert.equal($("setupGate").classList.contains("hidden"), false);
+  ready = true;
+  handlers.modelDownload({ event: "download-closed", code: 0, canceled: false });
+  await tick(window);
+  assert.equal($("setupGate").classList.contains("hidden"), true);
+});
+
+test("setup gate: window focus re-checks readiness", async () => {
+  let calls = 0;
+  const { window, $ } = await boot({
+    appReadiness: async () => {
+      calls++;
+      return calls > 1
+        ? { backend: true, whisper: true, vad: true, models: true }
+        : { backend: false, whisper: false, vad: false, models: false };
+    },
+  });
+  await tick(window);
+  assert.equal($("setupGate").classList.contains("hidden"), false);
+  window.dispatchEvent(new window.Event("focus"));
+  await tick(window);
+  assert.equal($("setupGate").classList.contains("hidden"), true);
+});
+
+test("setup gate: clicking step 1 install button triggers installBackend (shared with settings' button)", async () => {
+  let installCalls = 0;
+  const { window, $ } = await boot({
+    appReadiness: async () => ({ backend: false, whisper: false, vad: false, models: false }),
+    installBackend: async () => { installCalls++; return { ok: true }; },
+  });
+  await tick(window);
+  $("gateBackendInstallBtn").click();
+  await tick(window);
+  assert.equal(installCalls, 1);
+});
+
+test("setup gate: clicking step 2 download button requests only whisper+vad (never the full missing batch)", async () => {
+  let downloadOpts = null;
+  const { window, $ } = await boot({
+    appReadiness: async () => ({ backend: true, whisper: false, vad: false, models: false }),
+    downloadModels: async (opts) => { downloadOpts = opts; return { ok: true }; },
+  });
+  await tick(window);
+  $("gateModelsDownloadBtn").click();
+  await tick(window);
+  assert.deepEqual(downloadOpts, { only: ["whisper", "vad"] });
 });

@@ -194,11 +194,15 @@ async function refreshBackendStatus() {
   return status;
 }
 
+// Toggled in both settings' "Бэкенд" section AND the setup-gate wall's step 1 —
+// same install, two render targets (see #setupGate in index.html).
 function setBackendInstallUI(running) {
   backendInstallRunning = running;
   $("backendRefresh").disabled = running;
   $("backendInstallBtn").disabled = running;
   $("backendCancelBtn").classList.toggle("hidden", !running);
+  $("gateBackendInstallBtn").disabled = running;
+  $("gateBackendCancelBtn").classList.toggle("hidden", !running);
 }
 
 function backendLog(msg) {
@@ -214,27 +218,40 @@ function backendLog(msg) {
   box.scrollTop = box.scrollHeight;
 }
 
-$("backendRefresh").addEventListener("click", refreshBackendStatus);
-$("backendInstallBtn").addEventListener("click", async () => {
+// One-line live status, mirrored into both the settings section and the gate
+// (the gate has no log box — just this status line, see index.html).
+function setBackendInstallStatusText(text) {
+  $("backendInstallStatus").textContent = text;
+  $("gateBackendInstallStatus").textContent = text;
+}
+
+// Shared by settings' "⬇ Установить бэкенд" button and the setup-gate's own
+// install button — one install flow, triggerable from either surface.
+async function startBackendInstall() {
   if (backendInstallRunning) return;
   setBackendInstallUI(true);
   $("backendInstallLog").textContent = "";
-  $("backendInstallStatus").textContent = "";
+  setBackendInstallStatusText("");
   backendInstallLogLines = 0;
   const res = await window.api.installBackend();
   if (res && res.ok === false) {
     setBackendInstallUI(false);
     alert(res.error);
   }
-});
+}
+
+$("backendRefresh").addEventListener("click", refreshBackendStatus);
+$("backendInstallBtn").addEventListener("click", startBackendInstall);
 $("backendCancelBtn").addEventListener("click", () => window.api.cancelInstallBackend());
+$("gateBackendInstallBtn").addEventListener("click", startBackendInstall);
+$("gateBackendCancelBtn").addEventListener("click", () => window.api.cancelInstallBackend());
 
 window.api.onInstallBackendEvent((ev) => {
   if (ev.event === "stage") {
-    $("backendInstallStatus").textContent = ev.msg;
+    setBackendInstallStatusText(ev.msg);
     backendLog("▶ " + ev.msg);
   } else if (ev.event === "download-progress") {
-    $("backendInstallStatus").textContent = `${ev.stage}: ${ev.pct}%`;
+    setBackendInstallStatusText(`${ev.stage}: ${ev.pct}%`);
   } else if (ev.event === "stage_end") {
     const icon = ev.status === "ok" ? "✅ " : ev.status === "skip" ? "⏭ " : "⚠️ ";
     backendLog(icon + ev.msg);
@@ -242,9 +259,10 @@ window.api.onInstallBackendEvent((ev) => {
     backendLog(ev.msg);
   } else if (ev.event === "install-closed") {
     setBackendInstallUI(false);
-    $("backendInstallStatus").textContent = "";
+    setBackendInstallStatusText("");
     refreshBackendStatus();
     refreshPreflight(); // backendInstalled feeds preflight's readiness verdict too
+    refreshSetupGate(); // backend just changed — re-check the wall (unlocks step 2)
   } else if (ev.event === "disk-warning") {
     alert(ev.msg);
   }
@@ -315,6 +333,9 @@ function setModelsDownloadUI(running) {
   $("modelsRefresh").disabled = running;
   $("modelsDownloadMissing").disabled = running;
   document.querySelectorAll("#modelsList .pf-retry").forEach((b) => { b.disabled = running; });
+  // Gate's own download button — re-render restores its backend-first disabled
+  // state afterwards (see renderSetupGate), this just covers the running state.
+  $("gateModelsDownloadBtn").disabled = running;
 }
 
 // only: array of model ids to (re)try, or omitted = whatever's missing and eligible.
@@ -329,31 +350,82 @@ async function startModelDownload(only) {
 }
 $("modelsRefresh").addEventListener("click", refreshModels);
 $("modelsDownloadMissing").addEventListener("click", () => startModelDownload());
+// Gate's step 2 only ever wants the two REQUIRED models — never the full
+// "missing" batch (which would also pull pyannote if a token happens to be
+// set), reusing the same startModelDownload(only) as the per-row retry buttons.
+$("gateModelsDownloadBtn").addEventListener("click", () => startModelDownload(["whisper", "vad"]));
 
 // Per-row live status while a download batch runs — ev.stage is "model:<id>"
 // (backend.py's stage/stage_end vocabulary, same as the pipeline's own stages).
 window.api.onModelDownloadEvent((ev) => {
   const rowFor = (stageName) => (stageName ? $("model-row-" + stageName.replace(/^model:/, "")) : null);
+  // Gate's combined whisper+vad row mirrors only those two stages — diarization
+  // isn't part of the wall (see appReadinessStatus's comment in lib/mainutil).
+  const gateDetail = (ev.stage === "model:whisper" || ev.stage === "model:vad")
+    ? $("gateModelsStatusRow").querySelector(".pf-detail") : null;
   if (ev.event === "stage") {
     const row = rowFor(ev.stage);
     if (row) {
       row.querySelector(".pf-dot").className = "pf-dot warn";
       row.querySelector(".pf-detail").textContent = "⏳ скачивается…";
     }
+    if (gateDetail) gateDetail.textContent = "⏳ скачивается…";
   } else if (ev.event === "stage_end") {
     const row = rowFor(ev.stage);
+    const icon = ev.status === "ok" ? "✅ " : ev.status === "skip" ? "⏭ " : "⚠️ ";
     if (row) {
-      const icon = ev.status === "ok" ? "✅ " : ev.status === "skip" ? "⏭ " : "⚠️ ";
       row.querySelector(".pf-dot").className = "pf-dot " + (ev.status === "fail" ? "bad" : "ok");
       row.querySelector(".pf-detail").textContent = icon + (ev.msg || "");
     }
+    if (gateDetail) gateDetail.textContent = icon + (ev.msg || "");
   } else if (ev.event === "download-closed") {
     setModelsDownloadUI(false);
     refreshModels(); // re-check real cache state — converges cached/needed/locked either way
+    refreshSetupGate(); // models just changed — re-check the wall
   } else if (ev.event === "disk-warning") {
     alert(ev.msg);
   }
 });
+
+// ── setup gate (hard wall): blocks the entire app until the backend is
+// installed AND whisper+vad are cached — main.js's app-readiness IPC computes
+// this via plain fs checks (no python spawn needed pre-install). Diarization
+// is NOT required to dismiss the wall (optional-by-design, see main.js).
+function renderSetupGate(r) {
+  const beRow = $("gateBackendStatusRow");
+  beRow.innerHTML = `<span class="pf-dot ${r.backend ? "ok" : "bad"}"></span><span class="pf-label">Бэкенд</span><span class="pf-detail"></span>`;
+  beRow.querySelector(".pf-detail").textContent = r.backend ? "установлен" : "не установлен";
+  $("gateBackendInstallBtn").disabled = r.backend || backendInstallRunning;
+
+  // Step 2 is backend-first: download-models spawns pythonBin(), which falls
+  // back to a bare "python3" lacking huggingface_hub/torch until the backend
+  // is installed (or a dev ../venv exists) — so it's disabled until r.backend.
+  const moRow = $("gateModelsStatusRow");
+  const modelsReady = r.whisper && r.vad;
+  moRow.innerHTML = `<span class="pf-dot ${modelsReady ? "ok" : "bad"}"></span><span class="pf-label">Модели (Whisper + VAD)</span><span class="pf-detail"></span>`;
+  moRow.querySelector(".pf-detail").textContent = modelsReady
+    ? "скачано"
+    : r.backend ? "нужно скачать" : "сначала установите бэкенд";
+  $("gateModelsDownloadBtn").disabled = !r.backend || modelsReady || modelDlRunning;
+}
+
+async function refreshSetupGate() {
+  // Fail CLOSED: the wall defaults to visible (index.html) and is hidden only on a
+  // confirmed-ready readiness result. An IPC error keeps the wall up rather than
+  // exposing an unusable app; also removes the boot flash-of-usable-app.
+  let r;
+  try {
+    r = await window.api.appReadiness();
+  } catch {
+    $("setupGate").classList.remove("hidden");
+    return { backend: false, whisper: false, vad: false, models: false };
+  }
+  const ready = r.backend && r.models;
+  $("setupGate").classList.toggle("hidden", ready);
+  if (!ready) renderSetupGate(r);
+  return r;
+}
+window.addEventListener("focus", refreshSetupGate);
 
 // settings / readiness modal
 function openSettings() { $("settingsOverlay").classList.remove("hidden"); refreshPreflight(); refreshBackendStatus(); refreshModels(); }
@@ -1951,3 +2023,4 @@ function showResult(ev) {
 }
 
 init();
+refreshSetupGate(); // hard wall — independent of init()'s own async work, checked ASAP
