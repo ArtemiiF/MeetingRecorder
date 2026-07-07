@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <!-- electron-builder's own default hardened-runtime entitlements — required for
+         Electron/V8 to keep working under hardened runtime; supplying a custom
+         entitlements file replaces these wholesale, so they must be repeated here. -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+
+    <!-- Mic capture itself runs in a spawned Python (pyaudio) subprocess, and system
+         audio capture runs in the spawned audiotee binary — not through Chromium's
+         getUserMedia — but the Electron app is the TCC-responsible process for both,
+         and ad-hoc + hardened runtime gates real device I/O on the entitlement being
+         present even when TCC has already granted the permission (see
+         electron-builder issue #9529). Applied to both the main app and inherited/
+         helper code (this same file is used for mac.entitlementsInherit) since
+         Electron's Renderer/GPU helper processes need it too — see wulkano/Kap's
+         entitlements.mac.inherit.plist for a real-world precedent. Camera is
+         intentionally omitted — this app never accesses it. -->
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+  </dict>
+</plist>

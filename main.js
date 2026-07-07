@@ -41,8 +41,8 @@ const APP_DIR = __dirname;
 const PROJECT_DIR = path.dirname(APP_DIR); // MeetingRecorder/
 const VENV_PYTHON = path.join(PROJECT_DIR, "venv", "bin", "python");
 // backend.py/requirements.txt/vendor-wheels ship as app resources — packaged under
-// process.resourcesPath (electron-builder config is a later chunk, not wired yet),
-// dev checkout has them directly in APP_DIR. See resolveResourcePath (lib/mainutil).
+// process.resourcesPath (via electron-builder extraResources), dev checkout has them
+// directly in APP_DIR. See resolveResourcePath (lib/mainutil).
 const BACKEND = resolveResourcePath(app.isPackaged, process.resourcesPath, APP_DIR, "backend.py");
 const REQUIREMENTS_FILE = resolveResourcePath(app.isPackaged, process.resourcesPath, APP_DIR, "requirements.txt");
 const VENDOR_WHEELS_DIR = resolveResourcePath(app.isPackaged, process.resourcesPath, APP_DIR, "vendor/wheels");
@@ -61,15 +61,23 @@ const BACKEND_ENV_STAGING = path.join(app.getPath("userData"), "backend-env.stag
 const INSTALLED_PYTHON = path.join(BACKEND_ENV, "python", "bin", "python3.11");
 const INSTALLED_FFMPEG = path.join(BACKEND_ENV, "bin", "ffmpeg");
 const BACKEND_MARKER = path.join(BACKEND_ENV, ".installed.json");
-const PRESETS_FILE = path.join(APP_DIR, "presets.json");
-const PRESETS_EXAMPLE = path.join(APP_DIR, "presets.example.json");
-const DB_PATH = path.join(APP_DIR, "index.db"); // derived SQLite index (gitignored)
+// Writable user state (presets, recordings, the derived index, the HF-token secret)
+// must live outside the app bundle once packaged: __dirname/APP_DIR then resolves
+// inside app.asar (or a signed, otherwise-immutable Resources/app), which rejects
+// writes outright — the unconditional fs.mkdirSync(RECORDINGS_DIR) below would throw
+// at launch. Dev checkout keeps writing next to the source tree (APP_DIR) so
+// presets.json/index.db and the existing tests are untouched. Mirrors the BACKEND_ENV
+// userData convention above.
+const WRITABLE_DIR = app.isPackaged ? app.getPath("userData") : APP_DIR;
+const PRESETS_FILE = path.join(WRITABLE_DIR, "presets.json");
+const PRESETS_EXAMPLE = path.join(APP_DIR, "presets.example.json"); // read-only template, ships with the app
+const DB_PATH = path.join(WRITABLE_DIR, "index.db"); // derived SQLite index (gitignored)
 const TMP_DIR = path.join(os.tmpdir(), "meeting-recorder");
 const DEFAULT_OUT = path.join(os.homedir(), "Documents", "Obsidian", "Meetings");
 // Recordings live outside TMP_DIR (not swept by pruneTemp) so they survive an app
 // restart — mixed/mic/system WAVs pile up here until processed. PENDING_FILE tracks
 // which ones are still waiting (see loadPendingManifest/savePendingManifest below).
-const RECORDINGS_DIR = path.join(APP_DIR, "recordings");
+const RECORDINGS_DIR = path.join(WRITABLE_DIR, "recordings");
 const PENDING_FILE = path.join(RECORDINGS_DIR, "pending.json");
 
 fs.mkdirSync(TMP_DIR, { recursive: true });
@@ -150,7 +158,12 @@ function runBackend(args, onEvent, onClose, extraEnv = {}) {
     env.PATH = `${path.dirname(resolvedFfmpeg)}${path.delimiter}${env.PATH || ""}`;
   }
   const proc = spawn(pythonBin(), [BACKEND, ...args], {
-    cwd: APP_DIR,
+    // cwd must be a real on-disk directory for the OS-level spawn/chdir — APP_DIR
+    // resolves inside app.asar once packaged (a virtual, Node-fs-only path; Electron's
+    // asar transparency covers fs.* calls, not child_process's cwd), which fails with
+    // ENOTDIR. path.dirname(BACKEND) is real in both modes: APP_DIR in dev (identical
+    // to the old value — see resolveResourcePath), process.resourcesPath when packaged.
+    cwd: path.dirname(BACKEND),
     env,
   });
   const rl = readline.createInterface({ input: proc.stdout });
@@ -385,7 +398,7 @@ function savePendingManifest(recordings) {
 }
 
 // HF token is a secret → kept out of presets.json, encrypted via OS keychain (safeStorage).
-const SECRET_FILE = path.join(APP_DIR, ".secret");
+const SECRET_FILE = path.join(WRITABLE_DIR, ".secret");
 function saveToken(token) {
   try {
     if (!token) { try { fs.unlinkSync(SECRET_FILE); } catch {} return; }

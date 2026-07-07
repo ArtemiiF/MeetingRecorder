@@ -7,15 +7,73 @@
     "start": "electron .",
     "test": "node --test tests/mainutil.test.js tests/renderer.test.js && ../venv/bin/python -m pytest tests/ -q",
     "test:js": "node --test tests/mainutil.test.js tests/renderer.test.js",
-    "test:py": "../venv/bin/python -m pytest tests/ -q"
+    "test:py": "../venv/bin/python -m pytest tests/ -q",
+    "dist:mac": "electron-builder --mac --arm64"
   },
   "author": "",
   "license": "MIT",
   "devDependencies": {
     "electron": "^33.0.0",
+    "electron-builder": "26.15.3",
     "jsdom": "^29.1.1"
   },
   "dependencies": {
     "audiotee": "^0.0.7"
+  },
+  "build": {
+    "appId": "com.artemii.meetingrecorder",
+    "productName": "Meeting Recorder",
+    "files": [
+      "main.js",
+      "preload.js",
+      "presets.example.json",
+      "lib/**/*",
+      "renderer/**/*",
+      "assets/**/*",
+      "node_modules/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "backend.py",
+        "to": "backend.py"
+      },
+      {
+        "from": "requirements.txt",
+        "to": "requirements.txt"
+      },
+      {
+        "from": "vendor/wheels",
+        "to": "vendor/wheels"
+      }
+    ],
+    "asarUnpack": [
+      "node_modules/audiotee/bin/**"
+    ],
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64"
+          ]
+        }
+      ],
+      "category": "public.app-category.productivity",
+      "identity": "-",
+      "hardenedRuntime": true,
+      "notarize": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "Приложению нужен доступ к микрофону для записи встреч.",
+        "NSAudioCaptureUsageDescription": "Приложению нужен доступ к записи системного звука для захвата голосов собеседников."
+      }
+    }
   }
 }
