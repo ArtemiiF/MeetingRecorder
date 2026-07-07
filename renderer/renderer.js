@@ -41,6 +41,11 @@ document.querySelectorAll(".tab").forEach((t) =>
     state.mode = t.dataset.tab;
     $("pane-record").classList.toggle("hidden", state.mode !== "record");
     $("pane-import").classList.toggle("hidden", state.mode !== "import");
+    // Record mode has no single-slot "current audio" to run/retry/fresh (see
+    // currentAudio()/startProcessing) — the shared Обработать/Остановить/Повторить/Заново
+    // row is exclusively an import-mode affordance; hide it on the record tab so the record
+    // card only shows mic-select/status/VU/recBtn/timer.
+    document.querySelector(".run-row").classList.toggle("hidden", state.mode !== "import");
     refreshRunBtn();
   })
 );
@@ -854,40 +859,49 @@ function renderImportQueue() {
 let activePendingId = null;   // id of the pending recording the in-flight run belongs to, if any
 let pendingBatchRunning = false; // true while "Обработать все" is driving the queue
 
+// Builds one pending-recording row (icon + name + ▶/✕) — shared by renderPendingRecordings
+// (the compact control strip) and renderRail (the same row inline in the История timeline,
+// see below). idx is the item's current position in state.pendingRecordings; extraClass lets
+// the rail give its copy a distinguishing class (".pending") without touching this markup.
+function buildPendingRow(item, idx, extraClass) {
+  const icon = QUEUE_STATUS_ICON[item.status] || "⏳";
+  const row = document.createElement("div");
+  row.className = ["queue-item", "queue-" + item.status, extraClass].filter(Boolean).join(" ");
+  row.innerHTML =
+    `<span class="queue-icon">${icon}</span><span class="queue-name">${escapeHtml(item.name)}</span>`;
+  const canProcess = item.status === "pending" || item.status === "failed";
+  // First trailing button gets queue-retry-btn's margin-left:auto (pushes this
+  // row's action button(s) to the right, same as renderImportQueue's ↻).
+  if (canProcess) {
+    // Closure over idx only (never the item's name/paths) — same rationale as
+    // renderImportQueue's retry button: no user/LLM string in an HTML attribute.
+    const playBtn = document.createElement("button");
+    playBtn.className = "btn small pending-play-btn queue-retry-btn";
+    playBtn.textContent = "▶";
+    playBtn.title = "Обработать";
+    playBtn.addEventListener("click", () => processPendingRecording(idx));
+    row.appendChild(playBtn);
+  }
+  const delBtn = document.createElement("button");
+  delBtn.className = "btn small ghost pending-del-btn" + (canProcess ? "" : " queue-retry-btn");
+  delBtn.textContent = "✕";
+  delBtn.title = "Удалить";
+  delBtn.addEventListener("click", () => deletePendingRecording(idx));
+  row.appendChild(delBtn);
+  return row;
+}
+
 function renderPendingRecordings() {
   const wrap = $("pendingRecordings");
   const list = state.pendingRecordings || [];
   wrap.innerHTML = "";
   wrap.classList.toggle("hidden", list.length === 0);
-  list.forEach((item, idx) => {
-    const icon = QUEUE_STATUS_ICON[item.status] || "⏳";
-    const row = document.createElement("div");
-    row.className = "queue-item queue-" + item.status;
-    row.innerHTML =
-      `<span class="queue-icon">${icon}</span><span class="queue-name">${escapeHtml(item.name)}</span>`;
-    const canProcess = item.status === "pending" || item.status === "failed";
-    // First trailing button gets queue-retry-btn's margin-left:auto (pushes this
-    // row's action button(s) to the right, same as renderImportQueue's ↻).
-    if (canProcess) {
-      // Closure over idx only (never the item's name/paths) — same rationale as
-      // renderImportQueue's retry button: no user/LLM string in an HTML attribute.
-      const playBtn = document.createElement("button");
-      playBtn.className = "btn small pending-play-btn queue-retry-btn";
-      playBtn.textContent = "▶";
-      playBtn.title = "Обработать";
-      playBtn.addEventListener("click", () => processPendingRecording(idx));
-      row.appendChild(playBtn);
-    }
-    const delBtn = document.createElement("button");
-    delBtn.className = "btn small ghost pending-del-btn" + (canProcess ? "" : " queue-retry-btn");
-    delBtn.textContent = "✕";
-    delBtn.title = "Удалить";
-    delBtn.addEventListener("click", () => deletePendingRecording(idx));
-    row.appendChild(delBtn);
-    wrap.appendChild(row);
-  });
+  list.forEach((item, idx) => wrap.appendChild(buildPendingRow(item, idx)));
   const hasWork = list.some((it) => it.status === "pending" || it.status === "failed");
   $("pendingProcessAll").classList.toggle("hidden", !hasWork);
+  // Pending rows also render inline in the История rail (always visible there,
+  // bypassing its filters) — keep that copy in sync with every state change here.
+  renderRail();
 }
 
 function nextPendingWork() {
@@ -1293,7 +1307,11 @@ async function startProcessing(fresh, item) {
     // auto-«Я»: only meaningful for a record-sourced mic/system pair — import mode
     // never passes an item, so these stay undefined and the backend sees identical
     // argv to today.
-    ...(item ? { micFile: item.mic, systemFile: item.system, authorName: state.authorName } : {}),
+    ...(item ? { micFile: item.mic, systemFile: item.system, authorName: state.authorName }
+             // note-origin typing for a plain import: a picked batch (N>1 files queued)
+             // vs a single picked file — the backend only reads this when there's no
+             // mic/system track (a pending recording always wins as "recording").
+             : { origin: state.importQueue.length > 1 ? "batch" : "file" }),
   });
   if (res && res.ok === false) {
     appendLog("❌ " + res.error);
@@ -1437,8 +1455,22 @@ function textMatchesQuery(haystack, query) {
   });
 }
 
+// Note-origin badge (item 7): recording/batch/file are set by the backend at save time
+// (backend.py Pipeline.process — see `source` frontmatter key); a legacy note saved before
+// this feature existed has no `source` key at all → explicit "unknown" badge, never inferred.
+const SOURCE_BADGE_ICON = { recording: "🎙", batch: "📦", file: "📄" };
+const SOURCE_BADGE_TITLE = { recording: "Запись", batch: "Пакетная обработка", file: "Загруженный файл" };
+function sourceBadge(source) {
+  const icon = SOURCE_BADGE_ICON[source] || "❓";
+  const title = SOURCE_BADGE_TITLE[source] || "Тип не определён (старая заметка)";
+  return ` <span class="rail-badge" title="${escapeHtml(title)}">${icon}</span>`;
+}
+
 // render the rail filtered by search (title/date) + language + template + date range.
 // dataset.idx points into the full historyItems so selection survives filtering.
+// Pending recordings (state.pendingRecordings) render first and ALWAYS, bypassing every
+// filter below — they aren't notes yet (no template/language/date to filter by), and the
+// owner wants them visible in История regardless of whatever the rail is currently filtered to.
 function renderRail() {
   const q = ($("historySearch").value || "").trim().toLowerCase();
   const lang = $("historyLang").value;
@@ -1447,22 +1479,39 @@ function renderRail() {
   const to = $("historyTo").value;
   const rail = $("historyList");
   rail.innerHTML = "";
-  if (!historyItems.length) { rail.innerHTML = '<p class="hint">Пока пусто.</p>'; return; }
-  const shown = historyItems.filter((it) => {
+  const pending = state.pendingRecordings || [];
+  // Reuses buildPendingRow's ▶/✕ semantics (processPendingRecording/deletePendingRecording
+  // by index) — same functions as the pendingRecordings control strip, just a second place
+  // they're wired from. The row itself gets no click listener, so clicking it (outside the
+  // buttons) is a no-op — it must never call selectNote/readNote like a real note row does.
+  pending.forEach((item, idx) => rail.appendChild(buildPendingRow(item, idx, "rail-item pending")));
+  // Backend-merged listHistory rows carry kind:"pending" too (cmd_history --pending-file) —
+  // real notes never do. Exclude them here so a restart-era pending row (already covered by
+  // state.pendingRecordings above, loaded from the same manifest) isn't rendered a second
+  // time as a broken "note" (it has no `note` path for openHistoryNote to read).
+  const notes = historyItems.filter((it) => it.kind !== "pending");
+  if (!notes.length) {
+    rail.insertAdjacentHTML("beforeend", '<p class="hint">Пока пусто.</p>');
+    return;
+  }
+  const shown = notes.filter((it) => {
     const d = (it.name || "").slice(0, 10); // stamp = YYYY-MM-DD-HHMMSS → ISO date sorts lexically
     return (!q || textMatchesQuery(it.title || "", q) || textMatchesQuery(it.name || "", q)) &&
       (!lang || it.language === lang) &&
       (!tmpl || it.template === tmpl) &&
       (!from || d >= from) && (!to || d <= to);
   });
-  if (!shown.length) { rail.innerHTML = '<p class="hint">Ничего не найдено.</p>'; return; }
+  if (!shown.length) {
+    rail.insertAdjacentHTML("beforeend", '<p class="hint">Ничего не найдено.</p>');
+    return;
+  }
   shown.forEach((it) => {
     const idx = historyItems.indexOf(it);
     const el = document.createElement("button");
     el.className = "rail-item";
     el.dataset.idx = idx;
     el.innerHTML = `<span class="rail-title">${escapeHtml(it.title || "Без темы")}</span>` +
-      `<span class="rail-date">${escapeHtml(it.name)}</span>`;
+      `<span class="rail-date">${escapeHtml(it.name)}${sourceBadge(it.source)}</span>`;
     el.addEventListener("click", () => selectNote(idx));
     rail.appendChild(el);
   });

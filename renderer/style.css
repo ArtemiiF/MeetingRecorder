@@ -97,6 +97,13 @@ main { max-width: 860px; margin: 0 auto; padding: 20px 24px 60px; }
 .para-proj { flex: 0 0 180px; }
 .rail-date { font-size: 11px; color: var(--muted); }
 .rail-item.active .rail-date { color: #cdd9ee; }
+.rail-badge { font-size: 11px; }
+
+/* pending recordings inline in the История rail — same queue-item look as the
+   "Обработать все" strip above the rail, just also flagged .rail-item so they sit
+   in the same DOM flow (order-wise) as note rows; they're never clickable as a row
+   (no selectNote/readNote) — only their own ▶/✕ buttons act. */
+.rail-item.pending { cursor: default; flex-direction: row; align-items: center; margin-bottom: 6px; }
 
 .note-view {
   flex: 1; min-width: 0; background: var(--card); border: 1px solid var(--line);

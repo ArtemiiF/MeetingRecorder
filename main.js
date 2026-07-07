@@ -809,7 +809,7 @@ function cacheDirFor(audioFile) {
 
 // processing pipeline
 ipcMain.handle("process-audio", async (_e, opts) => {
-  const { audioFile, prompt, diarize, outDir, engine, hfToken, fresh, language, glossary, summarize, template, micFile, systemFile, authorName } = opts;
+  const { audioFile, prompt, diarize, outDir, engine, hfToken, fresh, language, glossary, summarize, template, micFile, systemFile, authorName, origin } = opts;
   if (procProc) return { ok: false, error: "Обработка уже идёт" };
   if (modelDlProc) return { ok: false, error: "Дождитесь окончания скачивания моделей" };
   // Same reasoning as start-recording's guard above: processing spawns pythonBin(),
@@ -851,6 +851,9 @@ ipcMain.handle("process-audio", async (_e, opts) => {
   if (micFile) args.push("--mic", micFile);
   if (systemFile) args.push("--system", systemFile);
   if (authorName) args.push("--author-name", authorName);
+  // note-origin typing for a plain import (batch vs single file) — record-mode never
+  // sends this, the backend infers "recording" from micFile/systemFile above instead.
+  if (origin) args.push("--origin", origin);
   // UI-entered token wins over a shell env one; empty → backend skips diarization.
   const extraEnv = hfToken && hfToken.trim() ? { HF_TOKEN: hfToken.trim() } : {};
   let doneNote = null; // captured from the "done" event, used to auto-index on close
@@ -1217,16 +1220,23 @@ ipcMain.handle("uninstall-backend", async () => {
   }
 });
 
-// Past recordings: query the backend's SQLite index (reconciled against the notes dir).
+// Past recordings: query the backend's SQLite index (reconciled against the notes dir),
+// merged with still-pending recordings (--pending-file) so the История rail can show them
+// at their real chronological position (option c — see HANDOFF/analyzer notes).
 ipcMain.handle("list-history", async (_e, outDir) => {
   const dir = expandHome(outDir) || DEFAULT_OUT;
   const items = await new Promise((resolve) => {
     let out = [];
-    runBackend(["history", "--out-dir", dir, "--db", DB_PATH],
+    runBackend(["history", "--out-dir", dir, "--db", DB_PATH, "--pending-file", PENDING_FILE],
       (ev) => { if (ev.event === "history") out = ev.items; },
       () => resolve(out));
   });
-  return items.map((it) => ({
+  return items.map((it) => it.kind === "pending" ? {
+    kind: "pending",
+    id: it.id,
+    name: it.name,
+    audio: it.audio,
+  } : {
     name: it.stamp,
     title: it.title,
     template: it.template,
@@ -1234,7 +1244,8 @@ ipcMain.handle("list-history", async (_e, outDir) => {
     note: it.note,
     audio: it.audio,
     mtime: it.mtime,
-  }));
+    source: it.source,
+  });
 });
 
 // Rewrite speaker labels in a saved note (**[old]** → **[new]**) and the

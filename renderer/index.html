@@ -42,8 +42,6 @@
           <button id="recBtn" class="btn primary">● Начать запись</button>
           <span id="timer" class="timer">00:00</span>
         </div>
-        <div id="pendingRecordings" class="import-queue hidden"></div>
-        <button id="pendingProcessAll" class="btn small hidden">▶ Обработать все</button>
       </div>
 
       <div class="tabpane hidden" id="pane-import">
@@ -80,7 +78,7 @@
       </label>
     </section>
 
-    <div class="run-row">
+    <div class="run-row hidden">
       <button id="runBtn" class="btn primary big" disabled>▶ Обработать</button>
       <button id="stopBtn" class="btn big" style="display:none">■ Остановить</button>
       <span id="procSpinner" class="spinner" style="display:none"></span>
@@ -146,6 +144,8 @@
               <input id="historyTo" type="date" title="По дату" />
             </div>
           </div>
+          <div id="pendingRecordings" class="import-queue hidden"></div>
+          <button id="pendingProcessAll" class="btn small hidden">▶ Обработать все</button>
           <div id="historyList"></div>
         </aside>
         <section class="note-view" id="noteView">

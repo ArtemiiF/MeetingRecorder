@@ -201,6 +201,10 @@ test("processAudio busy → error logged, UI not stuck on Stop", async () => {
 });
 
 // ── history rendering ─────────────────────────────────────────────────────
+// Note: the История rail also renders the just-recorded item as an always-visible pending
+// row (see renderRail) — this test's r1 pending row and the mocked real note both land in
+// #historyList now, so ".rail-item" alone is no longer disjoint between "pending" and
+// "history"; target the real note row specifically via :not(.pending).
 test("history reprocess (from note view) is blocked while a run is in flight", async () => {
   let calls = 0;
   const { window, $, handlers } = await boot({ processAudio: async () => { calls++; return { ok: true }; } });
@@ -208,9 +212,62 @@ test("history reprocess (from note view) is blocked while a run is in flight", a
   $("pendingRecordings").querySelector(".pending-play-btn").click(); await tick(window); // processing=true, calls=1
   assert.equal(calls, 1);
   window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
-  $("historyList").querySelector(".rail-item").click(); await tick(window);
+  $("historyList").querySelector(".rail-item:not(.pending)").click(); await tick(window);
   $("noteView").querySelector("#nvReprocess").click(); await tick(window);
   assert.equal(calls, 1);                             // guard blocked a second run
+});
+
+test("pending row in the История rail stays visible under an active filter that would exclude it", async () => {
+  const { window, $, handlers } = await boot({
+    listHistory: async () => [{ name: "2026-01-01", title: "Синк", language: "ru", note: "/a.md", audio: null }],
+  });
+  handlers.record({ event: "recorded", id: "r1", name: "Запись 1", file: "/tmp/mixed.wav", mic: "/tmp/m.wav", system: null, tracks: 1 });
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  // a language filter that matches nothing would normally empty the rail of notes —
+  // the pending row must stay regardless (pending items have no language yet).
+  $("historyLang").value = "en";
+  $("historyLang").dispatchEvent(new window.Event("change"));
+  assert.equal($("historyList").querySelectorAll(".rail-item.pending").length, 1);
+});
+
+test("clicking a pending row's body in the История rail does not open a note (no readNote call)", async () => {
+  let readNoteCalls = 0;
+  const { window, $, handlers } = await boot({ readNote: async () => { readNoteCalls++; return "x"; } });
+  handlers.record({ event: "recorded", id: "r1", name: "Запись 1", file: "/tmp/mixed.wav", mic: "/tmp/m.wav", system: null, tracks: 1 });
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  $("historyList").querySelector(".rail-item.pending").click(); await tick(window);
+  assert.equal(readNoteCalls, 0);
+});
+
+test("▶ on the rail's inline pending row starts processing (reuses processPendingRecording)", async () => {
+  let calls = 0;
+  const { window, $, handlers } = await boot({ processAudio: async (opts) => { calls++; return { ok: true }; } });
+  handlers.record({ event: "recorded", id: "r1", name: "Запись 1", file: "/tmp/mixed.wav", mic: "/tmp/m.wav", system: null, tracks: 1 });
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  $("historyList").querySelector(".rail-item.pending .pending-play-btn").click(); await tick(window);
+  assert.equal(calls, 1);
+});
+
+test("import-mode origin: a multi-file queue reports 'batch', a single pick reports 'file'", async () => {
+  const opts = [];
+  const { window, $ } = await boot({
+    pickAudio: async () => ["/tmp/a.wav", "/tmp/b.wav"],
+    processAudio: async (o) => { opts.push(o); return { ok: true }; },
+  });
+  goImportTab(window);
+  $("pickBtn").click(); await tick(window);
+  $("runBtn").click(); await tick(window);
+  assert.equal(opts[0].origin, "batch");
+
+  const single = [];
+  const { window: w2, $: $2 } = await boot({
+    pickAudio: async () => ["/tmp/a.wav"],
+    processAudio: async (o) => { single.push(o); return { ok: true }; },
+  });
+  goImportTab(w2);
+  $2("pickBtn").click(); await tick(w2);
+  $2("runBtn").click(); await tick(w2);
+  assert.equal(single[0].origin, "file");
 });
 
 test("token-at-rest warning shows only when token present and keychain unavailable", async () => {
