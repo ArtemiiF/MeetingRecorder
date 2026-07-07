@@ -14,6 +14,9 @@ Electron-приложение записи встреч: mic+system (AudioTee) /
 ### Кнопки разрешений в Preflight (`545a0d7`)
 Preflight-панель: у строки Микрофон — кнопка «Разрешить» (`systemPreferences.askForMediaAccess("microphone")` — нативный промпт при not-determined; после → refresh) / «Открыть настройки» при denied|restricted (диплинк `Privacy_Microphone`). У Системного звука — «Открыть настройки» (диплинк `Privacy_ScreenCapture`; программного промпта у AudioTee-категории нет). IPC `request-mic-access`/`open-privacy-settings` (target валидируется, non-darwin→true). macOS TCC программно НЕ выдаётся — кнопки только вызывают промпт/ведут в Настройки.
 
+### Setup-стена (`95dd80d`)
+Жёсткий гейт: пока НЕ (бэкенд установлен И whisper+vad в кеше) — full-cover overlay `#setupGate` (шаги «Установить бэкенд» → «Скачать модели» с прогрессом, реюз install/download-флоу), нормальный UI перекрыт. Готовность через `app-readiness` IPC: `backendAvailable()` + кеш whisper/vad проверяется **Node fs** (НЕ спавн python — до установки его нет), пути зеркалят backend.py `_model_cached` (coupling: менять оба). Диаризация НЕ в стене (опциональна, gated) — гейчится per-run в process-audio (diarize=true + нет pyannote → отказ). **Fail-closed**: `#setupGate` по умолчанию видим, скрывается только на confirmed-ready; ошибка IPC оставляет стену (не открывает приложение). Триггеры пере-проверки: boot / focus / после install-closed / после download-closed. Скачивание из стены scoped `["whisper","vad"]` (не тянет pyannote даже при токене). Тесты: path-exactness (падает при дрейфе путей), 4-state predicate, show/hide, fail-closed, diarize-гейт.
+
 ### Ручной smoke упаковки (НЕ проверено автоматом)
 - Выдача TCC mic+системный звук при первом запуске + реальная запись (нужен GUI + клики юзера).
 - Полный флоу «Установить бэкенд» на чистой машине (~1.3ГБ download).
@@ -72,7 +75,7 @@ Preflight-панель: у строки Микрофон — кнопка «Ра
 
 ## Тесты
 
-`npm test` = JS `node --test` (234/234) + PY pytest (222/222). Всё замокано — живой e2e (RAG, коррекция, auto-«Я», скачивание моделей, батч-импорт + row-retry, reset, suggest-стадия, tray, персист-очередь записей + запись-во-время-обработки) не гонялся; первый реальный запуск = smoke.
+`npm test` = JS `node --test` (255/255) + PY pytest (222/222). Всё замокано — живой e2e (RAG, коррекция, auto-«Я», скачивание моделей, батч-импорт + row-retry, reset, suggest-стадия, tray, персист-очередь записей + запись-во-время-обработки) не гонялся; первый реальный запуск = smoke.
 
 ## Решения владельца (действуют)
 
