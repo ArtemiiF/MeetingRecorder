@@ -15,8 +15,9 @@ const {
   rewriteNoteSpeakers, isOutsideRoot, indexRunReducer, diskGuardVerdict,
   resolveOutDirOnVaultChange, trayMenuTemplate,
   resolvePythonBin, resolveFfmpegBin, resolveResourcePath, resolveAudioTeeBin, resolveAssetPath, backendInstallStatus,
+  parseFfmpegVersion,
   whisperModelDir, vadJitPath, diarizationModelDirs, appReadinessStatus,
-  cleanupPartialModelCache, compareVersions, pickUpdateAsset,
+  cleanupPartialModelCache, modelCacheDirsFor, dirSizeBytes, compareVersions, pickUpdateAsset,
 } = require("./lib/mainutil");
 
 // audiotee is ESM-only — load it lazily via dynamic import() from this CommonJS module.
@@ -927,13 +928,29 @@ ipcMain.handle("models", async () => {
     runBackend(["models"], (ev) => { if (ev.event === "models") out = ev.items; },
       () => resolve(out), token ? { HF_TOKEN: token } : {});
   });
-  return items;
+  // On-disk footprint per model (settings "Модели" section: "добавить размер на
+  // диске") — plain Node fs, no backend.py round-trip needed. Only meaningful
+  // once cached; an uncached model has no cache dir at all (dirSizeBytes would
+  // just return 0, but skipping the fs walk entirely is cheaper and clearer).
+  const home = os.homedir();
+  return items.map((item) => ({
+    ...item,
+    sizeBytes: item.cached
+      ? modelCacheDirsFor(home, item.id).reduce((sum, dir) => sum + dirSizeBytes(dir), 0)
+      : 0,
+  }));
 });
 
-// Start a (re)download batch. opts.only: array of model ids, or omitted = all missing.
-// Mutually exclusive with procProc (and vice versa, see process-audio's guard above) —
-// refuse to run a model download while a recording/processing run is active.
-ipcMain.handle("download-models", async (_e, opts) => {
+// Shared batch-starter for both "download-models" below (bulk / per-row retry —
+// a model backend.py's _model_cached() already reports as done gets silently
+// skipped, see backend.py:2959-2961) and "redownload-model" (force-refetches ONE
+// already-cached model). only: array of model ids, or null = whatever's missing.
+// beforeStart(), if given, runs only once every guard AND the disk check have
+// passed — right before the child actually spawns — so redownload-model's cache
+// wipe can never fire on a call that's about to be refused for an unrelated
+// reason (busy/low disk), which would otherwise delete a working cache with no
+// download happening to replace it.
+async function runModelDownloadBatch(only, beforeStart) {
   if (modelDlProc) return { ok: false, error: "Скачивание уже идёт" };
   if (procProc) return { ok: false, error: "Дождитесь окончания обработки" };
   if (recordProc || tee) return { ok: false, error: "Дождитесь окончания записи" };
@@ -951,7 +968,8 @@ ipcMain.handle("download-models", async (_e, opts) => {
   } catch {}
   if (diskVerdict.action === "refuse") return { ok: false, error: diskVerdict.msg };
 
-  const only = opts && Array.isArray(opts.only) && opts.only.length ? opts.only : null;
+  if (beforeStart) beforeStart();
+
   const args = ["download-models"];
   if (only) args.push("--only", only.join(","));
 
@@ -982,6 +1000,26 @@ ipcMain.handle("download-models", async (_e, opts) => {
   );
   if (diskVerdict.action === "warn") send("download-models-event", { event: "disk-warning", msg: diskVerdict.msg });
   return { ok: true };
+}
+
+// Start a (re)download batch. opts.only: array of model ids, or omitted = all missing.
+// Mutually exclusive with procProc (and vice versa, see process-audio's guard above) —
+// refuse to run a model download while a recording/processing run is active.
+ipcMain.handle("download-models", async (_e, opts) => {
+  const only = opts && Array.isArray(opts.only) && opts.only.length ? opts.only : null;
+  return runModelDownloadBatch(only);
+});
+
+// Force-refetch ONE already-cached model (settings "Модели" section: per-model
+// "↻ Скачать заново" — renderer.js's redownloadModel). backend.py's
+// cmd_download_models skips any model _model_cached() already reports as done, so
+// re-running the ordinary scoped download on a cached model would be a silent
+// no-op — its cache dir must be wiped first for there to be anything left to
+// fetch. The wipe itself is deferred into runModelDownloadBatch's beforeStart
+// hook (see its own comment) so a refused call (busy/low disk) never wipes a
+// working cache without actually replacing it.
+ipcMain.handle("redownload-model", async (_e, modelId) => {
+  return runModelDownloadBatch([modelId], () => cleanupPartialModelCache(os.homedir(), modelId));
 });
 
 // cancel an in-flight model download. The close handler above wipes the
@@ -1238,12 +1276,33 @@ ipcMain.handle("cancel-install-backend", async () => {
 });
 
 // Status only — marker/cache inspection, no network (mirrors "models" above).
+// Runs `<ffmpegPath> -version` and hands the raw stdout to parseFfmpegVersion
+// (lib/mainutil) — used below so backend-status can report exactly which ffmpeg
+// build the installed env has ("показать КАКОЙ именно бэкенд"), not just that
+// one exists. Best-effort: a missing binary or spawn error resolves null rather
+// than rejecting, so backend-status always returns whatever it does know.
+function getFfmpegVersion(ffmpegPath) {
+  return new Promise((resolve) => {
+    let proc;
+    try { proc = spawn(ffmpegPath, ["-version"]); } catch { return resolve(null); }
+    let out = "";
+    proc.stdout.on("data", (d) => { out += d.toString(); });
+    proc.on("error", () => resolve(null));
+    proc.on("close", () => resolve(parseFfmpegVersion(out)));
+  });
+}
+
 ipcMain.handle("backend-status", async () => {
   let marker = null;
   try { marker = JSON.parse(fs.readFileSync(BACKEND_MARKER, "utf-8")); } catch {}
   let reqHash = null;
   try { reqHash = cacheKey(fs.readFileSync(REQUIREMENTS_FILE, "utf-8")); } catch {}
-  return backendInstallStatus(marker, reqHash, fs.existsSync(INSTALLED_PYTHON));
+  const status = backendInstallStatus(marker, reqHash, fs.existsSync(INSTALLED_PYTHON));
+  // envPath/ffmpegVersion only mean anything once THIS section's own install is
+  // present — a bare "не установлен" env path or a PATH-resolved system ffmpeg
+  // would misrepresent what this button actually manages.
+  if (!status.installed) return { ...status, envPath: null, ffmpegVersion: null };
+  return { ...status, envPath: BACKEND_ENV, ffmpegVersion: await getFfmpegVersion(INSTALLED_FFMPEG) };
 });
 
 ipcMain.handle("uninstall-backend", async () => {

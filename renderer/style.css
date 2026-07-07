@@ -186,6 +186,10 @@ select:focus, input:focus, textarea:focus { outline: none; border-color: var(--a
 .pf-dot.ok { background: var(--ok); }
 .pf-dot.bad { background: var(--danger); }
 .pf-dot.warn { background: #f5a623; }
+/* Neither "fine" nor "broken" — a status that genuinely can't be confirmed outside
+   an actual attempt (system-audio TCC has no advance-check API, see refreshPreflight
+   in renderer.js). Calm grey, not the alarming red .bad reads as. */
+.pf-dot.neutral { background: var(--muted); }
 .pf-label { flex: 0 0 220px; }
 .pf-detail { color: var(--muted); }
 .pf-retry { margin-left: auto; }

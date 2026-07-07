@@ -110,20 +110,31 @@ async function refreshPreflight() {
   const p = await window.api.preflight();
   const ok = (b) => (b ? "ok" : "bad");
   const perm = (s) => (s === "granted" ? "ok" : s === "denied" ? "bad" : "warn");
+  // System audio (AudioTee's screen-capture TCC category) has no advance-check API —
+  // main.js's getMediaAccessStatus("screen") call can read "denied" long before any
+  // recording is attempted, but that reads as "broken" (mic's red bad) even though
+  // nothing has actually failed yet; the real check only happens once AudioTee starts
+  // (see setSysStatus's mid-recording fallback below). Only a confirmed "granted"
+  // earns green — everything else (not-determined/denied/restricted/unknown) is a
+  // calm grey "not confirmed", never the alarming red .bad.
+  const permScreen = (s) => (s === "granted" ? "ok" : "neutral");
+  const sysAudioTooltip = "AudioTee (запись системного звука) не сообщает доступ заранее — " +
+    "статус подтверждается только фактической записью. " + SYS_HELP;
   const rows = [
     ["Бэкенд", ok(p.backendInstalled), p.backendInstalled ? "установлен" : "не установлен — см. раздел «Бэкенд» ниже"],
     ["LM Studio (сводка)", ok(p.lmStudio), p.lmStudio ? "запущен" : "не отвечает на :1234 — сводки не будет"],
     ["Микрофон", perm(p.mic), p.mic, "mic"],
-    ["Системный звук (запись экрана)", perm(p.screen), p.screen === "granted" ? "разрешено" : "проверится при записи", "screen"],
+    ["Системный звук (запись экрана)", permScreen(p.screen), p.screen === "granted" ? "разрешено" : "проверяется при записи", "screen", sysAudioTooltip],
     ["ffmpeg", ok(p.ffmpeg), p.ffmpeg ? "есть" : "не найден (brew install ffmpeg)"],
     ["Модель Whisper", p.whisperCached ? "ok" : "warn", p.whisperCached ? "скачана" : "скачается при 1й транскрипции (~1.5GB)"],
     ["HF-токен (диаризация)", p.hfToken ? "ok" : "warn", p.hfToken ? "задан" : "нет — спикеры по таймкодам"],
     ["Embedding-модель (поиск)", p.embedModel ? "ok" : "warn", p.embedModel ? "загружена" : "Embedding-модель не загружена — поиск будет работать только по ключевым словам"],
   ];
   wrap.innerHTML = "";
-  rows.forEach(([label, state, detail, kind]) => {
+  rows.forEach(([label, state, detail, kind, tooltip]) => {
     const row = document.createElement("div");
     row.className = "pf-row";
+    if (tooltip) row.title = tooltip;
     row.innerHTML = `<span class="pf-dot ${state}"></span><span class="pf-label">${label}</span><span class="pf-detail">${detail}</span>`;
     // Permission rows get an action button once not granted: mic can still be
     // prompted programmatically while not-determined, but once denied macOS
@@ -182,14 +193,29 @@ const BACKEND_INSTALL_LOG_MAX_LINES = 500;
 function renderBackendStatus(status) {
   const row = $("backendStatusRow");
   const dotClass = !status.installed ? "bad" : status.stale ? "warn" : "ok";
+  // "показать КАКОЙ именно бэкенд" — Python + ffmpeg versions, not just installed/not.
+  const whatsInstalled = `Python ${status.pythonVersion}, ffmpeg ${status.ffmpegVersion || "не найден"}`;
   const detail = !status.installed
     ? "не установлен"
     : status.stale
-    ? `установлен Python ${status.pythonVersion} — требования изменились, рекомендуется переустановить`
-    : `установлен Python ${status.pythonVersion}`;
+    ? `установлен: ${whatsInstalled} — требования изменились, рекомендуется переустановить`
+    : `установлен: ${whatsInstalled}`;
   row.innerHTML = `<span class="pf-dot ${dotClass}"></span><span class="pf-label">Бэкенд</span><span class="pf-detail"></span>`;
   row.querySelector(".pf-detail").textContent = detail;
-  $("backendInstallBtn").textContent = status.installed ? "⟳ Переустановить" : "⬇ Установить бэкенд";
+  // A "Проверить" click that lands on an already-green, unchanged status must still
+  // show *something* moved — otherwise it reads as a no-op. The env path (only
+  // meaningful once installed) + a fresh timestamp on EVERY refresh (any status)
+  // both change on every call, so this line is never visually identical twice in a row.
+  const checkedAt = new Date().toLocaleTimeString();
+  $("backendStatusDetail").textContent = status.installed
+    ? `Папка окружения: ${status.envPath} · проверено ${checkedAt}`
+    : `проверено ${checkedAt}`;
+  // Установка монолитна (Python + ffmpeg + pip-зависимости ставятся одним атомарным
+  // шагом, см. runInstallBackend в main.js) — переустановка всегда целиком, отдельных
+  // кнопок "переустановить только ffmpeg" тут нет и не должно быть придумано.
+  $("backendInstallBtn").textContent = status.installed
+    ? "⟳ Переустановить целиком (Python + ffmpeg + зависимости)"
+    : "⬇ Установить бэкенд";
 }
 
 async function refreshBackendStatus() {
@@ -282,8 +308,21 @@ let modelDlRunning = false;
 
 function modelRowState(item) { return item.cached ? "ok" : item.locked ? "bad" : "warn"; }
 function modelRowIcon(item) { return item.cached ? "✅" : item.locked ? "🔒" : "⬇"; }
+
+// item.sizeBytes comes from main.js's "models" IPC (Node fs, du-style over the same
+// cache dirs the readiness checks already use) — 0/falsy for an uncached model, which
+// modelRowDetail below never even asks about (nothing on disk yet to size).
+function formatModelSize(bytes) {
+  if (!bytes) return null;
+  const mb = bytes / (1024 * 1024);
+  return mb >= 1024 ? (mb / 1024).toFixed(1) + " ГБ" : mb.toFixed(0) + " МБ";
+}
+
 function modelRowDetail(item) {
-  if (item.cached) return "скачано";
+  if (item.cached) {
+    const size = formatModelSize(item.sizeBytes);
+    return size ? `скачано (${size} на диске)` : "скачано";
+  }
   if (item.locked) return "нужен HF-токен";
   return `нужно скачать (~${item.size_mb} МБ)`;
 }
@@ -318,6 +357,17 @@ function renderModelsList(items) {
       btn.title = "Скачать " + item.label;
       btn.disabled = modelDlRunning;
       btn.addEventListener("click", () => startModelDownload([item.id]));
+      row.appendChild(btn);
+    } else if (item.cached) {
+      // Already cached — offer a scoped reinstall (wipe + redownload just this
+      // model), distinct from the "missing" ⬇ button above. Reuses the same
+      // pf-retry class so setModelsDownloadUI's disable-toggle covers it too.
+      const btn = document.createElement("button");
+      btn.className = "btn small pf-retry";
+      btn.textContent = "↻";
+      btn.title = "Скачать заново " + item.label;
+      btn.disabled = modelDlRunning;
+      btn.addEventListener("click", () => redownloadModel(item.id));
       row.appendChild(btn);
     }
     wrap.appendChild(row);
@@ -362,6 +412,21 @@ async function startModelDownload(only) {
   if (modelDlRunning) return;
   setModelsDownloadUI(true);
   const res = await window.api.downloadModels(only ? { only } : {});
+  if (res && res.ok === false) {
+    setModelsDownloadUI(false);
+    alert(res.error);
+  }
+}
+
+// Force-refetch a single already-cached model (the "↻" button above) — main.js's
+// redownload-model IPC wipes that model's cache dir before starting the scoped
+// download, since backend.py silently skips a model it already sees as cached.
+// Shares modelDlRunning/setModelsDownloadUI and the download-models-event stream
+// with startModelDownload above — it's the same underlying batch, just pre-wiped.
+async function redownloadModel(modelId) {
+  if (modelDlRunning) return;
+  setModelsDownloadUI(true);
+  const res = await window.api.redownloadModel(modelId);
   if (res && res.ok === false) {
     setModelsDownloadUI(false);
     alert(res.error);
