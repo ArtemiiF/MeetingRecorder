@@ -107,7 +107,8 @@ def _no_real_lmstudio_by_default(monkeypatch):
     # call time, so referencing the classes defined further down the file is
     # safe here.
     fake.exceptions = types.SimpleNamespace(
-        Timeout=FakeRequestsTimeout, ConnectionError=FakeRequestsConnectionError)
+        Timeout=FakeRequestsTimeout, ConnectionError=FakeRequestsConnectionError,
+        ConnectTimeout=FakeRequestsConnectTimeout)
     monkeypatch.setitem(sys.modules, "requests", fake)
 
 
@@ -221,6 +222,15 @@ class FakeRequestsConnectionError(Exception):
     """Stand-in for requests.exceptions.ConnectionError — see FakeRequestsTimeout."""
 
 
+class FakeRequestsConnectTimeout(FakeRequestsConnectionError, FakeRequestsTimeout):
+    """Stand-in for requests.exceptions.ConnectTimeout — the real class
+    inherits from BOTH ConnectionError and Timeout (a connect attempt that
+    timed out is legitimately either). Which except clause actually catches
+    it is a question of clause ORDER in correct_glossary_llm (Timeout is
+    checked before ConnectionError there), not of class identity — this class
+    exists so a test can pin that ordering against a silent regression."""
+
+
 def install_fake_requests(monkeypatch, *, status=200, payload=None, raise_exc=None):
     fake = types.ModuleType("requests")
     calls = {}
@@ -245,9 +255,11 @@ def install_fake_requests(monkeypatch, *, status=200, payload=None, raise_exc=No
     # fake module needs this shape even for tests that raise some other
     # exception entirely (e.g. a plain builtin ConnectionError), or the
     # lookup itself blows up with AttributeError before the real except
-    # clause is ever reached.
+    # clause is ever reached. ConnectTimeout is included for parity with the
+    # real requests.exceptions module, which exposes it too.
     fake.exceptions = types.SimpleNamespace(
-        Timeout=FakeRequestsTimeout, ConnectionError=FakeRequestsConnectionError)
+        Timeout=FakeRequestsTimeout, ConnectionError=FakeRequestsConnectionError,
+        ConnectTimeout=FakeRequestsConnectTimeout)
     monkeypatch.setitem(sys.modules, "requests", fake)
     return calls
 
@@ -2769,17 +2781,19 @@ def test_gate_empty_terms_is_noop_passthrough():
 # ── _llm_correct_budget (adaptive max_tokens/timeout for correct_glossary_llm) ──
 def test_llm_correct_budget_known_value():
     max_tokens, timeout = backend._llm_correct_budget(300)
-    assert max_tokens == 2500 + 100  # reasoning headroom + ceil(300/3)
-    assert timeout == pytest.approx(30 + 2600 / 15)
+    assert max_tokens == 4000 + 100  # measured reasoning floor + ceil(300/3)
+    assert timeout == pytest.approx(30 + 4100 / 15)
 
 
 def test_llm_correct_budget_floor_at_zero_chars():
-    # even an empty chunk gets the full reasoning headroom — that's the floor,
+    # even an empty chunk gets the full reasoning floor — that's the floor,
     # not zero, because a reasoning model burns tokens on "thinking" before it
-    # emits any visible output regardless of input size.
+    # emits any visible output regardless of input size (measured: 3997 of a
+    # 3999-token completion was reasoning alone on a real chunk, so 4000 is
+    # the measured floor, not headroom above some smaller number).
     max_tokens, timeout = backend._llm_correct_budget(0)
-    assert max_tokens == 2500
-    assert timeout == pytest.approx(30 + 2500 / 15)
+    assert max_tokens == 4000
+    assert timeout == pytest.approx(30 + 4000 / 15)
 
 
 def test_llm_correct_budget_monotonic_in_chunk_len():
@@ -2824,6 +2838,22 @@ def test_correct_glossary_llm_timeout_logs_specific_message_not_generic_down(mon
     # is exactly the bug this fix addresses (a 157s real generation reported
     # as "LLM недоступен" under the old fixed 120s timeout).
     install_fake_requests(monkeypatch, raise_exc=FakeRequestsTimeout("Read timed out"))
+    segs = [seg("привет Онтон тут", 0, 3)]
+    assert pipe.correct_glossary_llm(segs, ["Антон"]) == (None, 0)
+    events = capture(pipe.correct_glossary_llm, segs, ["Антон"])
+    logs = [e["msg"] for e in events if e["event"] == "log"]
+    assert any("LLM не ответил за" in m for m in logs)
+    assert not any("недоступен" in m for m in logs)
+
+
+def test_correct_glossary_llm_connect_timeout_lands_in_timeout_branch(monkeypatch, pipe):
+    # requests.exceptions.ConnectTimeout is simultaneously a Timeout AND a
+    # ConnectionError (real library: both parents). Which except clause wins
+    # is decided by clause ORDER in correct_glossary_llm (Timeout checked
+    # before ConnectionError) — this pins that order against a regression
+    # that would silently reroute connect-timeouts to the generic
+    # "недоступен" message instead of the honest "не ответил за" one.
+    install_fake_requests(monkeypatch, raise_exc=FakeRequestsConnectTimeout("Connect timed out"))
     segs = [seg("привет Онтон тут", 0, 3)]
     assert pipe.correct_glossary_llm(segs, ["Антон"]) == (None, 0)
     events = capture(pipe.correct_glossary_llm, segs, ["Антон"])

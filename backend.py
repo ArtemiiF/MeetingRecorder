@@ -217,18 +217,21 @@ _CORRECT_CHUNK_CHARS = 2000
 
 # correct_glossary_llm's request budget scales with what we actually send —
 # a fixed max_tokens=4000/timeout=120 measured wrong on a real reasoning model
-# (gemma-4-26b via LM Studio): a 1712-char chunk burned 3999 of 4000 tokens on
-# *reasoning* alone (finish_reason=length) over 157.2s wall — request wall-time
-# is bounded by max_tokens/generation-rate, not input size, so a fixed timeout
-# reads a slow-but-working model as "LLM недоступен". Reasoning headroom of
-# 2500 tokens follows k2-lmstudio-reasoning-tokens (reasoning models need
-# ≥1500-2500 tokens of "thinking" room even for a short final answer); the
-# chars/3 term for the visible-output budget mirrors _estimate_tokens's
-# chars/3 heuristic above. Timeout floor of 30s covers prefill+network; the
-# 15 tok/s rate is a conservative floor under the ~25 tok/s measured on the
-# same model, so the computed timeout has headroom instead of hugging the
-# measured wall-time.
-_CORRECT_REASONING_BUDGET = 2500
+# (gemma-4-26b via LM Studio): a 1712-char chunk hit finish_reason=length at
+# completion=3999 tokens, of which reasoning ALONE consumed 3997 — only ~2
+# tokens were left for actual content — over 157.2s wall. So 4000 was already
+# at (not above) the reasoning floor for this model; it must not be reduced.
+# Request wall-time is bounded by max_tokens/generation-rate, not input size,
+# so a fixed timeout reads a slow-but-working model as "LLM недоступен".
+# Reasoning budget is kept at the measured floor of 4000 (matches
+# k2-lmstudio-reasoning-tokens's ≥1500-2500 "thinking room" guidance, but
+# clamped to the actually-measured floor rather than below it) with the
+# chars/3 term added ON TOP of that floor for visible content — chars/3
+# mirrors _estimate_tokens's heuristic above. Timeout floor of 30s covers
+# prefill+network; the 15 tok/s rate is a conservative floor under the ~25
+# tok/s measured on the same model, so the computed timeout has headroom
+# instead of hugging the measured wall-time.
+_CORRECT_REASONING_BUDGET = 4000
 _LLM_TIMEOUT_BASE = 30
 _LLM_RATE_MIN_TPS = 15
 
