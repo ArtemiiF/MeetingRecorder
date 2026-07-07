@@ -596,6 +596,11 @@ ipcMain.handle("start-recording", async (_e, opts) => {
   // Recording spawns pythonBin() too (mic capture) — a concurrent install-backend
   // run can be actively overwriting that same interpreter file underneath it.
   if (installBackendProc) return { ok: false, error: "Дождитесь окончания установки бэкенда" };
+  // An in-flight update swaps the whole .app bundle out from under the running
+  // process and finishes with app.exit(0) — which skips before-quit's graceful
+  // mic-finalize wait entirely. A recording started during that window would
+  // die unplayable at relaunch (WavWriter only patches its header in close()).
+  if (updateProc) return { ok: false, error: "Идёт обновление приложения — дождитесь завершения" };
 
   // Disk guard: session dirs live under RECORDINGS_DIR (permanent — see PENDING_FILE
   // above) — check that volume's free space before committing to a recording. statfs
@@ -818,6 +823,8 @@ ipcMain.handle("process-audio", async (_e, opts) => {
   // Same reasoning as start-recording's guard above: processing spawns pythonBin(),
   // which an in-flight install may be actively replacing on disk.
   if (installBackendProc) return { ok: false, error: "Дождитесь окончания установки бэкенда" };
+  // Same reasoning as start-recording's updateProc guard above.
+  if (updateProc) return { ok: false, error: "Идёт обновление приложения — дождитесь завершения" };
   if (!backendAvailable()) return { ok: false, error: "Бэкенд не установлен — откройте Настройки → Бэкенд" };
   // Diarization is optional-by-design (not part of the setup-gate wall — see
   // appReadinessStatus's comment in lib/mainutil) but still needs its own
@@ -924,6 +931,8 @@ ipcMain.handle("download-models", async (_e, opts) => {
   // Model download also spawns pythonBin() (backend.py's download-models command) —
   // same install-in-progress hazard as start-recording/process-audio above.
   if (installBackendProc) return { ok: false, error: "Дождитесь окончания установки бэкенда" };
+  // Same reasoning as start-recording's updateProc guard above.
+  if (updateProc) return { ok: false, error: "Идёт обновление приложения — дождитесь завершения" };
 
   // Disk guard: models download into ~/.cache, not TMP_DIR — check that volume.
   let diskVerdict = { action: "ok", msg: null };
@@ -1185,6 +1194,9 @@ ipcMain.handle("install-backend", async () => {
   if (recordProc || tee) return { ok: false, error: "Дождитесь окончания записи" };
   if (procProc) return { ok: false, error: "Дождитесь окончания обработки" };
   if (modelDlProc) return { ok: false, error: "Дождитесь окончания скачивания моделей" };
+  // Same reasoning as start-recording's updateProc guard above — install-backend
+  // wasn't previously mutually exclusive with the updater at all.
+  if (updateProc) return { ok: false, error: "Идёт обновление приложения — дождитесь завершения" };
 
   let diskVerdict = { action: "ok", msg: null };
   try {
@@ -1303,6 +1315,14 @@ ipcMain.handle("check-app-update", async () => {
 async function runUpdateInstall() {
   let zipPath = null;
   let extractDir = null;
+  // Set when the pre-swap recheck below aborts because a conflicting op started
+  // during the (multi-minute) download window — the finally block then leaves
+  // the already-downloaded zip/extract in place rather than deleting it, per
+  // the "keep the downloaded zip" abort contract. Note this flow doesn't
+  // actually resume from it: a later retry re-fetches and re-downloads from
+  // scratch (its own top-of-function fs.rmSync wipes this leftover first) —
+  // preserving it here only avoids destroying evidence of THIS abort itself.
+  let deferredBusy = false;
   try {
     let release;
     try {
@@ -1341,6 +1361,21 @@ async function runUpdateInstall() {
     // that, Gatekeeper would re-prompt (or refuse) on the very first relaunch.
     await runInstallStep("xattr", ["-dr", "com.apple.quarantine", newAppPath], { onProc: (p) => { updateProc = p; } });
 
+    // Pre-swap recheck (belt-and-suspenders): download-and-install-update's own
+    // entry guard checked these once, but the download+unpack above can take
+    // several minutes — wide enough for a recording/processing/model-download/
+    // backend-install to have started since, despite that front-door guard (or
+    // its own guard against updateProc racing the other way). Never swap the
+    // running bundle out from under an in-flight op — the relaunch+forced-exit
+    // step further down skips before-quit's graceful mic-finalize wait entirely,
+    // so a recording in progress at that point would die unplayable. Abort
+    // cleanly instead: no swap, no relaunch, leave the downloaded zip in place
+    // (see deferredBusy above).
+    if (recordProc || tee || procProc || modelDlProc || installBackendProc) {
+      deferredBusy = true;
+      throw new Error("Обновление отложено: идёт запись/обработка");
+    }
+
     send("app-update-event", { event: "stage", stage: "swap", msg: "Устанавливаю…" });
     // app.getPath("exe") = "<App>.app/Contents/MacOS/<App>" — three levels up is the bundle itself.
     const currentAppPath = path.dirname(path.dirname(path.dirname(app.getPath("exe"))));
@@ -1352,6 +1387,14 @@ async function runUpdateInstall() {
     } catch (e) {
       // Roll back immediately — the app must stay launchable even if this fails.
       fs.renameSync(oldAppPath, currentAppPath);
+      // EXDEV: newAppPath (under userData/updates) and currentAppPath (wherever
+      // the .app is actually installed) are on different volumes — rename can't
+      // cross a mount boundary. Known limitation for v1 (e.g. the app installed
+      // on an external/network drive) — surfaced honestly instead of as a raw
+      // rename error.
+      if (e && e.code === "EXDEV") {
+        throw new Error("Обновление не поддерживается, когда приложение установлено на другом томе");
+      }
       throw e;
     }
 
@@ -1368,9 +1411,14 @@ async function runUpdateInstall() {
     });
   } finally {
     // Never leave a half-downloaded/half-unpacked update behind for the next attempt
-    // to trip over — mirrors runInstallBackend's own staging cleanup above.
-    if (zipPath) { try { fs.rmSync(zipPath, { force: true }); } catch {} }
-    if (extractDir) { try { fs.rmSync(extractDir, { recursive: true, force: true }); } catch {} }
+    // to trip over — mirrors runInstallBackend's own staging cleanup above. Except
+    // on a deferredBusy abort, where deletion is skipped per the "keep the
+    // downloaded zip" abort contract (see the comment on the flag's declaration —
+    // a later retry still re-downloads from scratch regardless).
+    if (!deferredBusy) {
+      if (zipPath) { try { fs.rmSync(zipPath, { force: true }); } catch {} }
+      if (extractDir) { try { fs.rmSync(extractDir, { recursive: true, force: true }); } catch {} }
+    }
     updateProc = null;
     updateCanceled = false;
   }

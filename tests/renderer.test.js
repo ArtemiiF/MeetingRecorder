@@ -3419,3 +3419,62 @@ test("main.js: cleanupUpdateLeftovers is wired into app.whenReady alongside prun
   const whenReady = mainSrc.match(/app\.whenReady\(\)\.then\(\(\) => \{[\s\S]*?\n\}\);/)[0];
   assert.match(whenReady, /cleanupUpdateLeftovers\(\)/);
 });
+
+// ── reverse guards: an in-flight update must block recording/processing/
+// model-download/backend-install too, not just the other way around — a
+// swap that lands mid-recording skips before-quit's graceful mic-finalize
+// wait (app.exit(0) bypasses it entirely), leaving an unplayable WAV ──────
+test("main.js: start-recording refuses while an update is in flight (updateProc)", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const startRecording = mainSrc.match(/ipcMain\.handle\("start-recording"[\s\S]*?\n  const micDevice/)[0];
+  assert.match(startRecording, /if \(updateProc\) return/);
+});
+
+test("main.js: process-audio refuses while an update is in flight (updateProc)", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const processAudio = mainSrc.match(/ipcMain\.handle\("process-audio"[\s\S]*?\n\}\);/)[0];
+  assert.match(processAudio, /if \(updateProc\) return/);
+});
+
+test("main.js: download-models refuses while an update is in flight (updateProc)", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const downloadModels = mainSrc.match(/ipcMain\.handle\("download-models"[\s\S]*?\n\}\);/)[0];
+  assert.match(downloadModels, /if \(updateProc\) return/);
+});
+
+test("main.js: install-backend refuses while an update is in flight (updateProc) — wasn't mutually exclusive before", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const installBackend = mainSrc.match(/ipcMain\.handle\("install-backend"[\s\S]*?\n\}\);/)[0];
+  assert.match(installBackend, /if \(updateProc\) return/);
+});
+
+// ── pre-swap recheck: belt-and-suspenders against the reverse guards above —
+// closes the race where a conflicting op starts during the multi-minute
+// download/unpack window despite the front-door guard already having passed ──
+test("main.js: runUpdateInstall rechecks recordProc/tee/procProc/modelDlProc/installBackendProc immediately before the swap and aborts without renaming if any are active", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const runUpdate = mainSrc.match(/async function runUpdateInstall\(\) \{[\s\S]*?\n\}\n/)[0];
+  const recheckIdx = runUpdate.indexOf("if (recordProc || tee || procProc || modelDlProc || installBackendProc)");
+  const swapRenameIdx = runUpdate.indexOf("fs.renameSync(currentAppPath, oldAppPath)");
+  assert.ok(recheckIdx > 0, "pre-swap recheck condition not found");
+  assert.ok(swapRenameIdx > recheckIdx, "the recheck must happen strictly before the bundle is renamed aside");
+  assert.match(runUpdate, /deferredBusy = true/);
+  assert.match(runUpdate, /Обновление отложено: идёт запись\/обработка/);
+});
+
+test("main.js: a deferredBusy abort skips the zip/extractDir cleanup (keeps the downloaded zip, per the abort contract)", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const runUpdate = mainSrc.match(/async function runUpdateInstall\(\) \{[\s\S]*?\n\}\n/)[0];
+  const finallyBlock = runUpdate.match(/\} finally \{[\s\S]*?\n  \}/)[0];
+  assert.match(finallyBlock, /if \(!deferredBusy\) \{/);
+});
+
+// ── EXDEV: known limitation when userData and the .app live on different
+// volumes (e.g. external-drive install) — must surface an honest message,
+// not a raw ENOENT/EXDEV rename error ────────────────────────────────────
+test("main.js: runUpdateInstall detects EXDEV on the swap-in rename and reports the cross-volume limitation honestly", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const runUpdate = mainSrc.match(/async function runUpdateInstall\(\) \{[\s\S]*?\n\}\n/)[0];
+  assert.match(runUpdate, /e\.code === "EXDEV"/);
+  assert.match(runUpdate, /Обновление не поддерживается, когда приложение установлено на другом томе/);
+});
