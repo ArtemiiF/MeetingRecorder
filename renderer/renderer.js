@@ -107,18 +107,45 @@ async function refreshPreflight() {
   const rows = [
     ["Бэкенд", ok(p.backendInstalled), p.backendInstalled ? "установлен" : "не установлен — см. раздел «Бэкенд» ниже"],
     ["LM Studio (сводка)", ok(p.lmStudio), p.lmStudio ? "запущен" : "не отвечает на :1234 — сводки не будет"],
-    ["Микрофон", perm(p.mic), p.mic],
-    ["Системный звук (запись экрана)", perm(p.screen), p.screen === "granted" ? "разрешено" : "проверится при записи"],
+    ["Микрофон", perm(p.mic), p.mic, "mic"],
+    ["Системный звук (запись экрана)", perm(p.screen), p.screen === "granted" ? "разрешено" : "проверится при записи", "screen"],
     ["ffmpeg", ok(p.ffmpeg), p.ffmpeg ? "есть" : "не найден (brew install ffmpeg)"],
     ["Модель Whisper", p.whisperCached ? "ok" : "warn", p.whisperCached ? "скачана" : "скачается при 1й транскрипции (~1.5GB)"],
     ["HF-токен (диаризация)", p.hfToken ? "ok" : "warn", p.hfToken ? "задан" : "нет — спикеры по таймкодам"],
     ["Embedding-модель (поиск)", p.embedModel ? "ok" : "warn", p.embedModel ? "загружена" : "Embedding-модель не загружена — поиск будет работать только по ключевым словам"],
   ];
   wrap.innerHTML = "";
-  rows.forEach(([label, state, detail]) => {
+  rows.forEach(([label, state, detail, kind]) => {
     const row = document.createElement("div");
     row.className = "pf-row";
     row.innerHTML = `<span class="pf-dot ${state}"></span><span class="pf-label">${label}</span><span class="pf-detail">${detail}</span>`;
+    // Permission rows get an action button once not granted: mic can still be
+    // prompted programmatically while not-determined, but once denied macOS
+    // won't re-prompt — same for system audio, which has no prompt at all.
+    if (kind === "mic" && p.mic !== "granted") {
+      const btn = document.createElement("button");
+      btn.className = "btn small pf-retry";
+      // denied → macOS won't re-prompt; restricted (MDM-managed) can't be granted
+      // in-app either — both dead-end to the same settings deep-link.
+      if (p.mic === "denied" || p.mic === "restricted") {
+        btn.textContent = "Открыть настройки";
+        btn.addEventListener("click", () => window.api.openPrivacySettings("microphone"));
+      } else {
+        btn.textContent = "Разрешить";
+        btn.addEventListener("click", async () => {
+          btn.disabled = true;
+          await window.api.requestMicAccess();
+          refreshPreflight();
+        });
+      }
+      row.appendChild(btn);
+    } else if (kind === "screen" && p.screen !== "granted") {
+      const btn = document.createElement("button");
+      btn.className = "btn small pf-retry";
+      btn.textContent = "Открыть настройки";
+      btn.addEventListener("click", () => window.api.openPrivacySettings("screen"));
+      row.appendChild(btn);
+    }
     wrap.appendChild(row);
   });
   // overall verdict: critical = бэкенд + LM Studio + ffmpeg + mic; rest are warnings only

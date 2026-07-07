@@ -2,6 +2,8 @@ const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("api", {
   preflight: () => ipcRenderer.invoke("preflight"),
+  requestMicAccess: () => ipcRenderer.invoke("request-mic-access"),
+  openPrivacySettings: (target) => ipcRenderer.invoke("open-privacy-settings", target),
   listDevices: () => ipcRenderer.invoke("list-devices"),
   getPresets: () => ipcRenderer.invoke("get-presets"),
   savePresets: (data) => ipcRenderer.invoke("save-presets", data),

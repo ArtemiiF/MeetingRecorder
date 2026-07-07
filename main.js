@@ -361,6 +361,24 @@ ipcMain.handle("preflight", async () => {
   };
 });
 
+// macOS can only prompt for mic access while status is "not-determined" — once
+// denied, the OS silently no-ops and the only path back is System Settings
+// (see open-privacy-settings below). Non-darwin has no TCC gate to trigger.
+ipcMain.handle("request-mic-access", async () => {
+  if (process.platform !== "darwin") return true;
+  try { return await systemPreferences.askForMediaAccess("microphone"); } catch { return false; }
+});
+
+// System audio (AudioTee's screen-capture TCC category) has no programmatic
+// prompt from Electron at all — this just deep-links to the right pane.
+ipcMain.handle("open-privacy-settings", async (_e, target) => {
+  const { shell } = require("electron");
+  const url = target === "screen"
+    ? "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+    : "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone";
+  await shell.openExternal(url);
+});
+
 ipcMain.handle("list-devices", async () => {
   return new Promise((resolve) => {
     let devices = [];

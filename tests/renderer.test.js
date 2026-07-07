@@ -22,6 +22,8 @@ async function boot(apiOverrides = {}) {
   window.navigator.clipboard = { writeText: async () => {} };
   window.api = Object.assign({
     preflight: async () => ({ lmStudio: false, mic: "granted", screen: "unknown", ffmpeg: true, whisperCached: true, hfToken: false, backendInstalled: true }),
+    requestMicAccess: async () => true,
+    openPrivacySettings: async () => {},
     renameSpeakers: async () => ({ ok: true }),
     listDevices: async () => [{ index: 0, name: "MacBook Mic", default: true }],
     getPresets: async () => ({ presets: [{ name: "P", prompt: "x" }], defaultOutDir: "/tmp/out", hfToken: "", language: "ru" }),
@@ -310,6 +312,62 @@ test("preflight panel renders status rows", async () => {
   const rows = $("preflightList").querySelectorAll(".pf-row");
   assert.equal(rows.length, 8);
   assert.equal($("preflightList").querySelectorAll(".pf-dot.ok").length, 5); // backendInstalled, lmStudio, mic, ffmpeg, embedModel
+});
+
+test("preflight: granted mic/screen rows show no action button", async () => {
+  const { window, $ } = await boot({
+    preflight: async () => ({ lmStudio: true, mic: "granted", screen: "granted", ffmpeg: true, whisperCached: true, hfToken: true, embedModel: true, backendInstalled: true }),
+  });
+  $("settingsOpen").click(); await tick(window);
+  const rows = $("preflightList").querySelectorAll(".pf-row");
+  assert.equal(rows[2].querySelector(".pf-retry"), null, "granted mic row must not show a button");
+  assert.equal(rows[3].querySelector(".pf-retry"), null, "granted screen row must not show a button");
+});
+
+test("preflight: not-determined mic shows «Разрешить», wired to requestMicAccess + re-checks status", async () => {
+  let micCalls = 0;
+  let preflightCalls = 0;
+  const { window, $ } = await boot({
+    preflight: async () => {
+      preflightCalls++;
+      return { lmStudio: true, mic: micCalls ? "granted" : "not-determined", screen: "granted", ffmpeg: true, whisperCached: true, hfToken: true, embedModel: true, backendInstalled: true };
+    },
+    requestMicAccess: async () => { micCalls++; return true; },
+  });
+  $("settingsOpen").click(); await tick(window);
+  const beforePf = preflightCalls;
+  const btn = $("preflightList").querySelectorAll(".pf-row")[2].querySelector(".pf-retry");
+  assert.equal(btn.textContent, "Разрешить");
+  btn.click(); await tick(window);
+  assert.equal(micCalls, 1, "requestMicAccess must be called");
+  assert.ok(preflightCalls > beforePf, "preflight must be re-checked after the prompt so a granted mic turns the row green");
+  assert.equal($("preflightList").querySelectorAll(".pf-row")[2].querySelector(".pf-retry"), null, "now-granted mic row should drop the button");
+});
+
+test("preflight: denied mic shows «Открыть настройки», wired to openPrivacySettings(\"microphone\")", async () => {
+  let opened = null;
+  const { window, $ } = await boot({
+    preflight: async () => ({ lmStudio: true, mic: "denied", screen: "granted", ffmpeg: true, whisperCached: true, hfToken: true, embedModel: true, backendInstalled: true }),
+    openPrivacySettings: async (target) => { opened = target; },
+  });
+  $("settingsOpen").click(); await tick(window);
+  const btn = $("preflightList").querySelectorAll(".pf-row")[2].querySelector(".pf-retry");
+  assert.equal(btn.textContent, "Открыть настройки");
+  btn.click(); await tick(window);
+  assert.equal(opened, "microphone");
+});
+
+test("preflight: ungranted system audio shows «Открыть настройки», wired to openPrivacySettings(\"screen\")", async () => {
+  let opened = null;
+  const { window, $ } = await boot({
+    preflight: async () => ({ lmStudio: true, mic: "granted", screen: "not-determined", ffmpeg: true, whisperCached: true, hfToken: true, embedModel: true, backendInstalled: true }),
+    openPrivacySettings: async (target) => { opened = target; },
+  });
+  $("settingsOpen").click(); await tick(window);
+  const btn = $("preflightList").querySelectorAll(".pf-row")[3].querySelector(".pf-retry");
+  assert.equal(btn.textContent, "Открыть настройки");
+  btn.click(); await tick(window);
+  assert.equal(opened, "screen");
 });
 
 test("history rail renders items; selecting one renders the note markdown", async () => {
@@ -1871,6 +1929,20 @@ test("main.js: preflight reports backendInstalled via backendAvailable()", () =>
   const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
   const preflight = mainSrc.match(/ipcMain\.handle\("preflight"[\s\S]*?\n\}\);/)[0];
   assert.match(preflight, /backendInstalled: backendAvailable\(\)/);
+});
+
+test("main.js: request-mic-access triggers the native TCC prompt via askForMediaAccess", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const handler = mainSrc.match(/ipcMain\.handle\("request-mic-access"[\s\S]*?\n\}\);/)[0];
+  assert.match(handler, /systemPreferences\.askForMediaAccess\("microphone"\)/);
+});
+
+test("main.js: open-privacy-settings deep-links to the microphone and screen-capture panes", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const handler = mainSrc.match(/ipcMain\.handle\("open-privacy-settings"[\s\S]*?\n\}\);/)[0];
+  assert.match(handler, /x-apple\.systempreferences:com\.apple\.preference\.security\?Privacy_Microphone/);
+  assert.match(handler, /x-apple\.systempreferences:com\.apple\.preference\.security\?Privacy_ScreenCapture/);
+  assert.match(handler, /shell\.openExternal\(url\)/);
 });
 
 // ── settings "Модели" section (model inventory + pre-download) ─────────────
