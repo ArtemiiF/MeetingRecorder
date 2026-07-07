@@ -1473,12 +1473,6 @@ function switchView(v) {
 }
 document.querySelectorAll(".topbtn").forEach((b) => b.addEventListener("click", () => switchView(b.dataset.view)));
 $("historyRefresh").addEventListener("click", refreshHistory);
-// Entry point into the PARA chat from История — same view-switch + subtab machinery, same chat instance.
-$("historyAskBtn").addEventListener("click", () => {
-  switchView("para");
-  subSwitchPara("search");
-  $("paraSearchQuery").focus();
-});
 
 // ── history (rail + note viewer) ─────────────────────────────────────────────
 let historyItems = [];

@@ -1183,9 +1183,18 @@ class Pipeline:
         import requests
         import re
         try:
+            system_prompt = "Ты даёшь короткие заголовки встреч. Ответь только заголовком."
+            # Pin the title's language to the pipeline's transcription language — otherwise
+            # the LLM tends to mirror whatever language its own instructions are written in
+            # (Russian), producing a Russian title even for an English-language meeting.
+            # "auto" has no fixed language to pin to — leave the prompt as before.
+            if self.LANGUAGE == "ru":
+                system_prompt += " Ответь на русском языке."
+            elif self.LANGUAGE == "en":
+                system_prompt += " Answer in English."
             payload = {
                 "messages": [
-                    {"role": "system", "content": "Ты даёшь короткие заголовки встреч. Ответь только заголовком."},
+                    {"role": "system", "content": system_prompt},
                     {"role": "user", "content":
                         f"Дай очень короткий заголовок (3–6 слов, без кавычек, одной строкой) "
                         f"для этой встречи:\n\n{transcript[:3000]}"},

@@ -1126,19 +1126,6 @@ test("view switching toggles record/history panels", async () => {
   assert.ok($("view-history").classList.contains("hidden"));
 });
 
-test("history 'Спросить' button jumps to PARA search subtab and focuses the chat input", async () => {
-  const { window, $ } = await boot();
-  window.document.querySelector('.topbtn[data-view="history"]').click();
-  await tick(window);
-  $("historyAskBtn").click();
-  await tick(window);
-  assert.ok(!$("view-para").classList.contains("hidden"), "PARA view must be visible");
-  assert.ok($("view-history").classList.contains("hidden"), "history view must be hidden");
-  assert.ok(!$("para-pane-search").classList.contains("hidden"), "#para-pane-search must be visible");
-  assert.ok($("para-pane-inbox").classList.contains("hidden"), "#para-pane-inbox must be hidden");
-  assert.equal(window.document.activeElement, $("paraSearchQuery"), "chat input must be focused");
-});
-
 // ── authorName setting ────────────────────────────────────────────────────────
 
 test("authorName loads from presets into state and the settings input", async () => {

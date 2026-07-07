@@ -126,7 +126,6 @@
           <div class="rail-head">
             <span>Заметки</span>
             <div class="rail-head-btns">
-              <button id="historyAskBtn" class="btn small" title="Спросить AI по заметкам">💬 Спросить</button>
               <button id="historyRefresh" class="btn small">⟳</button>
             </div>
           </div>
@@ -274,7 +273,7 @@
           <li><b>Запусти LM Studio</b> и загрузи модель — нужна для сводок, заголовков и PARA-разбора (сервер на <code>:1234</code>).</li>
           <li><b>Подними лимит токенов</b> в LM Studio: Context Length ≥ ~20k и output ≥ 16000 — иначе PARA-разбор обрывается на размышлениях.</li>
           <li><b>Дай доступ к микрофону</b> и <b>записи экрана</b> (для системного звука) в Системных настройках macOS.</li>
-          <li><b>Установи ffmpeg</b>: <code>brew install ffmpeg</code> — без него не собрать аудио.</li>
+          <li><b>ffmpeg</b> ставится автоматически вместе с бэкендом (кнопка «⬇ Установить бэкенд» ниже); для разработки его можно поставить отдельно: <code>brew install ffmpeg</code>.</li>
           <li><i>Опционально:</i> HF-токен для диаризации (имена спикеров). Без него — спикеры по таймкодам.</li>
           <li>Модель Whisper скачается автоматически при первой транскрипции (~1.5 ГБ).</li>
         </ol>
