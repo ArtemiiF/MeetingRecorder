@@ -1,6 +1,21 @@
-# HANDOFF — состояние на 2026-07-07
+# HANDOFF — состояние на 2026-07-08
 
 Electron-приложение записи встреч: mic+system (AudioTee) / импорт → `backend.py` (JSON-stdout): mono/VAD → MLX Whisper → коррекция терминов → pyannote → LLM-сводка (LM Studio `:1234`) → `.md` в Obsidian. Архитектура и хранение — см. README.md. Четыре вида: 🎙 Запись · 📚 История · 🗂 PARA · 📖 Словарь.
+
+## ⚠️ Репо ПУБЛИЧНЫЙ + новый git-процесс (2026-07-08)
+
+- `ArtemiiF/MeetingRecorder` — **публичный** (решение владельца, ради автообновлялки без токена), MIT LICENSE. Старый приватный переименован в `MeetingRecorder-private` (бэкап со старой историей).
+- История переписана filter-repo: автор всех коммитов `Artemii <a.filanovskii@yandex.ru>` (прецедент reflectory), Co-Authored-By вырезан. **Новые коммиты: тот же автор (git config локально стоит), НИКОГДА не добавлять Co-Authored-By-трейлер** — решение владельца.
+- **Прямой push в main агенту ЗАПРЕЩЁН** (owner-solo-private delegation отменилась на public). Флоу: ветка → критик-гейт → push ветки → PR → владелец мержит сам. Прецедент: PR #1.
+- Секурити-скан истории перед публикацией: чисто (presets/index.db/.secret/записи никогда не трекались, секрет-паттернов нет).
+
+## Сессия 2026-07-07/08 — LLM-фиксы, История, fast-model, автообновлялка
+
+- **Коррекция терминов** (`68744b6`): юзер поймал «LLM недоступен» — реально `Read timed out (120s)`. Замеры на живом LM Studio: gemma-4-26b (reasoning) на 1712-символьном чанке жжёт ВСЁ на thinking (4000 cap → 157с, reasoning 3997/3999; 16000 cap → 457с, reasoning 15997, content=0 — спираль НЕ заканчивается, бюджет не лечит). Фикс: `_llm_correct_budget(chunk_len)` — max_tokens = 4000 + ceil(chars/3) (floor = измеренный минимум), timeout = 30 + max_tokens/15 (rate 15 tok/s консервативно от измеренных 25); except разведён Timeout/ConnectionError/generic; correct-кеш пишет `llm_ok` — degraded-результат больше НЕ залипает (missing key у старых кешей → recompute).
+- **Быстрая модель для механики** (`83e7644`): настройка «Модель для быстрых задач» (presets `fastModel`, пусто = загруженная модель) → поле `model` в запросах ТОЛЬКО correct/suggest/title; summarize/chat/PARA нетронуты (thinking остаётся для сводки — решение владельца). Замер `google/gemma-3-4b` (скачана владельцем): 6.2с тёплый, finish=stop, реальный контент — ~70× быстрее 26b. Qwen не трогать (решение владельца).
+- **История + pending** (`41c5f20`+`b94bff2`): pending-записи мерджатся в Историю НА БЭКЕНДЕ (cmd_history `--pending-file`, синтетические строки kind:"pending", хронологический мердж двух форматов stamp через `_parse_any_stamp`); ▶/✕ и «Обработать все» в ленте, поверх фильтров (решение владельца); блок из карточки Запись удалён, мёртвая большая «▶ Обработать» скрыта вне import-режима. Типизация заметок: frontmatter `source` recording/batch/file (новый `--origin`), legacy без поля → бейдж ❓ unknown (решение владельца); DB-колонка source через guarded ALTER TABLE.
+- **Автообновлялка** (PR #1, `a499af7`): секция «Обновления» в настройках — check releases/latest (без токена), semver-сравнение (mainutil), скачивание с прогрессом/отменой, `ditto -xk` → `xattr -dr quarantine` → swap через `.old` с откатом → relaunch. Гонка данных закрыта 2 слоями (критик-fix): обратные guard'ы (запись/обработка/модели/бэкенд отказывают при updateProc) + пере-проверка занятости перед swap. EXDEV (другой том) → откат + честное сообщение. Только packaged; чистка `.old`/updates на старте. Bootstrap: v1.0.0 обновлялку не содержит — одна ручная переустановка.
+- **Релиз v1.0.0 перенесён** в публичный репо (ассеты скачаны из private, пересозданы).
 
 ## Упаковка в .app + установка бэкенда по кнопке (2026-07-07)
 
@@ -104,8 +119,8 @@ Preflight-панель: у строки Микрофон — кнопка «Ра
 
 ## Git / процесс
 
-- Remote `ArtemiiF/MeetingRecorder` (private, solo). `main` = origin/main = `28566c1` (трей-фикс; последний в арке упаковки). Тег `v1.0.0` = релиз с .dmg. Фича-ветки спрюнены.
-- Push в main разрешён владельцем **только через критик-гейт**: критик по `git diff origin/main...HEAD` → marker `printf 'verdict: approve\ndiff-sha256: %s\n'` где sha = `printf '%s' "$(git diff origin/main...HEAD)" | sha256sum` (именно `printf '%s'` — прямой pipe оставляет \n → mismatch) → push отдельной командой. Marker одноразовый, TTL 300 c. Marker и push НЕ объединять в одну команду (hook проверяет до выполнения).
+- Remote `ArtemiiF/MeetingRecorder` (private, solo). `main` = origin/main = `a499af7` (автообновлялка, PR #1). Тег `v1.0.0` = релиз с .dmg (перенесён в публичный репо, sha переписан). Фича-ветки спрюнены.
+- УСТАРЕЛО (репо публичный, см. шапку): push в main агенту запрещён, только PR. Критик-гейт остаётся перед push ветки. Механика маркера: критик по `git diff origin/main...HEAD` → marker `printf 'verdict: approve\ndiff-sha256: %s\n'` где sha = `printf '%s' "$(git diff origin/main...HEAD)" | sha256sum` (именно `printf '%s'` — прямой pipe оставляет \n → mismatch) → push отдельной командой. Marker одноразовый, TTL 300 c. Marker и push НЕ объединять в одну команду (hook проверяет до выполнения).
 - Agent-report'ы (`.claude/agent-reports/`) — untracked, в коммиты не включать.
 - Фиксы предсуществующих поломок — отдельным чанком от фичи.
 
