@@ -562,7 +562,7 @@ ipcMain.handle("reset-app", async () => {
   try {
     fresh = JSON.parse(fs.readFileSync(PRESETS_EXAMPLE, "utf-8"));
   } catch {
-    fresh = { presets: [], defaultOutDir: DEFAULT_OUT, authorName: "Автор", glossary: "", language: "ru" };
+    fresh = { presets: [], defaultOutDir: DEFAULT_OUT, authorName: "Автор", fastModel: "", glossary: "", language: "ru" };
   }
   if (fresh.para) fresh.para.root = "";
   else fresh.para = { root: "", folders: {} };
@@ -809,7 +809,7 @@ function cacheDirFor(audioFile) {
 
 // processing pipeline
 ipcMain.handle("process-audio", async (_e, opts) => {
-  const { audioFile, prompt, diarize, outDir, engine, hfToken, fresh, language, glossary, summarize, template, micFile, systemFile, authorName, origin } = opts;
+  const { audioFile, prompt, diarize, outDir, engine, hfToken, fresh, language, glossary, summarize, template, micFile, systemFile, authorName, origin, fastModel } = opts;
   if (procProc) return { ok: false, error: "Обработка уже идёт" };
   if (modelDlProc) return { ok: false, error: "Дождитесь окончания скачивания моделей" };
   // Same reasoning as start-recording's guard above: processing spawns pythonBin(),
@@ -854,6 +854,10 @@ ipcMain.handle("process-audio", async (_e, opts) => {
   // note-origin typing for a plain import (batch vs single file) — record-mode never
   // sends this, the backend infers "recording" from micFile/systemFile above instead.
   if (origin) args.push("--origin", origin);
+  // Fast model for mechanical LLM calls only (correct/title/suggest) — empty means
+  // omit the flag entirely, backend.py's --fast-model default ("") preserves today's
+  // behaviour (no "model" field sent, LM Studio uses whatever's loaded).
+  if (fastModel) args.push("--fast-model", fastModel);
   // UI-entered token wins over a shell env one; empty → backend skips diarization.
   const extraEnv = hfToken && hfToken.trim() ? { HF_TOKEN: hfToken.trim() } : {};
   let doneNote = null; // captured from the "done" event, used to auto-index on close

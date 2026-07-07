@@ -1164,6 +1164,54 @@ test("changing authorName input persists with authorName in savePresets payload"
   assert.equal(saved.authorName, "Наталья");
 });
 
+// ── fastModel setting ──────────────────────────────────────────────────────────
+
+test("fastModel loads from presets into state and the settings input", async () => {
+  const { $, window } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru", fastModel: "google/gemma-3-4b",
+    }),
+  });
+  await tick(window);
+  assert.equal($("fastModel").value, "google/gemma-3-4b");
+});
+
+test("fastModel defaults to '' when absent from presets", async () => {
+  const { $, window } = await boot({
+    getPresets: async () => ({ presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru" }),
+  });
+  await tick(window);
+  assert.equal($("fastModel").value, "");
+});
+
+test("changing fastModel input persists with fastModel in savePresets payload", async () => {
+  let saved = null;
+  const { $, window } = await boot({ savePresets: async (data) => { saved = data; return true; } });
+  await tick(window);
+  $("fastModel").value = "google/gemma-3-4b";
+  $("fastModel").dispatchEvent(new window.Event("change"));
+  await tick(window);
+  assert.ok(saved, "savePresets was not called");
+  assert.equal(saved.fastModel, "google/gemma-3-4b");
+});
+
+test("fastModel is forwarded to processAudio when running", async () => {
+  let sent = null;
+  const { window, $, handlers } = await boot({
+    getPresets: async () => ({
+      presets: [{ name: "P", prompt: "x" }], defaultOutDir: "/tmp", hfToken: "", language: "ru",
+      fastModel: "google/gemma-3-4b",
+    }),
+    processAudio: async (opts) => { sent = opts; return { ok: true }; },
+  });
+  await tick(window);
+  handlers.record({ event: "recorded", id: "r1", name: "Запись 1", file: "/tmp/mixed.wav", mic: "/tmp/m.wav", system: null, tracks: 1 });
+  $("historyList").querySelector(".pending-play-btn").click();
+  await tick(window);
+  assert.ok(sent, "processAudio was not called");
+  assert.equal(sent.fastModel, "google/gemma-3-4b");
+});
+
 // ── settings overlay: hfToken/authorName/outDir relocation + outDir auto-follow ──
 
 test("openSettings() populates hfToken/authorName/outDir from state and shows the overlay", async () => {
@@ -1908,6 +1956,12 @@ test("main.js: process-audio refuses when no backend interpreter is available, a
   const processAudio = mainSrc.match(/ipcMain\.handle\("process-audio"[\s\S]*?\n\}\);/)[0];
   assert.match(processAudio, /if \(installBackendProc\) return/);
   assert.match(processAudio, /if \(!backendAvailable\(\)\) return/);
+});
+
+test("main.js: process-audio forwards --fast-model to the backend spawn only when fastModel is non-empty", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const processAudio = mainSrc.match(/ipcMain\.handle\("process-audio"[\s\S]*?\n\}\);/)[0];
+  assert.match(processAudio, /if \(fastModel\) args\.push\("--fast-model", fastModel\)/);
 });
 
 // ── setup gate (hard wall) ───────────────────────────────────────────────────

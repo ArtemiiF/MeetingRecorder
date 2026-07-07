@@ -566,7 +566,7 @@ def gate_llm_correction(original, corrected, terms):
 class Pipeline:
     def __init__(self, out_dir, engine="mlx", diarize=True, cache_dir=None,
                  language="ru", do_summary=True, template="", db_path=None, glossary="",
-                 author_name="Автор"):
+                 author_name="Автор", fast_model=""):
         self.TEMPLATE = template
         self.db_path = db_path
         self.OBSIDIAN_PATH = Path(out_dir)
@@ -578,6 +578,13 @@ class Pipeline:
         self.DO_SUMMARY = do_summary
         self.GLOSSARY = glossary          # comma/newline-separated terms biasing Whisper initial_prompt
         self.AUTHOR_NAME = author_name    # display name seeded for the auto-detected mic-dominant speaker
+        # Overrides the loaded LM Studio model for MECHANICAL calls only (glossary
+        # correction, title, glossary suggestions) — see correct_glossary_llm/
+        # generate_title/suggest_glossary_terms. Empty = omit "model" from the
+        # request body, LM Studio uses whatever's loaded (today's behaviour).
+        # summarize() and every other LLM call deliberately never read this —
+        # the reasoning summary stays on the default loaded model.
+        self.FAST_MODEL = fast_model
         self.HF_TOKEN = os.environ.get("HF_TOKEN")
         # cache for resumable stages (heavy work — convert/transcribe/diarize).
         self.cache_dir = Path(cache_dir) if cache_dir else None
@@ -856,13 +863,16 @@ class Pipeline:
                 if not chunk.strip():
                     continue
                 max_tokens, timeout = _llm_correct_budget(len(chunk))
-                resp = requests.post(self.LMSTUDIO_API, json={
+                payload = {
                     "messages": [
                         {"role": "system", "content": sys_msg},
                         {"role": "user", "content": chunk},
                     ],
                     "temperature": 0.0, "max_tokens": max_tokens,
-                }, timeout=timeout)
+                }
+                if self.FAST_MODEL:
+                    payload["model"] = self.FAST_MODEL
+                resp = requests.post(self.LMSTUDIO_API, json=payload, timeout=timeout)
                 if resp.status_code != 200:
                     continue
                 msg = (resp.json().get("choices") or [{}])[0].get("message", {})
@@ -913,13 +923,16 @@ class Pipeline:
         import re
         import requests
         try:
-            resp = requests.post(self.LMSTUDIO_API, json={
+            payload = {
                 "messages": [
                     {"role": "system", "content": self.SUGGEST_SYSTEM_PROMPT},
                     {"role": "user", "content": f"ТРАНСКРИПТ:\n{transcript[:8000]}"},
                 ],
                 "temperature": 0.1, "max_tokens": 2500,
-            }, timeout=120)
+            }
+            if self.FAST_MODEL:
+                payload["model"] = self.FAST_MODEL
+            resp = requests.post(self.LMSTUDIO_API, json=payload, timeout=120)
             if resp.status_code != 200:
                 log(f"⚠️ LM Studio HTTP {resp.status_code} — предложения словаря пропущены")
                 return []
@@ -1170,7 +1183,7 @@ class Pipeline:
         import requests
         import re
         try:
-            resp = requests.post(self.LMSTUDIO_API, json={
+            payload = {
                 "messages": [
                     {"role": "system", "content": "Ты даёшь короткие заголовки встреч. Ответь только заголовком."},
                     {"role": "user", "content":
@@ -1178,7 +1191,10 @@ class Pipeline:
                         f"для этой встречи:\n\n{transcript[:3000]}"},
                 ],
                 "temperature": 0.3, "max_tokens": 2500,
-            }, timeout=120)
+            }
+            if self.FAST_MODEL:
+                payload["model"] = self.FAST_MODEL
+            resp = requests.post(self.LMSTUDIO_API, json=payload, timeout=120)
             if resp.status_code == 200:
                 msg = (resp.json().get("choices") or [{}])[0].get("message", {})
                 c = (msg.get("content") or "").strip()
@@ -1651,7 +1667,7 @@ def cmd_process(args):
     pipe = Pipeline(out_dir=args.out_dir, engine=args.engine, diarize=args.diarize,
                     cache_dir=args.cache_dir, language=args.language, do_summary=args.summarize,
                     template=args.template, db_path=args.db, glossary=args.glossary,
-                    author_name=args.author_name)
+                    author_name=args.author_name, fast_model=args.fast_model)
     try:
         pipe.process(args.infile, prompt, keep_audio_in_obsidian=args.keep_audio,
                      mic_file=args.mic, system_file=args.system, origin=args.origin)
@@ -3000,6 +3016,8 @@ def main():
     p_proc.add_argument("--system", default=None)  # system.wav, ditto
     p_proc.add_argument("--author-name", dest="author_name", default="Автор")
     p_proc.add_argument("--origin", choices=["batch", "file"], default=None)  # ignored when --mic/--system given (recording wins)
+    # Fast model for mechanical LLM calls only (correct/title/suggest) — see Pipeline.FAST_MODEL.
+    p_proc.add_argument("--fast-model", dest="fast_model", default="")
 
     p_hist = sub.add_parser("history")
     p_hist.add_argument("--out-dir", dest="out_dir", default=default_obsidian)

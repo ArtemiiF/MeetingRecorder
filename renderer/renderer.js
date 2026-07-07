@@ -27,6 +27,7 @@ const state = {
   hfToken: "",
   language: "ru",
   authorName: "Автор",
+  fastModel: "",
   glossary: "",
   glossarySuggestions: [], // pending candidates from the "suggest" pipeline stage — accept/dismiss
   glossaryDismissed: [],   // dismissed candidates (original case; compared lowercased) — never re-suggested
@@ -516,6 +517,7 @@ async function init() {
   // to select) but old presets/settings files may still carry it — coerce to the default.
   state.language = (data.language === "auto" ? "" : data.language) || "ru";
   state.authorName = data.authorName || "Автор";
+  state.fastModel = data.fastModel || "";
   state.glossary = data.glossary || DEFAULT_GLOSSARY;
   state.glossarySuggestions = data.glossarySuggestions || [];
   state.glossaryDismissed = data.glossaryDismissed || [];
@@ -525,6 +527,7 @@ async function init() {
   $("hfToken").value = state.hfToken;
   $("language").value = state.language;
   $("authorName").value = state.authorName;
+  $("fastModel").value = state.fastModel;
   $("glossary").value = state.glossary;
   renderGlossaryChips();
   renderGlossarySuggestions();
@@ -599,6 +602,7 @@ async function persistPresets() {
     hfToken: state.hfToken,
     language: state.language,
     authorName: state.authorName,
+    fastModel: state.fastModel,
     glossary: state.glossary,
     glossarySuggestions: state.glossarySuggestions,
     glossaryDismissed: state.glossaryDismissed,
@@ -623,6 +627,11 @@ $("hfHelpLink").addEventListener("click", (e) => {
 
 $("authorName").addEventListener("change", (e) => {
   state.authorName = e.target.value || "Автор";
+  persistPresets();
+});
+
+$("fastModel").addEventListener("change", (e) => {
+  state.fastModel = e.target.value || "";
   persistPresets();
 });
 
@@ -1289,6 +1298,7 @@ async function startProcessing(fresh, item) {
     fresh: !!fresh,
     language: state.language,
     glossary: state.glossary,
+    fastModel: state.fastModel,
     summarize: !$("noSummary").checked,
     template: (state.presets[state.currentPreset] || {}).name || "",
     // auto-«Я»: only meaningful for a record-sourced mic/system pair — import mode

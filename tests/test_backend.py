@@ -299,6 +299,17 @@ def test_summarize_swallows_exception(monkeypatch, pipe):
     assert pipe.summarize("t", "p") is None
 
 
+# ── regression lock: fast_model must NEVER leak into summarize's request body —
+# the summary deliberately stays on the default loaded model even when a fast
+# model is configured for the mechanical calls (correct/title/suggest).
+def test_summarize_never_gains_model_field_even_when_fast_model_set(monkeypatch):
+    pipe = backend.Pipeline(out_dir="/tmp/mr-test-out", diarize=False, fast_model="google/gemma-3-4b")
+    payload = {"choices": [{"message": {"content": "СВОДКА"}}]}
+    calls = install_fake_requests(monkeypatch, payload=payload)
+    pipe.summarize("транскрипт", "сделай сводку")
+    assert "model" not in calls["json"]
+
+
 # ── list_devices / find_device_index (mock pyaudio) ─────────────────────────
 class FakePyAudio:
     def __init__(self, devices, default_index=0):
@@ -1057,6 +1068,20 @@ def test_generate_title_falls_back_to_reasoning(monkeypatch, pipe):
     assert pipe.generate_title("t") == "Синк по релизу"
 
 
+# ── generate_title / fast-model override (mechanical LLM call) ─────────────
+def test_generate_title_includes_model_field_when_fast_model_set(monkeypatch):
+    pipe = backend.Pipeline(out_dir="/tmp/mr-test-out", diarize=False, fast_model="google/gemma-3-4b")
+    calls = install_fake_requests(monkeypatch, payload={"choices": [{"message": {"content": "Синк по релизу"}}]})
+    pipe.generate_title("t")
+    assert calls["json"]["model"] == "google/gemma-3-4b"
+
+
+def test_generate_title_omits_model_field_when_fast_model_empty(monkeypatch, pipe):
+    calls = install_fake_requests(monkeypatch, payload={"choices": [{"message": {"content": "Синк по релизу"}}]})
+    pipe.generate_title("t")
+    assert "model" not in calls["json"]
+
+
 def test_infer_speaker_names_filters_labels_and_empties(monkeypatch, pipe):
     install_fake_requests(monkeypatch, payload={"choices": [{"message": {
         "content": '{"Спикер 1": "Алексей", "Спикер 2": "", "Спикер 9": "Икс"}'}}]})
@@ -1693,7 +1718,7 @@ def test_cmd_process_uses_default_prompt_when_file_blank(monkeypatch, tmp_path):
         prompt_file=str(blank), out_dir=str(tmp_path), engine="mlx",
         diarize=False, infile="x.wav", keep_audio=False, cache_dir=None,
         language="ru", glossary="", summarize=True, template="", db=None,
-        mic=None, system=None, author_name="Автор", origin=None)
+        mic=None, system=None, author_name="Автор", origin=None, fast_model="")
     backend.cmd_process(args)
     assert "краткую структурированную сводку" in captured["prompt"]
 
@@ -1708,7 +1733,7 @@ def test_cmd_process_forwards_user_prompt(monkeypatch, tmp_path):
         prompt_file=str(pf), out_dir=str(tmp_path), engine="mlx",
         diarize=True, infile="x.wav", keep_audio=False, cache_dir=None,
         language="ru", glossary="", summarize=True, template="", db=None,
-        mic=None, system=None, author_name="Автор", origin=None)
+        mic=None, system=None, author_name="Автор", origin=None, fast_model="")
     backend.cmd_process(args)
     assert captured["p"] == "МОЙ КАСТОМНЫЙ ПРОМПТ"
 
@@ -1994,9 +2019,29 @@ def test_cmd_process_forwards_glossary_to_pipeline(monkeypatch, tmp_path):
         prompt_file=None, out_dir=str(tmp_path), engine="mlx",
         diarize=False, infile="x.wav", keep_audio=False, cache_dir=None,
         language="ru", glossary="Иван Петров, Mindbox", summarize=True, template="", db=None,
-        mic=None, system=None, author_name="Автор", origin=None)
+        mic=None, system=None, author_name="Автор", origin=None, fast_model="")
     backend.cmd_process(args)
     assert captured["glossary"] == "Иван Петров, Mindbox"
+
+
+def test_cmd_process_forwards_fast_model_to_pipeline(monkeypatch, tmp_path):
+    captured = {}
+    orig_init = backend.Pipeline.__init__
+
+    def spy_init(self, *a, **kw):
+        captured["fast_model"] = kw.get("fast_model")
+        orig_init(self, *a, **kw)
+
+    monkeypatch.setattr(backend.Pipeline, "__init__", spy_init)
+    monkeypatch.setattr(backend.Pipeline, "process",
+                        lambda self, a, p, keep_audio_in_obsidian=True, mic_file=None, system_file=None, origin=None: None)
+    args = types.SimpleNamespace(
+        prompt_file=None, out_dir=str(tmp_path), engine="mlx",
+        diarize=False, infile="x.wav", keep_audio=False, cache_dir=None,
+        language="ru", glossary="", summarize=True, template="", db=None,
+        mic=None, system=None, author_name="Автор", origin=None, fast_model="google/gemma-3-4b")
+    backend.cmd_process(args)
+    assert captured["fast_model"] == "google/gemma-3-4b"
 
 
 def test_copy_atomic_roundtrip_no_tmp_left(tmp_path):
@@ -3015,6 +3060,24 @@ def test_correct_glossary_llm_connect_timeout_lands_in_timeout_branch(monkeypatc
     assert not any("недоступен" in m for m in logs)
 
 
+# ── correct_glossary_llm / fast-model override (mechanical LLM call) ────────
+def test_correct_glossary_llm_includes_model_field_when_fast_model_set(monkeypatch):
+    pipe = backend.Pipeline(out_dir="/tmp/mr-test-out", diarize=False, fast_model="google/gemma-3-4b")
+    payload = {"choices": [{"message": {"content": "Позвал Антон на встречу"}}]}
+    calls = install_fake_requests(monkeypatch, payload=payload)
+    segs = [seg("Позвал Онтон на встречу", 0, 3)]
+    pipe.correct_glossary_llm(segs, ["Антон"])
+    assert calls["json"]["model"] == "google/gemma-3-4b"
+
+
+def test_correct_glossary_llm_omits_model_field_when_fast_model_empty(monkeypatch, pipe):
+    payload = {"choices": [{"message": {"content": "Позвал Антон на встречу"}}]}
+    calls = install_fake_requests(monkeypatch, payload=payload)
+    segs = [seg("Позвал Онтон на встречу", 0, 3)]
+    pipe.correct_glossary_llm(segs, ["Антон"])
+    assert "model" not in calls["json"]
+
+
 def test_correct_stage_skipped_when_glossary_empty_byte_identical_no_llm_call(monkeypatch, tmp_path):
     src = tmp_path / "in.wav"; src.write_bytes(b"x")
     calls = {"n": 0}
@@ -3240,6 +3303,22 @@ def test_suggest_glossary_terms_salvages_from_reasoning_content_when_content_emp
     install_fake_requests(monkeypatch, payload=payload)
     out = pipe.suggest_glossary_terms("Разговор про Kubernetes и деплой.", [])
     assert out == ["Kubernetes"]
+
+
+# ── suggest_glossary_terms / fast-model override (mechanical LLM call) ──────
+def test_suggest_glossary_terms_includes_model_field_when_fast_model_set(monkeypatch):
+    pipe = backend.Pipeline(out_dir="/tmp/mr-test-out", diarize=False, fast_model="google/gemma-3-4b")
+    payload = {"choices": [{"message": {"content": "Иван Петров, Mindbox"}}]}
+    calls = install_fake_requests(monkeypatch, payload=payload)
+    pipe.suggest_glossary_terms("Иван Петров сказал про Mindbox.", [])
+    assert calls["json"]["model"] == "google/gemma-3-4b"
+
+
+def test_suggest_glossary_terms_omits_model_field_when_fast_model_empty(monkeypatch, pipe):
+    payload = {"choices": [{"message": {"content": "Иван Петров, Mindbox"}}]}
+    calls = install_fake_requests(monkeypatch, payload=payload)
+    pipe.suggest_glossary_terms("Иван Петров сказал про Mindbox.", [])
+    assert "model" not in calls["json"]
 
 
 # ── `suggest` pipeline stage: wiring + cache ────────────────────────────────
