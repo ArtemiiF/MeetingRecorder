@@ -66,15 +66,18 @@ document.querySelectorAll(".rtab").forEach((t) =>
   })
 );
 
-// ── copy to clipboard (result pane + chat bubbles) ──────────────────────────
+// ── copy to clipboard (result pane + chat bubbles + note-path buttons) ──────
 // Writes text via the standard Clipboard API (available in the renderer regardless
 // of contextIsolation/nodeIntegration — no IPC/main-process plumbing needed), then
-// briefly flips the button's own label to "✓" as click feedback.
-function copyToClipboard(text, btn) {
+// briefly flips the button's own label to `feedbackText` as click feedback.
+// feedbackText/duration default to the original "✓" / 1000ms used by the result-pane
+// and chat-bubble copy buttons; callers that want a different label/duration (e.g.
+// the note-path copy buttons) pass their own.
+function copyToClipboard(text, btn, feedbackText = "✓", duration = 1000) {
   navigator.clipboard.writeText(text || "").then(() => {
     const prev = btn.textContent;
-    btn.textContent = "✓";
-    setTimeout(() => { btn.textContent = prev; }, 1000);
+    btn.textContent = feedbackText;
+    setTimeout(() => { btn.textContent = prev; }, duration);
   });
 }
 
@@ -1825,12 +1828,14 @@ async function openHistoryNote(item) {
      <div class="note-actions">
        <button class="btn small" id="nvOpen">📄 Obsidian</button>
        ${item.audio ? '<button class="btn small" id="nvAudio">🎵 Аудио</button>' : ""}
+       <button class="btn small" id="nvCopyPath" title="Скопировать путь до заметки">📋 Путь</button>
        <button class="btn small ghost" id="nvReprocess">↻ Переобработать</button>
      </div>
      ${meta ? `<div class="note-meta">${escapeHtml(meta)}</div>` : ""}
      <div class="note-body">${renderMarkdown(md)}</div>`;
   $("nvOpen").onclick = () => window.api.reveal(item.note);
   if (item.audio) $("nvAudio").onclick = () => window.api.reveal(item.audio);
+  $("nvCopyPath").onclick = () => copyToClipboard(item.note, $("nvCopyPath"), "✓ Скопировано", 1500);
   $("nvReprocess").onclick = () => { if (item.audio) openReprocessPicker(item); };
 }
 
@@ -2054,10 +2059,14 @@ async function openTreeNote(el) {
   if (md == null) { view.innerHTML = '<p class="hint">Не удалось прочитать заметку.</p>'; return; }
   const name = path.split("/").pop().replace(/\.md$/i, "");
   view.innerHTML =
-    `<div class="note-actions"><button class="btn small" id="ptvOpen">📄 Obsidian</button></div>
+    `<div class="note-actions">
+       <button class="btn small" id="ptvOpen">📄 Obsidian</button>
+       <button class="btn small" id="ptvCopyPath" title="Скопировать путь до заметки">📋 Путь</button>
+     </div>
      <h2 class="note-title">${escapeHtml(name)}</h2>
      <div class="note-body">${renderMarkdown(md)}</div>`;
   $("ptvOpen").onclick = () => window.api.reveal(path);
+  $("ptvCopyPath").onclick = () => copyToClipboard(path, $("ptvCopyPath"), "✓ Скопировано", 1500);
 }
 $("paraTreeRefresh").addEventListener("click", renderParaTree);
 
