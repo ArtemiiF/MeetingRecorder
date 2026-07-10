@@ -4236,9 +4236,64 @@ test("main.js: a failed/cancelled update cleans up the downloaded zip and extrac
   const runUpdate = mainSrc.match(/async function runUpdateInstall\(\) \{[\s\S]*?\n\}\n/)[0];
   const finallyBlock = runUpdate.match(/\} finally \{[\s\S]*?\n  \}/)[0];
   assert.match(finallyBlock, /fs\.rmSync\(zipPath,/);
-  assert.match(finallyBlock, /fs\.rmSync\(extractDir,/);
+  // extractDir may hold a previously-unpacked .app — must go through the
+  // noAsar-wrapped helper, not a bare fs.rmSync (see rmNoAsar/ENOTDIR below).
+  assert.match(finallyBlock, /rmNoAsar\(extractDir,/);
   assert.match(finallyBlock, /updateProc = null/);
   assert.match(finallyBlock, /updateCanceled = false/);
+});
+
+// ── rmNoAsar: fixes the live "Скачать и установить" ENOTDIR ─────────────────
+// Electron's fs patches make an extracted .app's Contents/Resources/app.asar
+// LOOK like a directory; fs.rmSync's recursive walk then calls rmdir(2) on
+// what's really a file and throws ENOTDIR. process.noAsar must be set for the
+// duration of the rmSync call and unconditionally restored afterwards (even
+// if rmSync itself throws), or every subsequent asar-aware fs call in the
+// process would silently stay in "no asar" mode.
+test("main.js: rmNoAsar saves/sets/restores process.noAsar around fs.rmSync, restoring even if rmSync throws", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const fn = mainSrc.match(/function rmNoAsar\(p, opts\) \{[\s\S]*?\n\}\n/);
+  assert.ok(fn, "rmNoAsar helper not found");
+  const body = fn[0];
+  assert.match(body, /const prevNoAsar = process\.noAsar;/);
+  assert.match(body, /process\.noAsar = true;/);
+  // restore must live in `finally` (not after the try) so it runs even on throw
+  const tryFinally = body.match(/try \{[\s\S]*?\} finally \{[\s\S]*?\}/);
+  assert.ok(tryFinally, "rmSync call must be wrapped in try/finally");
+  assert.match(tryFinally[0], /fs\.rmSync\(p, opts\);/);
+  assert.match(tryFinally[0], /process\.noAsar = prevNoAsar;/);
+});
+
+test("main.js: updater call sites that may hit an extracted/installed .app use rmNoAsar (extract wipe, .old removal, cleanup sweep) — the downloaded zip stays plain fs.rmSync (single file, never a bundle)", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const runUpdate = mainSrc.match(/async function runUpdateInstall\(\) \{[\s\S]*?\n\}\n/)[0];
+  // top-of-function stale-extract wipe
+  assert.match(runUpdate, /rmNoAsar\(extractDir, \{ recursive: true, force: true \}\);/);
+  // swap-step "очистка старой копии" (oldAppPath)
+  assert.match(runUpdate, /rmNoAsar\(oldAppPath, \{ recursive: true, force: true \}\);/);
+  // the zip itself is always a single file — never routed through rmNoAsar
+  assert.match(runUpdate, /fs\.rmSync\(zipPath, \{ force: true \}\);/);
+
+  const cleanup = mainSrc.match(/function cleanupUpdateLeftovers\(\) \{[\s\S]*?\n\}\n/)[0];
+  assert.match(cleanup, /rmNoAsar\(appPath \+ "\.old", \{ recursive: true, force: true \}\);/);
+  assert.match(cleanup, /rmNoAsar\(UPDATES_DIR, \{ recursive: true, force: true \}\);/);
+});
+
+// ── swap-step attribution: today's mystery 1.4MB partial .app.old stub makes
+// naming the exact broken step load-bearing for the next incident ──────────
+test("main.js: each swap step (cleanup/move/install/rollback) names itself on failure, and the EXDEV message + rollback control-flow are unchanged", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const runUpdate = mainSrc.match(/async function runUpdateInstall\(\) \{[\s\S]*?\n\}\n/)[0];
+  assert.match(runUpdate, /«очистка старой копии»/);
+  assert.match(runUpdate, /«перенос текущей версии»/);
+  assert.match(runUpdate, /«установка новой версии»/);
+  assert.match(runUpdate, /«откат»/);
+  // rollback still fires unconditionally, immediately, before the EXDEV check —
+  // same control-flow as before, just now also named if IT throws.
+  const rollbackIdx = runUpdate.indexOf("fs.renameSync(oldAppPath, currentAppPath)");
+  const exdevIdx = runUpdate.indexOf('e.code === "EXDEV"');
+  assert.ok(rollbackIdx > 0 && exdevIdx > rollbackIdx, "rollback must still happen before the EXDEV check");
+  assert.match(runUpdate, /Обновление не поддерживается, когда приложение установлено на другом томе/);
 });
 
 test("main.js: updateProc is killed in before-quit alongside the other tracked children", () => {

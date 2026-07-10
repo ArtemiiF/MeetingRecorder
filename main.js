@@ -1366,6 +1366,27 @@ const UPDATES_DIR = path.join(app.getPath("userData"), "updates");
 let updateProc = null;      // current killable step of an in-flight update download/install
 let updateCanceled = false; // set when the user cancels an in-flight update
 
+// Electron's fs patches make an extracted/installed .app's Contents/Resources/
+// app.asar LOOK like a directory to Node's fs calls (asar transparency), even
+// though on disk it's a real file. fs.rmSync's recursive walk trusts that and
+// calls rmdir(2) on it — which fails with ENOTDIR since it's actually a file.
+// This is exactly the "Скачать и установить" incident: rmSync(extractDir) on
+// a retry hit a leftover .app from a prior attempt and blew up on its asar.
+// process.noAsar disables that transparency for the duration of the rmSync
+// call, so app.asar is treated as the plain file it really is. Use this (not
+// bare fs.rmSync) at any updater call site whose target may contain a .app
+// bundle; a single known-to-be-a-file path (e.g. the downloaded zip) doesn't
+// need it.
+function rmNoAsar(p, opts) {
+  const prevNoAsar = process.noAsar;
+  process.noAsar = true;
+  try {
+    fs.rmSync(p, opts);
+  } finally {
+    process.noAsar = prevNoAsar;
+  }
+}
+
 // GET .../releases/latest — no auth, subject to GitHub's unauthenticated rate
 // limit (60 req/h/IP), which a manual "check for updates" button never gets
 // close to. Throws on network error / non-2xx / 404 (no releases published
@@ -1442,8 +1463,10 @@ async function runUpdateInstall() {
     fs.mkdirSync(UPDATES_DIR, { recursive: true });
     zipPath = path.join(UPDATES_DIR, "update.zip");
     extractDir = path.join(UPDATES_DIR, "extract");
-    fs.rmSync(extractDir, { recursive: true, force: true }); // clear a stale leftover from a crashed prior attempt
-    fs.rmSync(zipPath, { force: true });
+    // clear a stale leftover from a crashed prior attempt — extractDir may hold a
+    // previously-unpacked .app (see rmNoAsar above for why plain rmSync can't walk it)
+    rmNoAsar(extractDir, { recursive: true, force: true });
+    fs.rmSync(zipPath, { force: true }); // a single file (never a .app bundle) — plain rmSync is fine
 
     send("app-update-event", { event: "stage", stage: "download", msg: "Скачиваю обновление…" });
     // expectedSha256 is intentionally null — see the module-level comment above
@@ -1486,13 +1509,29 @@ async function runUpdateInstall() {
     // app.getPath("exe") = "<App>.app/Contents/MacOS/<App>" — three levels up is the bundle itself.
     const currentAppPath = path.dirname(path.dirname(path.dirname(app.getPath("exe"))));
     const oldAppPath = currentAppPath + ".old";
-    fs.rmSync(oldAppPath, { recursive: true, force: true });
-    fs.renameSync(currentAppPath, oldAppPath);
+    // Each swap step below is wrapped so a failure names exactly which one broke —
+    // load-bearing for diagnosing things like the unexplained partial ".app.old"
+    // stub seen live (rename can't produce partial copies, so that failure mode
+    // is still a mystery; naming the step at least narrows where to look next).
+    try {
+      rmNoAsar(oldAppPath, { recursive: true, force: true });
+    } catch (e) {
+      throw new Error(`Не удалось выполнить шаг «очистка старой копии»: ${(e && e.message) || e}`);
+    }
+    try {
+      fs.renameSync(currentAppPath, oldAppPath);
+    } catch (e) {
+      throw new Error(`Не удалось выполнить шаг «перенос текущей версии»: ${(e && e.message) || e}`);
+    }
     try {
       fs.renameSync(newAppPath, currentAppPath);
     } catch (e) {
       // Roll back immediately — the app must stay launchable even if this fails.
-      fs.renameSync(oldAppPath, currentAppPath);
+      try {
+        fs.renameSync(oldAppPath, currentAppPath);
+      } catch (rollbackErr) {
+        throw new Error(`Не удалось выполнить шаг «откат»: ${(rollbackErr && rollbackErr.message) || rollbackErr}`);
+      }
       // EXDEV: newAppPath (under userData/updates) and currentAppPath (wherever
       // the .app is actually installed) are on different volumes — rename can't
       // cross a mount boundary. Known limitation for v1 (e.g. the app installed
@@ -1501,7 +1540,7 @@ async function runUpdateInstall() {
       if (e && e.code === "EXDEV") {
         throw new Error("Обновление не поддерживается, когда приложение установлено на другом томе");
       }
-      throw e;
+      throw new Error(`Не удалось выполнить шаг «установка новой версии»: ${(e && e.message) || e}`);
     }
 
     send("app-update-event", { event: "install-closed", code: 0, canceled: false });
@@ -1522,8 +1561,8 @@ async function runUpdateInstall() {
     // downloaded zip" abort contract (see the comment on the flag's declaration —
     // a later retry still re-downloads from scratch regardless).
     if (!deferredBusy) {
-      if (zipPath) { try { fs.rmSync(zipPath, { force: true }); } catch {} }
-      if (extractDir) { try { fs.rmSync(extractDir, { recursive: true, force: true }); } catch {} }
+      if (zipPath) { try { fs.rmSync(zipPath, { force: true }); } catch {} } // single file — plain rmSync
+      if (extractDir) { try { rmNoAsar(extractDir, { recursive: true, force: true }); } catch {} }
     }
     updateProc = null;
     updateCanceled = false;
@@ -1561,8 +1600,8 @@ ipcMain.handle("cancel-app-update", async () => {
 function cleanupUpdateLeftovers() {
   if (!app.isPackaged) return;
   const appPath = path.dirname(path.dirname(path.dirname(app.getPath("exe"))));
-  fs.rmSync(appPath + ".old", { recursive: true, force: true });
-  fs.rmSync(UPDATES_DIR, { recursive: true, force: true });
+  rmNoAsar(appPath + ".old", { recursive: true, force: true });
+  rmNoAsar(UPDATES_DIR, { recursive: true, force: true }); // may still hold an unpacked .app under extract/
 }
 
 // Past recordings: query the backend's SQLite index (reconciled against the notes dir),
