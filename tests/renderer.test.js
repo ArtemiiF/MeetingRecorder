@@ -3716,11 +3716,57 @@ test("Обновления: check button calls checkAppUpdate and renders 'ак�
   });
   $("settingsOpen").click();
   await tick(window);
+  calls = 0; // settingsOpen already auto-triggered one check (see dedicated test below) —
+             // reset so this test isolates the manual button's own call.
   $("updateCheckBtn").click();
   await tick(window);
   assert.equal(calls, 1);
   assert.match($("updateStatusRow").querySelector(".pf-detail").textContent, /актуальная/);
   assert.equal($("updateInstallBtn").classList.contains("hidden"), true);
+});
+
+test("Обновления: opening settings automatically triggers exactly one check-app-update call", async () => {
+  let calls = 0;
+  const { window, $ } = await boot({
+    checkAppUpdate: async () => { calls++; return { ok: true, current: "1.0.0", latest: "1.0.0", hasUpdate: false, assetUrl: null, releaseNotes: null, isPackaged: true }; },
+  });
+  $("settingsOpen").click();
+  await tick(window);
+  assert.equal(calls, 1);
+  assert.match($("updateStatusRow").querySelector(".pf-detail").textContent, /актуальная/);
+});
+
+test("Обновления: a manual click while the settings-open auto-check is still in flight is ignored (no stacking)", async () => {
+  let calls = 0;
+  let resolvers = [];
+  const { window, $ } = await boot({
+    checkAppUpdate: () => new Promise((resolve) => { calls++; resolvers.push(resolve); }),
+  });
+  $("settingsOpen").click();   // fires the auto-check, left pending
+  $("updateCheckBtn").click(); // must be ignored — one check already in flight
+  assert.equal(calls, 1, "concurrent check must be ignored while one is in flight");
+  resolvers.forEach((r) => r({ ok: true, current: "1.0.0", latest: "1.0.0", hasUpdate: false, assetUrl: null, releaseNotes: null, isPackaged: true }));
+  await tick(window);
+  assert.equal(calls, 1);
+});
+
+test("Обновления: closing and reopening settings re-runs the auto-check (guard doesn't block forever)", async () => {
+  let calls = 0;
+  const { window, $ } = await boot({
+    checkAppUpdate: async () => { calls++; return { ok: true, current: "1.0.0", latest: "1.0.0", hasUpdate: false, assetUrl: null, releaseNotes: null, isPackaged: true }; },
+  });
+  $("settingsOpen").click();
+  await tick(window);
+  $("settingsClose").click();
+  $("settingsOpen").click();
+  await tick(window);
+  assert.equal(calls, 2);
+});
+
+test("settings overlay: «Обновления» section is the first section, above «Перед началом работы»", async () => {
+  const { window } = await boot();
+  const sections = window.document.querySelectorAll("#settingsOverlay .modal-sec");
+  assert.match(sections[0].querySelector("h3").textContent, /^Обновления/);
 });
 
 test("Обновления: install button appears (enabled) only once hasUpdate is true in a packaged app", async () => {

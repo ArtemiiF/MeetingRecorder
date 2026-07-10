@@ -290,6 +290,18 @@
       </div>
 
       <section class="modal-sec">
+        <h3>Обновления <button id="updateCheckBtn" class="btn small">⟳ Проверить обновления</button></h3>
+        <div id="updateStatusRow" class="pf-row"></div>
+        <div class="out-row">
+          <button id="updateInstallBtn" class="btn small hidden">⬇ Скачать и установить</button>
+          <button id="updateCancelBtn" class="btn small danger hidden">Отменить</button>
+          <span id="updateInstallStatus" class="hint"></span>
+        </div>
+        <p id="updateDevHint" class="hint hidden">Установка обновлений доступна только в собранном приложении — в режиме разработки только проверка.</p>
+        <p class="hint">После обновления macOS может заново спросить разрешения (ad-hoc подпись меняется между сборками).</p>
+      </section>
+
+      <section class="modal-sec">
         <h3>Перед началом работы</h3>
         <ol class="setup-steps">
           <li><b>Запусти LM Studio</b> и загрузи модель — нужна для сводок, заголовков и PARA-разбора (сервер на <code>:1234</code>).</li>
@@ -307,9 +319,9 @@
           <input type="text" id="authorName" placeholder="Автор" />
         </label>
         <label>HF-токен (для диаризации, хранится локально)
-          <input type="password" id="hfToken" placeholder="hf_…  — пусто: спикеров определит LLM" />
+          <input type="password" id="hfToken" placeholder="hf_…  — пусто: спикеры по таймкодам, без диаризации" />
         </label>
-        <p class="hint">Нужен только для имён спикеров. <a href="#" id="hfHelpLink">Где взять токен?</a> — создай токен типа Read и прими условия моделей pyannote.</p>
+        <p class="hint">Нужен для диаризации (разделения записи на спикеров); дальше LLM пробует подставить их реальные имена по тексту. <a href="#" id="hfHelpLink">Где взять токен?</a> — создай токен типа Read и прими условия моделей pyannote.</p>
         <p id="tokenWarn" class="warn-text" style="display:none">⚠️ Системный keychain недоступен — токен хранится в обратимом виде (base64), не зашифрован.</p>
       </section>
 
@@ -355,18 +367,6 @@
           <button id="modelsDownloadMissing" class="btn small hidden">⬇ Скачать недостающие</button>
           <button id="modelsCancelBtn" class="btn small danger hidden">Отменить</button>
         </div>
-      </section>
-
-      <section class="modal-sec">
-        <h3>Обновления <button id="updateCheckBtn" class="btn small">⟳ Проверить обновления</button></h3>
-        <div id="updateStatusRow" class="pf-row"></div>
-        <div class="out-row">
-          <button id="updateInstallBtn" class="btn small hidden">⬇ Скачать и установить</button>
-          <button id="updateCancelBtn" class="btn small danger hidden">Отменить</button>
-          <span id="updateInstallStatus" class="hint"></span>
-        </div>
-        <p id="updateDevHint" class="hint hidden">Установка обновлений доступна только в собранном приложении — в режиме разработки только проверка.</p>
-        <p class="hint">После обновления macOS может заново спросить разрешения (ad-hoc подпись меняется между сборками).</p>
       </section>
 
       <section class="modal-sec">
