@@ -2259,6 +2259,105 @@ def cmd_classify(note_path, existing_json=""):
         emit("error", msg=f"Классификация не удалась: {e}")
 
 
+# Fixed glossary-category buckets ("папочки") for the Словарь tab's «Мои» section —
+# a small FIXED set (not free-form tags), matching the Otter-style precedent behind
+# this feature. Provisional taxonomy: derived from the owner's own examples (имена →
+# Люди, технические → Термины/Продукты и инструменты); "кулинария" wasn't promoted to
+# its own bucket — Другое catches whatever doesn't fit. Kept in sync BY HAND with the
+# identical JS list in renderer.js (GLOSSARY_CATEGORIES) — the two never share a
+# runtime, so there is no single source of truth to import from here.
+GLOSSARY_TERM_CATEGORIES = ("Люди", "Продукты и инструменты", "Термины", "Другое")
+GLOSSARY_TERM_CATEGORY_OTHER = "Другое"
+
+
+def cmd_classify_terms(terms_file, fast_model=""):
+    """LLM pass that sorts a batch of "Мои" glossary terms into the fixed category
+    buckets (see GLOSSARY_TERM_CATEGORIES) for the Словарь tab's «Разложить по
+    категориям» button. terms_file: path to a JSON list of terms (as typed into the
+    glossary, not lowercased). Emits `classified-terms` with `categories`, a
+    {term_lower: category} map — same shape/casing as the renderer's persisted
+    state.glossaryCategories, so the caller can merge it straight in.
+
+    Strict code-gate on the LLM's answer (mirrors suggest_glossary_terms's own
+    invention-guard):
+      - a returned key that isn't (case-insensitively) one of the INPUT terms is
+        dropped outright — the model doesn't get to invent/rename terms;
+      - a category outside the fixed set is coerced to «Другое» rather than kept
+        verbatim or dropped, so a wobbly LLM answer never crashes the batch.
+
+    Degrades to an honest `error` event (never raises) on: unreadable/malformed
+    terms_file, LM Studio unreachable, non-200, empty reply, or a reply with no
+    parseable JSON object — mirrors suggest_glossary_terms's "LM down → log and
+    return safely" pattern, adapted to this command's own event protocol."""
+    import re
+    import requests
+    try:
+        raw = Path(terms_file).read_text(encoding="utf-8")
+        terms = json.loads(raw)
+        if not isinstance(terms, list):
+            raise ValueError("terms file must contain a JSON list")
+    except Exception as e:
+        emit("error", msg=f"Не прочитал файл терминов: {e}")
+        return
+
+    terms = [str(t).strip() for t in terms if str(t).strip()]
+    if not terms:
+        emit("classified-terms", categories={})
+        return
+    valid_lower = {t.lower() for t in terms}
+
+    try:
+        payload = {
+            "messages": [
+                {"role": "system", "content":
+                    "Ты раскладываешь термины словаря по категориям для распознавания речи. "
+                    "Категории: Люди (имена людей), Продукты и инструменты (названия "
+                    "продуктов/инструментов/компаний), Термины (доменные/технические термины), "
+                    "Другое (всё остальное). Классифицируй ТОЛЬКО термины из списка — не "
+                    "выдумывай новые и не переименовывай их. Ответь строго JSON-объектом "
+                    '{"термин": "категория"}, без пояснений и без markdown.'},
+                {"role": "user", "content": "ТЕРМИНЫ:\n" + ", ".join(terms)},
+            ],
+            "temperature": 0.1, "max_tokens": 2500,
+        }
+        if fast_model:
+            payload["model"] = fast_model
+        resp = requests.post("http://localhost:1234/v1/chat/completions", json=payload, timeout=120)
+        if resp.status_code != 200:
+            emit("error", msg=f"LM Studio HTTP {resp.status_code} — разбор по категориям недоступен")
+            return
+        msg = (resp.json().get("choices") or [{}])[0].get("message", {})
+        content = (msg.get("content") or "") or (msg.get("reasoning_content") or "")
+        if not content.strip():
+            emit("error", msg="LLM не вернул ответ — разбор по категориям недоступен")
+            return
+    except Exception as e:
+        emit("error", msg=f"LLM недоступен — разбор по категориям недоступен: {e}")
+        return
+
+    m = re.search(r"\{.*\}", content, re.S)
+    if not m:
+        emit("error", msg="LLM вернул не-JSON ответ — разбор по категориям недоступен")
+        return
+    try:
+        parsed = json.loads(m.group(0))
+    except Exception:
+        emit("error", msg="LLM вернул некорректный JSON — разбор по категориям недоступен")
+        return
+    if not isinstance(parsed, dict):
+        emit("error", msg="LLM вернул не объект — разбор по категориям недоступен")
+        return
+
+    result = {}
+    for term, cat in parsed.items():
+        low = str(term).strip().lower()
+        if low not in valid_lower:
+            continue  # hard gate: LLM invented/renamed a term not in the input batch
+        cat = str(cat).strip()
+        result[low] = cat if cat in GLOSSARY_TERM_CATEGORIES else GLOSSARY_TERM_CATEGORY_OTHER
+    emit("classified-terms", categories=result)
+
+
 def cmd_extract(note_path):
     """Distil a meeting note into structured knowledge sections (темы / факты /
     обсуждения / инсайты / договорённости / прочее) that get appended into a living
@@ -3083,6 +3182,10 @@ def main():
     p_ext = sub.add_parser("extract")
     p_ext.add_argument("--note", required=True)
 
+    p_clst = sub.add_parser("classify-terms")
+    p_clst.add_argument("--terms-file", dest="terms_file", required=True)
+    p_clst.add_argument("--fast-model", dest="fast_model", default="")
+
     p_rec = sub.add_parser("record")  # microphone only
     p_rec.add_argument("--out", required=True)
     p_rec.add_argument("--device", type=int, default=None)
@@ -3152,6 +3255,8 @@ def main():
         cmd_classify(args.note, args.existing)
     elif args.cmd == "extract":
         cmd_extract(args.note)
+    elif args.cmd == "classify-terms":
+        cmd_classify_terms(args.terms_file, args.fast_model)
     elif args.cmd == "history":
         cmd_history(args.out_dir, args.db, args.pending_file)
     elif args.cmd == "record":

@@ -40,6 +40,7 @@ async function boot(apiOverrides = {}) {
     readNote: async () => '---\ntitle: "T"\n---\n\n## Резюме\n\nтекст\n\n**[Спикер 1]**: привет',
     paraCreateVault: async () => ({ ok: true }),
     paraClassify: async () => ({ category: "projects", project: "P" }),
+    classifyGlossaryTerms: async () => ({ categories: {} }),
     paraFile: async () => ({ ok: true }),
     paraTree: async () => [],
     pickAudio: async () => null,
@@ -1748,6 +1749,168 @@ test("glossaryUsage is forwarded to processAudio when running", async () => {
   await tick(window);
   assert.ok(sent, "processAudio was not called");
   assert.deepEqual(sent.glossaryUsage, { "иван петров": 7 });
+});
+
+// ── glossary: "Мои" categories (V2 — «разбить по папочкам») ────────────────
+// NB: test terms deliberately avoid every word in DEFAULT_GLOSSARY (e.g. Kafka,
+// ClickHouse, GitLab, Notion are ALL default terms and would land in «Стандартные»,
+// not «Мои») — "Иван Петров"/"Mindbox"/"Плов"/"Asana"/"Trello" are all custom.
+test("«Мои» terms group into fixed category subheaders (name + count); a term with no assigned category lands under «Другое»", async () => {
+  const { $, window } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru",
+      glossary: "Иван Петров, Mindbox, Плов",
+      glossaryCategories: { "иван петров": "Люди", "mindbox": "Продукты и инструменты" },
+    }),
+  });
+  await tick(window);
+  const mine = $("glossaryChipsMine");
+  const headers = Array.from(mine.querySelectorAll(".glossary-category-header")).map((el) => el.textContent.trim());
+  assert.deepEqual(headers, ["Люди 1", "Продукты и инструменты 1", "Другое 1"],
+    "only categories with ≥1 shown term render a subheader, in the fixed GLOSSARY_CATEGORIES order");
+  const chips = Array.from(mine.querySelectorAll(".chip-text")).map((el) => el.textContent);
+  assert.deepEqual(chips, ["Иван Петров", "Mindbox", "Плов"], "«Плов» has no glossaryCategories entry → falls into «Другое»");
+});
+
+test("an unrecognized/stale category value in glossaryCategories still resolves to «Другое» rather than rejecting the term", async () => {
+  const { $, window } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru",
+      glossary: "Mindbox",
+      glossaryCategories: { "mindbox": "Кулинария" }, // not one of the fixed buckets
+    }),
+  });
+  await tick(window);
+  const headers = Array.from($("glossaryChipsMine").querySelectorAll(".glossary-category-header")).map((el) => el.textContent.trim());
+  assert.deepEqual(headers, ["Другое 1"]);
+});
+
+test("the live filter narrows terms within every «Мои» category group, and each subheader's count follows the filter", async () => {
+  const { $, window } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru",
+      glossary: "Иван Петров, Анна Смирнова, Asana, Trello",
+      glossaryCategories: {
+        "иван петров": "Люди", "анна смирнова": "Люди",
+        "asana": "Продукты и инструменты", "trello": "Продукты и инструменты",
+      },
+    }),
+  });
+  await tick(window);
+  $("glossaryFilter").value = "иван";
+  $("glossaryFilter").dispatchEvent(new window.Event("input"));
+  await tick(window);
+  const mine = $("glossaryChipsMine");
+  const headers = Array.from(mine.querySelectorAll(".glossary-category-header")).map((el) => el.textContent.trim());
+  assert.deepEqual(headers, ["Люди 1"], "«Продукты и инструменты» has zero matches under the filter → subheader hidden entirely");
+  const chips = Array.from(mine.querySelectorAll(".chip-text")).map((el) => el.textContent);
+  assert.deepEqual(chips, ["Иван Петров"]);
+});
+
+test("changing a chip's category via its per-chip select re-groups it under the new subheader and persists glossaryCategories", async () => {
+  let saved = null;
+  const { $, window } = await boot({
+    getPresets: async () => ({ presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru", glossary: "Плов" }),
+    savePresets: async (data) => { saved = data; return true; },
+  });
+  await tick(window);
+  let headers = Array.from($("glossaryChipsMine").querySelectorAll(".glossary-category-header")).map((el) => el.textContent.trim());
+  assert.deepEqual(headers, ["Другое 1"], "starts uncategorized");
+  const select = $("glossaryChipsMine").querySelector(".chip-category");
+  select.value = "Термины";
+  select.dispatchEvent(new window.Event("change"));
+  await tick(window);
+  headers = Array.from($("glossaryChipsMine").querySelectorAll(".glossary-category-header")).map((el) => el.textContent.trim());
+  assert.deepEqual(headers, ["Термины 1"]);
+  assert.deepEqual(saved.glossaryCategories, { "плов": "Термины" });
+});
+
+test("«Стандартные» chips never render a per-chip category select (V1 flat behaviour unchanged)", async () => {
+  const { $, window } = await boot({
+    getPresets: async () => ({ presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru", glossary: "Mindbox, ClickHouse" }),
+  });
+  await tick(window);
+  $("glossaryDefaultToggle").click();
+  await tick(window);
+  const defaultBox = $("glossaryChips").querySelector(".glossary-default-chips");
+  assert.equal(defaultBox.querySelectorAll(".chip-category").length, 0);
+  assert.equal($("glossaryChipsMine").querySelectorAll(".chip-category").length, 1, "only the «Мои» chip (Mindbox) gets one");
+});
+
+test("terms added via «Импорт/экспорт текстом» paste have no glossaryCategories entry and render under «Другое»", async () => {
+  const { $, window } = await boot({
+    getPresets: async () => ({ presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru", glossary: "" }),
+  });
+  await tick(window);
+  $("glossaryToggleText").click();
+  $("glossary").value = "Иван Петров, Mindbox";
+  $("glossary").dispatchEvent(new window.Event("change"));
+  await tick(window);
+  const headers = Array.from($("glossaryChipsMine").querySelectorAll(".glossary-category-header")).map((el) => el.textContent.trim());
+  assert.deepEqual(headers, ["Другое 2"]);
+});
+
+// ── glossary: "Разложить по категориям" (auto-classify via backend LLM call) ─
+test("«Разложить по категориям» sends only «Мои» terms, merges the validated result, and persists", async () => {
+  let sentTerms = null;
+  let saved = null;
+  const { $, window } = await boot({
+    getPresets: async () => ({
+      // "деплой" is a DEFAULT_GLOSSARY term → «Стандартные» — must NOT be sent to classify.
+      presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru", glossary: "Иван Петров, Mindbox, деплой",
+    }),
+    savePresets: async (data) => { saved = data; return true; },
+    classifyGlossaryTerms: async (terms) => {
+      sentTerms = terms;
+      return { categories: { "иван петров": "Люди", "mindbox": "Продукты и инструменты", "выдуманный": "Люди" } };
+    },
+  });
+  await tick(window);
+  $("glossaryClassifyBtn").click();
+  await tick(window);
+  assert.deepEqual(sentTerms, ["Иван Петров", "Mindbox"], "only «Мои» terms are sent — «Стандартные» stays out of the batch");
+  const headers = Array.from($("glossaryChipsMine").querySelectorAll(".glossary-category-header")).map((el) => el.textContent.trim());
+  assert.deepEqual(headers, ["Люди 1", "Продукты и инструменты 1"],
+    "«выдуманный» wasn't part of the batch (invention) — the renderer's own gate must drop it too");
+  assert.deepEqual(saved.glossaryCategories, { "иван петров": "Люди", "mindbox": "Продукты и инструменты" });
+});
+
+test("«Разложить по категориям» coerces an out-of-set category from the backend to «Другое» instead of trusting it verbatim", async () => {
+  const { $, window } = await boot({
+    getPresets: async () => ({ presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru", glossary: "Mindbox" }),
+    classifyGlossaryTerms: async () => ({ categories: { "mindbox": "Кулинария" } }),
+  });
+  await tick(window);
+  $("glossaryClassifyBtn").click();
+  await tick(window);
+  const headers = Array.from($("glossaryChipsMine").querySelectorAll(".glossary-category-header")).map((el) => el.textContent.trim());
+  assert.deepEqual(headers, ["Другое 1"]);
+});
+
+test("«Разложить по категориям» degrades to an honest hint (no crash, no mutation) when the backend reports an error", async () => {
+  const { $, window } = await boot({
+    getPresets: async () => ({ presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru", glossary: "Mindbox" }),
+    classifyGlossaryTerms: async () => ({ error: "LM Studio HTTP 503 — разбор по категориям недоступен" }),
+  });
+  await tick(window);
+  $("glossaryClassifyBtn").click();
+  await tick(window);
+  assert.match($("glossaryHint").textContent, /Не удалось разложить по категориям/);
+  const headers = Array.from($("glossaryChipsMine").querySelectorAll(".glossary-category-header")).map((el) => el.textContent.trim());
+  assert.deepEqual(headers, ["Другое 1"], "stays uncategorized — no partial/garbage mutation on failure");
+});
+
+test("«Разложить по категориям» is a no-op with a hint (not a crash) when there are no «Мои» terms to classify", async () => {
+  let called = false;
+  const { $, window } = await boot({
+    getPresets: async () => ({ presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru", glossary: "деплой" }), // «Стандартные» only
+    classifyGlossaryTerms: async () => { called = true; return { categories: {} }; },
+  });
+  await tick(window);
+  $("glossaryClassifyBtn").click();
+  await tick(window);
+  assert.equal(called, false, "backend must not be called with an empty batch");
+  assert.match($("glossaryHint").textContent, /Нет своих терминов/);
 });
 
 // ── glossary: «Предложения» inbox (auto-suggested terms from processing) ────
@@ -3815,6 +3978,15 @@ test("main.js: process-audio writes glossaryUsage to a temp JSON file and passes
   assert.match(processAudio, /--glossary-usage-file/);
   // cleaned up on close, mirroring promptFile's own unlink right above it.
   assert.match(processAudio, /if \(glossaryUsageFile\) \{ try \{ fs\.unlinkSync\(glossaryUsageFile\); \} catch \{\} \}/);
+});
+
+test("main.js: classify-glossary-terms writes the batch to a temp JSON file, calls backend's classify-terms subcommand, forwards --fast-model, and cleans up on close", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const handler = mainSrc.match(/ipcMain\.handle\("classify-glossary-terms"[\s\S]*?\n\}\);/)[0];
+  assert.match(handler, /"classify-terms", "--terms-file", termsFile/);
+  assert.match(handler, /if \(fastModel\) args\.push\("--fast-model", fastModel\)/);
+  assert.match(handler, /ev\.event === "classified-terms"/);
+  assert.match(handler, /try \{ fs\.unlinkSync\(termsFile\); \} catch \{\}/);
 });
 
 test("main.js: download-models refuses while an update is in flight (updateProc)", () => {

@@ -36,6 +36,7 @@ contextBridge.exposeInMainWorld("api", {
   paraCreateVault: (cfg) => ipcRenderer.invoke("para-create-vault", cfg),
   paraTree: (root) => ipcRenderer.invoke("para-tree", root),
   paraClassify: (arg) => ipcRenderer.invoke("para-classify", arg),
+  classifyGlossaryTerms: (terms, fastModel) => ipcRenderer.invoke("classify-glossary-terms", { terms, fastModel }),
   paraExtract: (notePath) => ipcRenderer.invoke("para-extract", notePath),
   paraFile: (args) => ipcRenderer.invoke("para-file", args),
   paraReindex: (root) => ipcRenderer.invoke("para-reindex", { root }),
