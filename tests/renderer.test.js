@@ -608,6 +608,70 @@ test("history filters by template and by date range", async () => {
   assert.ok($("historyList").textContent.includes("C"));
 });
 
+// ── История date-group headers (owner: chronological log + "N per day" without a
+// calendar) — grouped over the FILTERED (shown) list, non-interactive dividers ─────────
+test("history rail: date-group headers separate days, with per-day counts", async () => {
+  const { window, $ } = await boot({
+    listHistory: async () => [
+      { name: "2026-07-08-190000", title: "C", language: "ru", note: "/c.md", audio: null },
+      { name: "2026-07-08-184655", title: "B", language: "ru", note: "/b.md", audio: null },
+      { name: "2026-07-07-120000", title: "A", language: "ru", note: "/a.md", audio: null },
+    ],
+  });
+  window.document.querySelector('.topbtn[data-view="history"]').click();
+  await tick(window);
+  const headers = [...$("historyList").querySelectorAll(".rail-date-header")].map((h) => h.textContent);
+  assert.deepEqual(headers, ["8 июля · 2", "7 июля · 1"]);
+});
+
+test("history rail: date-group headers carry no idx and are not clickable", async () => {
+  const { window, $ } = await boot({
+    listHistory: async () => [
+      { name: "2026-07-08-190000", title: "C", language: "ru", note: "/c.md", audio: null },
+    ],
+  });
+  window.document.querySelector('.topbtn[data-view="history"]').click();
+  await tick(window);
+  const header = $("historyList").querySelector(".rail-date-header");
+  assert.ok(header);
+  assert.equal(header.dataset.idx, undefined);
+  const beforeNoteView = $("noteView").innerHTML;
+  header.click(); await tick(window);
+  assert.equal($("noteView").innerHTML, beforeNoteView); // divider click must not open a note
+});
+
+test("history rail: date-group counts follow active filters, not raw per-day totals", async () => {
+  const { window, $ } = await boot({
+    listHistory: async () => [
+      { name: "2026-07-08-190000", title: "Релиз", language: "ru", note: "/c.md", audio: null },
+      { name: "2026-07-08-184655", title: "Интервью", language: "en", note: "/b.md", audio: null },
+    ],
+  });
+  window.document.querySelector('.topbtn[data-view="history"]').click();
+  await tick(window);
+  assert.equal($("historyList").querySelector(".rail-date-header").textContent, "8 июля · 2");
+  $("historyLang").value = "en";
+  $("historyLang").dispatchEvent(new window.Event("change"));
+  const headers = $("historyList").querySelectorAll(".rail-date-header");
+  assert.equal(headers.length, 1);
+  assert.equal(headers[0].textContent, "8 июля · 1");
+});
+
+test("history rail: pending recordings stay above date-group headers, ungrouped", async () => {
+  const { window, $, handlers } = await boot({
+    listHistory: async () => [
+      { name: "2026-07-08-190000", title: "C", language: "ru", note: "/c.md", audio: null },
+    ],
+  });
+  handlers.record({ event: "recorded", id: "r1", name: "Запись 1", file: "/tmp/mixed.wav", mic: "/tmp/m.wav", system: null, tracks: 1 });
+  window.document.querySelector('.topbtn[data-view="history"]').click();
+  await tick(window);
+  const children = [...$("historyList").children];
+  const pendingIdx = children.findIndex((c) => c.classList.contains("pending"));
+  const headerIdx = children.findIndex((c) => c.classList.contains("rail-date-header"));
+  assert.ok(pendingIdx !== -1 && headerIdx !== -1 && pendingIdx < headerIdx);
+});
+
 test("note view shows the title as a heading", async () => {
   const { window, $ } = await boot({
     listHistory: async () => [{ name: "2026-01-01", title: "Синк по релизу", language: "ru", note: "/n.md", audio: null }],

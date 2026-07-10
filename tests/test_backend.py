@@ -441,6 +441,86 @@ def test_index_reconcile_add_then_drop(tmp_path):
     conn.close()
 
 
+# ── _reconcile with vault_root — История survives PARA filing (moving the note out of
+# out_dir) instead of dropping it once _reconcile no longer finds it there ────────────
+def test_reconcile_vault_root_tracks_note_moved_out_of_out_dir(tmp_path):
+    vault = tmp_path / "vault"
+    out = vault / "Meetings"; out.mkdir(parents=True)
+    note = out / "meeting-2026-07-08-184655.md"
+    note.write_text('---\ntitle: "A"\ntemplate: "Митинг"\n---\n# x', encoding="utf-8")
+    db = str(tmp_path / "i.db")
+    conn = backend._db_connect(db)
+    backend._reconcile(conn, str(out), str(vault))
+    items = backend._db_list(conn)
+    assert len(items) == 1 and items[0]["note"] == str(note)
+    # PARA filing: move the note into a vault subdir outside out_dir
+    archive = vault / "Archives" / "Исходные встречи"; archive.mkdir(parents=True)
+    new_path = archive / note.name
+    note.rename(new_path)
+    backend._reconcile(conn, str(out), str(vault))
+    items = backend._db_list(conn)
+    conn.close()
+    assert len(items) == 1  # ONE row survives the move, not a duplicate + a dangling old row
+    assert items[0]["note"] == str(new_path)
+    assert items[0]["title"] == "A"
+
+
+def test_reconcile_vault_root_does_not_duplicate_note_still_in_out_dir(tmp_path):
+    # out_dir nested inside vault_root — the recursive vault walk would re-find the same
+    # physical file the plain out_dir scan already found; stamp-identity dedup (plus the
+    # skip_dir prune) must collapse that to a single row, not two.
+    vault = tmp_path / "vault"
+    out = vault / "Meetings"; out.mkdir(parents=True)
+    (out / "meeting-2026-07-08-184655.md").write_text('---\ntitle: "A"\n---\n# x', encoding="utf-8")
+    db = str(tmp_path / "i.db")
+    conn = backend._db_connect(db)
+    backend._reconcile(conn, str(out), str(vault))
+    items = backend._db_list(conn)
+    conn.close()
+    assert len(items) == 1
+
+
+def test_reconcile_vault_root_still_drops_note_deleted_from_disk(tmp_path):
+    vault = tmp_path / "vault"
+    out = vault / "Meetings"; out.mkdir(parents=True)
+    archive = vault / "Archives"; archive.mkdir()
+    note = archive / "meeting-2026-07-08-184655.md"
+    note.write_text('---\ntitle: "A"\n---\n# x', encoding="utf-8")
+    db = str(tmp_path / "i.db")
+    conn = backend._db_connect(db)
+    backend._reconcile(conn, str(out), str(vault))
+    assert len(backend._db_list(conn)) == 1
+    note.unlink()  # deleted straight from disk, not moved — md is source of truth, must drop
+    backend._reconcile(conn, str(out), str(vault))
+    items = backend._db_list(conn)
+    conn.close()
+    assert items == []
+
+
+def test_reconcile_vault_root_skips_hidden_dirs(tmp_path):
+    vault = tmp_path / "vault"
+    out = vault / "Meetings"; out.mkdir(parents=True)
+    hidden = vault / ".obsidian"; hidden.mkdir()
+    (hidden / "meeting-2026-07-08-184655.md").write_text('---\ntitle: "Hidden"\n---\n# x', encoding="utf-8")
+    db = str(tmp_path / "i.db")
+    conn = backend._db_connect(db)
+    backend._reconcile(conn, str(out), str(vault))
+    items = backend._db_list(conn)
+    conn.close()
+    assert items == []  # a note inside a hidden dir (.obsidian/.trash/...) must never surface
+
+
+def test_cmd_history_passes_vault_root_through_to_reconcile(tmp_path):
+    vault = tmp_path / "vault"
+    out = vault / "Meetings"; out.mkdir(parents=True)
+    archive = vault / "Archives"; archive.mkdir()
+    (archive / "meeting-2026-07-08-184655.md").write_text('---\ntitle: "Filed"\n---\n# x', encoding="utf-8")
+    db = str(tmp_path / "i.db")
+    events = capture(backend.cmd_history, str(out), db, None, str(vault))
+    items = [e for e in events if e["event"] == "history"][0]["items"]
+    assert len(items) == 1 and items[0]["title"] == "Filed"
+
+
 def test_db_list_orders_by_stamp_not_mtime(tmp_path):
     # Owner complaint: rail order silently reshuffles after a post-hoc edit (e.g. speaker
     # rename) bumps a note's mtime. Order must follow the recording-time `stamp`, not mtime.
