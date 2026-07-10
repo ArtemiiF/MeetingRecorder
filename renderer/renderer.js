@@ -28,6 +28,7 @@ const state = {
   language: "ru",
   authorName: "Автор",
   fastModel: "",
+  mainModel: "",
   glossary: "",
   glossarySuggestions: [], // pending candidates from the "suggest" pipeline stage — accept/dismiss
   glossaryDismissed: [],   // dismissed candidates (original case; compared lowercased) — never re-suggested
@@ -669,6 +670,7 @@ async function init() {
   state.language = (data.language === "auto" ? "" : data.language) || "ru";
   state.authorName = data.authorName || "Автор";
   state.fastModel = data.fastModel || "";
+  state.mainModel = data.mainModel || "";
   state.glossary = data.glossary || DEFAULT_GLOSSARY;
   state.glossarySuggestions = data.glossarySuggestions || [];
   state.glossaryDismissed = data.glossaryDismissed || [];
@@ -680,6 +682,7 @@ async function init() {
   $("language").value = state.language;
   $("authorName").value = state.authorName;
   $("fastModel").value = state.fastModel;
+  $("mainModel").value = state.mainModel;
   $("glossary").value = state.glossary;
   renderGlossaryChips();
   renderGlossarySuggestions();
@@ -782,6 +785,7 @@ async function persistPresets() {
     language: state.language,
     authorName: state.authorName,
     fastModel: state.fastModel,
+    mainModel: state.mainModel,
     glossary: state.glossary,
     glossarySuggestions: state.glossarySuggestions,
     glossaryDismissed: state.glossaryDismissed,
@@ -814,6 +818,37 @@ $("fastModel").addEventListener("change", (e) => {
   state.fastModel = e.target.value || "";
   persistPresets();
 });
+
+$("mainModel").addEventListener("change", (e) => {
+  state.mainModel = e.target.value || "";
+  persistPresets();
+});
+
+// LM Studio model inventory for the fastModel/mainModel <datalist> suggestions — fetched
+// fresh every time the settings overlay opens (never polled). Registered as its OWN
+// settingsOpen click listener rather than folded into openSettings() itself, so this
+// stays clear of that function's body while other in-flight branches touch it.
+// list-lm-models degrades to [] on any LM Studio failure (see main.js) — an empty
+// datalist just means no suggestions; both inputs stay plain, freely-typable text fields.
+async function populateLmModelOptions() {
+  let ids;
+  try {
+    ids = await window.api.listLmModels();
+  } catch {
+    ids = [];
+  }
+  ids = ids || [];
+  for (const listId of ["fastModelOptions", "mainModelOptions"]) {
+    const dl = $(listId);
+    dl.innerHTML = "";
+    ids.forEach((id) => {
+      const o = document.createElement("option");
+      o.value = id;
+      dl.appendChild(o);
+    });
+  }
+}
+$("settingsOpen").addEventListener("click", populateLmModelOptions);
 
 // Textarea accepts either a comma- OR newline-separated paste ("Импорт/экспорт
 // текстом") — parseGlossaryTerms already splits on both, and routing through
@@ -1572,6 +1607,7 @@ async function startProcessing(fresh, item, override) {
     glossary: state.glossary,
     glossaryUsage: state.glossaryUsage,
     fastModel: state.fastModel,
+    mainModel: state.mainModel,
     summarize: !$("noSummary").checked,
     template: override ? override.template : (activePreset.name || ""),
     // auto-«Я»: only meaningful for a record-sourced mic/system pair — import mode
@@ -2225,7 +2261,7 @@ async function runParaSearch() {
   // when the caller inspects it (the live array gets the assistant reply appended later).
   let res;
   try {
-    res = await window.api.paraSearch(state.para.root, chatMessages.slice());
+    res = await window.api.paraSearch(state.para.root, chatMessages.slice(), state.mainModel);
   } catch (e) {
     typingEl.remove();
     const errMsg = "❌ " + (e.message || String(e));
@@ -2364,7 +2400,7 @@ $("paraClassifyAll").addEventListener("click", async () => {
     paraLog(`→ ${name}`);
     setRowProcessing(row, true);
     try {
-      const r = await window.api.paraClassify({ note: it.note, root: state.para.root, folders: state.para.folders });
+      const r = await window.api.paraClassify({ note: it.note, root: state.para.root, folders: state.para.folders, mainModel: state.mainModel });
       if (!r || r.error || !r.category) {
         paraLog(`   ✗ не классифицирована: ${(r && r.error) || "категория не определена"}`);
         errors++;

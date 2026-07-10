@@ -50,6 +50,7 @@ async function boot(apiOverrides = {}) {
     removePendingRecording: async () => ({ ok: true }),
     processAudio: async () => ({ ok: true }),
     cancelProcess: async () => ({ ok: true }),
+    listLmModels: async () => ([]),
     getModels: async () => ([
       { id: "whisper", label: "MLX Whisper (large-v3-turbo)", size_mb: 1500, needs_token: false, cached: true, locked: false },
       { id: "vad", label: "Silero VAD", size_mb: 35, needs_token: false, cached: false, locked: false },
@@ -1368,6 +1369,124 @@ test("fastModel is forwarded to processAudio when running", async () => {
   assert.equal(sent.fastModel, "google/gemma-3-4b");
 });
 
+// ── mainModel setting ────────────────────────────────────────────────────────
+
+test("mainModel loads from presets into state and the settings input", async () => {
+  const { $, window } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru", mainModel: "qwen/qwen3.5-9b",
+    }),
+  });
+  await tick(window);
+  assert.equal($("mainModel").value, "qwen/qwen3.5-9b");
+});
+
+test("mainModel defaults to '' when absent from presets", async () => {
+  const { $, window } = await boot({
+    getPresets: async () => ({ presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru" }),
+  });
+  await tick(window);
+  assert.equal($("mainModel").value, "");
+});
+
+test("changing mainModel input persists with mainModel in savePresets payload", async () => {
+  let saved = null;
+  const { $, window } = await boot({ savePresets: async (data) => { saved = data; return true; } });
+  await tick(window);
+  $("mainModel").value = "qwen/qwen3.5-9b";
+  $("mainModel").dispatchEvent(new window.Event("change"));
+  await tick(window);
+  assert.ok(saved, "savePresets was not called");
+  assert.equal(saved.mainModel, "qwen/qwen3.5-9b");
+});
+
+test("mainModel is forwarded to processAudio when running", async () => {
+  let sent = null;
+  const { window, $, handlers } = await boot({
+    getPresets: async () => ({
+      presets: [{ name: "P", prompt: "x" }], defaultOutDir: "/tmp", hfToken: "", language: "ru",
+      mainModel: "qwen/qwen3.5-9b",
+    }),
+    processAudio: async (opts) => { sent = opts; return { ok: true }; },
+  });
+  await tick(window);
+  handlers.record({ event: "recorded", id: "r1", name: "Запись 1", file: "/tmp/mixed.wav", mic: "/tmp/m.wav", system: null, tracks: 1 });
+  $("historyList").querySelector(".pending-play-btn").click();
+  await tick(window);
+  assert.ok(sent, "processAudio was not called");
+  assert.equal(sent.mainModel, "qwen/qwen3.5-9b");
+});
+
+test("mainModel is forwarded to paraClassify during classify-all", async () => {
+  let capturedArg = null;
+  const { window, $ } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru", mainModel: "qwen/qwen3.5-9b",
+      para: { root: "/v", folders: { projects: "Projects", areas: "Areas", resources: "Resources", archives: "Archives" } },
+    }),
+    listHistory: async () => [{ name: "2026-01-01", title: "T", note: "/n.md", audio: null }],
+    paraClassify: async (arg) => { capturedArg = arg; return { category: "projects", project: "P" }; },
+    paraFile: async () => ({ ok: true }),
+  });
+  window.document.querySelector('.topbtn[data-view="para"]').click();
+  await tick(window);
+  $("paraClassifyAll").click();
+  await tick(window); await tick(window); await tick(window); await tick(window);
+  assert.ok(capturedArg, "paraClassify was not called");
+  assert.equal(capturedArg.mainModel, "qwen/qwen3.5-9b");
+});
+
+test("mainModel is forwarded to paraSearch when asking a question", async () => {
+  let capturedMainModel;
+  const { window, $ } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru", mainModel: "qwen/qwen3.5-9b",
+      para: { root: "/v", folders: { projects: "Projects", areas: "Areas", resources: "Resources", archives: "Archives" } },
+    }),
+    paraSearch: async (_root, _messages, mainModel) => {
+      capturedMainModel = mainModel;
+      return { found: false, answer: "Не нашёл по этому вопросу записей в заметках.", citations: [] };
+    },
+  });
+  window.document.querySelector('.topbtn[data-view="para"]').click();
+  await tick(window);
+  window.document.querySelector('.subbtn[data-sub="search"]').click();
+  await tick(window);
+  $("paraSearchQuery").value = "тест вопрос";
+  $("paraSearchBtn").click(); await tick(window); await tick(window);
+  assert.equal(capturedMainModel, "qwen/qwen3.5-9b");
+});
+
+// ── LM Studio model dropdowns (fastModel/mainModel datalists) ────────────────
+
+test("opening settings populates the fastModel/mainModel datalists from the listLmModels IPC", async () => {
+  const { $, window } = await boot({
+    listLmModels: async () => (["google/gemma-3-4b", "qwen/qwen3.5-9b"]),
+  });
+  await tick(window);
+  assert.equal($("fastModelOptions").children.length, 0, "datalist starts empty");
+  $("settingsOpen").click();
+  await tick(window);
+  const fastOpts = [...$("fastModelOptions").children].map((o) => o.value);
+  const mainOpts = [...$("mainModelOptions").children].map((o) => o.value);
+  assert.deepEqual(fastOpts, ["google/gemma-3-4b", "qwen/qwen3.5-9b"]);
+  assert.deepEqual(mainOpts, ["google/gemma-3-4b", "qwen/qwen3.5-9b"]);
+});
+
+test("listLmModels failure degrades to empty datalists — no crash, inputs stay plain-text usable", async () => {
+  const { $, window } = await boot({
+    listLmModels: async () => { throw new Error("LM Studio unreachable"); },
+  });
+  await tick(window);
+  $("settingsOpen").click();
+  await tick(window);
+  assert.equal($("fastModelOptions").children.length, 0);
+  assert.equal($("mainModelOptions").children.length, 0);
+  // the input itself stays a normal usable text field regardless
+  $("fastModel").value = "typed/manually";
+  assert.equal($("fastModel").value, "typed/manually");
+});
+
 // ── settings overlay: hfToken/authorName/outDir relocation + outDir auto-follow ──
 
 test("openSettings() populates hfToken/authorName/outDir from state and shows the overlay", async () => {
@@ -2395,6 +2514,33 @@ test("main.js: process-audio forwards --fast-model to the backend spawn only whe
   const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
   const processAudio = mainSrc.match(/ipcMain\.handle\("process-audio"[\s\S]*?\n\}\);/)[0];
   assert.match(processAudio, /if \(fastModel\) args\.push\("--fast-model", fastModel\)/);
+});
+
+test("main.js: process-audio forwards --main-model to the backend spawn only when mainModel is non-empty", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const processAudio = mainSrc.match(/ipcMain\.handle\("process-audio"[\s\S]*?\n\}\);/)[0];
+  assert.match(processAudio, /if \(mainModel\) args\.push\("--main-model", mainModel\)/);
+});
+
+test("main.js: para-classify forwards --main-model to the backend spawn only when mainModel is non-empty", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const paraClassify = mainSrc.match(/ipcMain\.handle\("para-classify"[\s\S]*?\n\}\);/)[0];
+  assert.match(paraClassify, /if \(mainModel\) args\.push\("--main-model", mainModel\)/);
+});
+
+test("main.js: para-search forwards --main-model to the backend spawn only when mainModel is non-empty", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const paraSearch = mainSrc.match(/ipcMain\.handle\("para-search"[\s\S]*?\n\}\);/)[0];
+  assert.match(paraSearch, /if \(mainModel\) args\.push\("--main-model", mainModel\)/);
+});
+
+test("main.js: list-lm-models IPC GETs LM Studio's /api/v0/models with a 3s timeout, filters out embeddings, and degrades to [] on failure", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const handler = mainSrc.match(/ipcMain\.handle\("list-lm-models"[\s\S]*?\n\}\);/)[0];
+  assert.match(handler, /localhost:1234\/api\/v0\/models/);
+  assert.match(handler, /setTimeout\(\(\) => ctrl\.abort\(\), 3000\)/);
+  assert.match(handler, /m\.type !== "embeddings"/);
+  assert.match(handler, /catch \{\s*\n\s*return \[\];\s*\n\s*\}/);
 });
 
 // ── setup gate (hard wall) ───────────────────────────────────────────────────

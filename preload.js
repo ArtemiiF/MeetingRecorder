@@ -19,6 +19,7 @@ contextBridge.exposeInMainWorld("api", {
   processAudio: (opts) => ipcRenderer.invoke("process-audio", opts),
   cancelProcess: () => ipcRenderer.invoke("cancel-process"),
   getModels: () => ipcRenderer.invoke("models"),
+  listLmModels: () => ipcRenderer.invoke("list-lm-models"),
   downloadModels: (opts) => ipcRenderer.invoke("download-models", opts),
   redownloadModel: (modelId) => ipcRenderer.invoke("redownload-model", modelId),
   cancelModelDownload: () => ipcRenderer.invoke("cancel-model-download"),
@@ -35,11 +36,13 @@ contextBridge.exposeInMainWorld("api", {
   readNote: (notePath) => ipcRenderer.invoke("read-note", notePath),
   paraCreateVault: (cfg) => ipcRenderer.invoke("para-create-vault", cfg),
   paraTree: (root) => ipcRenderer.invoke("para-tree", root),
+  // arg is either a bare note path (legacy) or { note, root, folders, mainModel } — passed
+  // through as-is; see main.js's para-classify handler for the shape it destructures.
   paraClassify: (arg) => ipcRenderer.invoke("para-classify", arg),
   paraExtract: (notePath) => ipcRenderer.invoke("para-extract", notePath),
   paraFile: (args) => ipcRenderer.invoke("para-file", args),
   paraReindex: (root) => ipcRenderer.invoke("para-reindex", { root }),
-  paraSearch: (root, messages) => ipcRenderer.invoke("para-search", { root, messages }),
+  paraSearch: (root, messages, mainModel) => ipcRenderer.invoke("para-search", { root, messages, mainModel }),
   cancelSearch: () => ipcRenderer.invoke("cancel-search"),
   notifyRecordingState: (recording) => ipcRenderer.send("recording-state", recording),
 
