@@ -390,6 +390,29 @@ ipcMain.handle("preflight", async () => {
   };
 });
 
+// Live LM Studio model inventory for the settings fastModel/mainModel dropdowns —
+// fetched fresh each time the settings overlay opens (renderer's populateLmModelOptions,
+// no polling). /api/v0/models (LM Studio's extended endpoint) carries a "type" field
+// that plain /v1/models lacks, letting us filter out embedding models honestly instead
+// of guessing from the id string. Any failure (LM Studio down, timeout, bad JSON)
+// degrades silently to [] — the settings inputs stay usable as plain text, no error dialog.
+ipcMain.handle("list-lm-models", async () => {
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 3000);
+    const r = await fetch("http://localhost:1234/api/v0/models", { signal: ctrl.signal });
+    clearTimeout(t);
+    if (!r.ok) return [];
+    const data = await r.json();
+    const models = (data && data.data) || [];
+    return models
+      .filter((m) => m && m.type !== "embeddings" && m.id)
+      .map((m) => m.id);
+  } catch {
+    return [];
+  }
+});
+
 // Setup-gate readiness (renderer's #setupGate hard wall) — unlike preflight's
 // whisperCached above, this never spawns pythonBin(): before the backend is
 // installed there may be no working interpreter at all (bare "python3" fallback
@@ -575,7 +598,7 @@ ipcMain.handle("reset-app", async () => {
   try {
     fresh = JSON.parse(fs.readFileSync(PRESETS_EXAMPLE, "utf-8"));
   } catch {
-    fresh = { presets: [], defaultOutDir: DEFAULT_OUT, authorName: "Автор", fastModel: "", glossary: "", language: "ru" };
+    fresh = { presets: [], defaultOutDir: DEFAULT_OUT, authorName: "Автор", fastModel: "", mainModel: "", glossary: "", language: "ru" };
   }
   if (fresh.para) fresh.para.root = "";
   else fresh.para = { root: "", folders: {} };
@@ -827,7 +850,7 @@ function cacheDirFor(audioFile) {
 
 // processing pipeline
 ipcMain.handle("process-audio", async (_e, opts) => {
-  const { audioFile, prompt, diarize, outDir, engine, hfToken, fresh, language, glossary, summarize, template, micFile, systemFile, authorName, origin, fastModel, glossaryUsage } = opts;
+  const { audioFile, prompt, diarize, outDir, engine, hfToken, fresh, language, glossary, summarize, template, micFile, systemFile, authorName, origin, fastModel, mainModel, glossaryUsage } = opts;
   if (procProc) return { ok: false, error: "Обработка уже идёт" };
   if (modelDlProc) return { ok: false, error: "Дождитесь окончания скачивания моделей" };
   // Same reasoning as start-recording's guard above: processing spawns pythonBin(),
@@ -878,6 +901,10 @@ ipcMain.handle("process-audio", async (_e, opts) => {
   // omit the flag entirely, backend.py's --fast-model default ("") preserves today's
   // behaviour (no "model" field sent, LM Studio uses whatever's loaded).
   if (fastModel) args.push("--fast-model", fastModel);
+  // Main model for substantive LLM calls (summary/speaker-inference/actions) — same
+  // omit-when-empty contract as fastModel above (backend.py's --main-model default
+  // ("") preserves today's behaviour, including the reasoning-model summary).
+  if (mainModel) args.push("--main-model", mainModel);
   // Cumulative {termLower: count} from the renderer's presets — same file-based
   // plumbing as --prompt-file (avoids CLI arg length/escaping concerns). Omitted
   // entirely when there's no usage data yet (first-ever run), mirroring fastModel
@@ -1543,9 +1570,14 @@ function cleanupUpdateLeftovers() {
 // at their real chronological position (option c — see HANDOFF/analyzer notes).
 ipcMain.handle("list-history", async (_e, outDir) => {
   const dir = expandHome(outDir) || DEFAULT_OUT;
+  // PARA vault root (if configured) so a note moved out of out_dir by filing still shows
+  // up in История instead of disappearing on the next reconcile — see readParaRoot below.
+  const vaultRoot = readParaRoot();
+  const histArgs = ["history", "--out-dir", dir, "--db", DB_PATH, "--pending-file", PENDING_FILE];
+  if (vaultRoot) histArgs.push("--vault-root", vaultRoot);
   const items = await new Promise((resolve) => {
     let out = [];
-    runBackend(["history", "--out-dir", dir, "--db", DB_PATH, "--pending-file", PENDING_FILE],
+    runBackend(histArgs,
       (ev) => { if (ev.event === "history") out = ev.items; },
       () => resolve(out));
   });
@@ -1632,9 +1664,9 @@ ipcMain.handle("para-tree", async (_e, root) => {
 });
 
 ipcMain.handle("para-classify", async (_e, arg) => {
-  // arg may be a bare note path (legacy) or { note, root, folders }
+  // arg may be a bare note path (legacy) or { note, root, folders, mainModel }
   const notePath = typeof arg === "string" ? arg : arg.note;
-  const { root, folders } = typeof arg === "string" ? {} : arg;
+  const { root, folders, mainModel } = typeof arg === "string" ? {} : arg;
   // gather existing accumulators per category so the LLM can reuse one (anti-fragmentation)
   let existing = "";
   if (root && folders) {
@@ -1651,6 +1683,9 @@ ipcMain.handle("para-classify", async (_e, arg) => {
   }
   const args = ["classify", "--note", notePath];
   if (existing) args.push("--existing", existing);
+  // Main model for this substantive task — same omit-when-empty contract as
+  // process-audio's --main-model above.
+  if (mainModel) args.push("--main-model", mainModel);
   return new Promise((resolve) => {
     let out = null;
     runBackend(args,
@@ -1824,7 +1859,7 @@ ipcMain.handle("para-reindex", async (_e, { root }) => {
   });
 });
 
-ipcMain.handle("para-search", async (_e, { root, messages, query }) => {
+ipcMain.handle("para-search", async (_e, { root, messages, query, mainModel }) => {
   if (searchProc) return { ok: false, error: "Поиск уже идёт" };
   // Accept either {root, messages} (multi-turn) or {root, query} (legacy single-shot).
   // Normalise to --messages form so backend always gets a proper conversation array.
@@ -1839,10 +1874,14 @@ ipcMain.handle("para-search", async (_e, { root, messages, query }) => {
   // keyword-only (FTS) retrieval. Surfaced to the renderer as result.degraded.
   const DEGRADED_LOG_MSG = "Embedding-модель недоступна — поиск только по ключевым словам";
   searchCanceled = false;
+  const args = ["search", "--root", root, "--db", DB_PATH, "--messages", messagesJson];
+  // Main model for the answer call only — same omit-when-empty contract as
+  // process-audio's --main-model above.
+  if (mainModel) args.push("--main-model", mainModel);
   return new Promise((resolve, reject) => {
     let result = null;
     let degraded = false;
-    searchProc = runBackend(["search", "--root", root, "--db", DB_PATH, "--messages", messagesJson],
+    searchProc = runBackend(args,
       (ev) => {
         if (ev.event === "search_result") result = { found: ev.found, answer: ev.answer, citations: ev.citations, degraded };
         else if (ev.event === "error") result = { found: false, error: ev.msg };

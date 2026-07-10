@@ -51,6 +51,7 @@ async function boot(apiOverrides = {}) {
     removePendingRecording: async () => ({ ok: true }),
     processAudio: async () => ({ ok: true }),
     cancelProcess: async () => ({ ok: true }),
+    listLmModels: async () => ([]),
     getModels: async () => ([
       { id: "whisper", label: "MLX Whisper (large-v3-turbo)", size_mb: 1500, needs_token: false, cached: true, locked: false },
       { id: "vad", label: "Silero VAD", size_mb: 35, needs_token: false, cached: false, locked: false },
@@ -223,6 +224,24 @@ test("history reprocess (from note view) is blocked while a run is in flight", a
   $("historyList").querySelector(".rail-item:not(.pending)").click(); await tick(window);
   $("noteView").querySelector("#nvReprocess").click(); await tick(window);
   assert.equal(calls, 1);                             // guard blocked a second run
+});
+
+// ── copy note path (История note view) ───────────────────────────────────────
+test("nvCopyPath: copies the note's absolute path and shows brief feedback", async () => {
+  const { window, $ } = await boot({
+    listHistory: async () => [{ name: "2026-01-01", title: "Синк", note: "/Users/x/vault/meeting-x.md", audio: null }],
+  });
+  const copied = [];
+  window.navigator.clipboard.writeText = async (text) => { copied.push(text); };
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  $("historyList").querySelector(".rail-item:not(.pending)").click(); await tick(window);
+  const btn = $("noteView").querySelector("#nvCopyPath");
+  assert.equal(btn.textContent, "📋 Путь");
+  btn.click(); await tick(window);
+  assert.equal(copied[0], "/Users/x/vault/meeting-x.md");
+  assert.equal(btn.textContent, "✓ Скопировано");
+  await new Promise((r) => window.setTimeout(r, 1600));
+  assert.equal(btn.textContent, "📋 Путь");             // reverts after the feedback window
 });
 
 test("pending row in the История rail stays visible under an active filter that would exclude it", async () => {
@@ -609,6 +628,70 @@ test("history filters by template and by date range", async () => {
   assert.ok($("historyList").textContent.includes("C"));
 });
 
+// ── История date-group headers (owner: chronological log + "N per day" without a
+// calendar) — grouped over the FILTERED (shown) list, non-interactive dividers ─────────
+test("history rail: date-group headers separate days, with per-day counts", async () => {
+  const { window, $ } = await boot({
+    listHistory: async () => [
+      { name: "2026-07-08-190000", title: "C", language: "ru", note: "/c.md", audio: null },
+      { name: "2026-07-08-184655", title: "B", language: "ru", note: "/b.md", audio: null },
+      { name: "2026-07-07-120000", title: "A", language: "ru", note: "/a.md", audio: null },
+    ],
+  });
+  window.document.querySelector('.topbtn[data-view="history"]').click();
+  await tick(window);
+  const headers = [...$("historyList").querySelectorAll(".rail-date-header")].map((h) => h.textContent);
+  assert.deepEqual(headers, ["8 июля · 2", "7 июля · 1"]);
+});
+
+test("history rail: date-group headers carry no idx and are not clickable", async () => {
+  const { window, $ } = await boot({
+    listHistory: async () => [
+      { name: "2026-07-08-190000", title: "C", language: "ru", note: "/c.md", audio: null },
+    ],
+  });
+  window.document.querySelector('.topbtn[data-view="history"]').click();
+  await tick(window);
+  const header = $("historyList").querySelector(".rail-date-header");
+  assert.ok(header);
+  assert.equal(header.dataset.idx, undefined);
+  const beforeNoteView = $("noteView").innerHTML;
+  header.click(); await tick(window);
+  assert.equal($("noteView").innerHTML, beforeNoteView); // divider click must not open a note
+});
+
+test("history rail: date-group counts follow active filters, not raw per-day totals", async () => {
+  const { window, $ } = await boot({
+    listHistory: async () => [
+      { name: "2026-07-08-190000", title: "Релиз", language: "ru", note: "/c.md", audio: null },
+      { name: "2026-07-08-184655", title: "Интервью", language: "en", note: "/b.md", audio: null },
+    ],
+  });
+  window.document.querySelector('.topbtn[data-view="history"]').click();
+  await tick(window);
+  assert.equal($("historyList").querySelector(".rail-date-header").textContent, "8 июля · 2");
+  $("historyLang").value = "en";
+  $("historyLang").dispatchEvent(new window.Event("change"));
+  const headers = $("historyList").querySelectorAll(".rail-date-header");
+  assert.equal(headers.length, 1);
+  assert.equal(headers[0].textContent, "8 июля · 1");
+});
+
+test("history rail: pending recordings stay above date-group headers, ungrouped", async () => {
+  const { window, $, handlers } = await boot({
+    listHistory: async () => [
+      { name: "2026-07-08-190000", title: "C", language: "ru", note: "/c.md", audio: null },
+    ],
+  });
+  handlers.record({ event: "recorded", id: "r1", name: "Запись 1", file: "/tmp/mixed.wav", mic: "/tmp/m.wav", system: null, tracks: 1 });
+  window.document.querySelector('.topbtn[data-view="history"]').click();
+  await tick(window);
+  const children = [...$("historyList").children];
+  const pendingIdx = children.findIndex((c) => c.classList.contains("pending"));
+  const headerIdx = children.findIndex((c) => c.classList.contains("rail-date-header"));
+  assert.ok(pendingIdx !== -1 && headerIdx !== -1 && pendingIdx < headerIdx);
+});
+
 test("note view shows the title as a heading", async () => {
   const { window, $ } = await boot({
     listHistory: async () => [{ name: "2026-01-01", title: "Синк по релизу", language: "ru", note: "/n.md", audio: null }],
@@ -692,6 +775,31 @@ test("PARA sub-tabs: switch to Хранилище renders the vault tree, collap
   assert.ok(dir.classList.contains("collapsed"));
   dir.querySelector(".tree-dir-head").click();
   assert.ok(!dir.classList.contains("collapsed")); // existing toggle behavior, unchanged
+});
+
+// ── copy note path (PARA Хранилище/tree note view) ───────────────────────────
+test("ptvCopyPath: copies the tree note's absolute path and shows brief feedback", async () => {
+  const { window, $ } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru",
+      para: { root: "/v", folders: { projects: "Projects", areas: "Areas", resources: "Resources", archives: "Archives" } },
+    }),
+    paraTree: async () => [
+      { name: "meeting-x.md", path: "/v/Projects/meeting-x.md", type: "note" },
+    ],
+  });
+  const copied = [];
+  window.navigator.clipboard.writeText = async (text) => { copied.push(text); };
+  window.document.querySelector('.topbtn[data-view="para"]').click(); await tick(window);
+  window.document.querySelector('.subbtn[data-sub="tree"]').click(); await tick(window);
+  $("paraTree").querySelector(".tree-note").click(); await tick(window);
+  const btn = $("paraTreeView").querySelector("#ptvCopyPath");
+  assert.equal(btn.textContent, "📋 Путь");
+  btn.click(); await tick(window);
+  assert.equal(copied[0], "/v/Projects/meeting-x.md");
+  assert.equal(btn.textContent, "✓ Скопировано");
+  await new Promise((r) => window.setTimeout(r, 1600));
+  assert.equal(btn.textContent, "📋 Путь");             // reverts after the feedback window
 });
 
 test("PARA classify-all: per-row spinner shows while processing, clears once filed", async () => {
@@ -1260,6 +1368,124 @@ test("fastModel is forwarded to processAudio when running", async () => {
   await tick(window);
   assert.ok(sent, "processAudio was not called");
   assert.equal(sent.fastModel, "google/gemma-3-4b");
+});
+
+// ── mainModel setting ────────────────────────────────────────────────────────
+
+test("mainModel loads from presets into state and the settings input", async () => {
+  const { $, window } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru", mainModel: "qwen/qwen3.5-9b",
+    }),
+  });
+  await tick(window);
+  assert.equal($("mainModel").value, "qwen/qwen3.5-9b");
+});
+
+test("mainModel defaults to '' when absent from presets", async () => {
+  const { $, window } = await boot({
+    getPresets: async () => ({ presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru" }),
+  });
+  await tick(window);
+  assert.equal($("mainModel").value, "");
+});
+
+test("changing mainModel input persists with mainModel in savePresets payload", async () => {
+  let saved = null;
+  const { $, window } = await boot({ savePresets: async (data) => { saved = data; return true; } });
+  await tick(window);
+  $("mainModel").value = "qwen/qwen3.5-9b";
+  $("mainModel").dispatchEvent(new window.Event("change"));
+  await tick(window);
+  assert.ok(saved, "savePresets was not called");
+  assert.equal(saved.mainModel, "qwen/qwen3.5-9b");
+});
+
+test("mainModel is forwarded to processAudio when running", async () => {
+  let sent = null;
+  const { window, $, handlers } = await boot({
+    getPresets: async () => ({
+      presets: [{ name: "P", prompt: "x" }], defaultOutDir: "/tmp", hfToken: "", language: "ru",
+      mainModel: "qwen/qwen3.5-9b",
+    }),
+    processAudio: async (opts) => { sent = opts; return { ok: true }; },
+  });
+  await tick(window);
+  handlers.record({ event: "recorded", id: "r1", name: "Запись 1", file: "/tmp/mixed.wav", mic: "/tmp/m.wav", system: null, tracks: 1 });
+  $("historyList").querySelector(".pending-play-btn").click();
+  await tick(window);
+  assert.ok(sent, "processAudio was not called");
+  assert.equal(sent.mainModel, "qwen/qwen3.5-9b");
+});
+
+test("mainModel is forwarded to paraClassify during classify-all", async () => {
+  let capturedArg = null;
+  const { window, $ } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru", mainModel: "qwen/qwen3.5-9b",
+      para: { root: "/v", folders: { projects: "Projects", areas: "Areas", resources: "Resources", archives: "Archives" } },
+    }),
+    listHistory: async () => [{ name: "2026-01-01", title: "T", note: "/n.md", audio: null }],
+    paraClassify: async (arg) => { capturedArg = arg; return { category: "projects", project: "P" }; },
+    paraFile: async () => ({ ok: true }),
+  });
+  window.document.querySelector('.topbtn[data-view="para"]').click();
+  await tick(window);
+  $("paraClassifyAll").click();
+  await tick(window); await tick(window); await tick(window); await tick(window);
+  assert.ok(capturedArg, "paraClassify was not called");
+  assert.equal(capturedArg.mainModel, "qwen/qwen3.5-9b");
+});
+
+test("mainModel is forwarded to paraSearch when asking a question", async () => {
+  let capturedMainModel;
+  const { window, $ } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru", mainModel: "qwen/qwen3.5-9b",
+      para: { root: "/v", folders: { projects: "Projects", areas: "Areas", resources: "Resources", archives: "Archives" } },
+    }),
+    paraSearch: async (_root, _messages, mainModel) => {
+      capturedMainModel = mainModel;
+      return { found: false, answer: "Не нашёл по этому вопросу записей в заметках.", citations: [] };
+    },
+  });
+  window.document.querySelector('.topbtn[data-view="para"]').click();
+  await tick(window);
+  window.document.querySelector('.subbtn[data-sub="search"]').click();
+  await tick(window);
+  $("paraSearchQuery").value = "тест вопрос";
+  $("paraSearchBtn").click(); await tick(window); await tick(window);
+  assert.equal(capturedMainModel, "qwen/qwen3.5-9b");
+});
+
+// ── LM Studio model dropdowns (fastModel/mainModel datalists) ────────────────
+
+test("opening settings populates the fastModel/mainModel datalists from the listLmModels IPC", async () => {
+  const { $, window } = await boot({
+    listLmModels: async () => (["google/gemma-3-4b", "qwen/qwen3.5-9b"]),
+  });
+  await tick(window);
+  assert.equal($("fastModelOptions").children.length, 0, "datalist starts empty");
+  $("settingsOpen").click();
+  await tick(window);
+  const fastOpts = [...$("fastModelOptions").children].map((o) => o.value);
+  const mainOpts = [...$("mainModelOptions").children].map((o) => o.value);
+  assert.deepEqual(fastOpts, ["google/gemma-3-4b", "qwen/qwen3.5-9b"]);
+  assert.deepEqual(mainOpts, ["google/gemma-3-4b", "qwen/qwen3.5-9b"]);
+});
+
+test("listLmModels failure degrades to empty datalists — no crash, inputs stay plain-text usable", async () => {
+  const { $, window } = await boot({
+    listLmModels: async () => { throw new Error("LM Studio unreachable"); },
+  });
+  await tick(window);
+  $("settingsOpen").click();
+  await tick(window);
+  assert.equal($("fastModelOptions").children.length, 0);
+  assert.equal($("mainModelOptions").children.length, 0);
+  // the input itself stays a normal usable text field regardless
+  $("fastModel").value = "typed/manually";
+  assert.equal($("fastModel").value, "typed/manually");
 });
 
 // ── settings overlay: hfToken/authorName/outDir relocation + outDir auto-follow ──
@@ -2451,6 +2677,33 @@ test("main.js: process-audio forwards --fast-model to the backend spawn only whe
   const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
   const processAudio = mainSrc.match(/ipcMain\.handle\("process-audio"[\s\S]*?\n\}\);/)[0];
   assert.match(processAudio, /if \(fastModel\) args\.push\("--fast-model", fastModel\)/);
+});
+
+test("main.js: process-audio forwards --main-model to the backend spawn only when mainModel is non-empty", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const processAudio = mainSrc.match(/ipcMain\.handle\("process-audio"[\s\S]*?\n\}\);/)[0];
+  assert.match(processAudio, /if \(mainModel\) args\.push\("--main-model", mainModel\)/);
+});
+
+test("main.js: para-classify forwards --main-model to the backend spawn only when mainModel is non-empty", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const paraClassify = mainSrc.match(/ipcMain\.handle\("para-classify"[\s\S]*?\n\}\);/)[0];
+  assert.match(paraClassify, /if \(mainModel\) args\.push\("--main-model", mainModel\)/);
+});
+
+test("main.js: para-search forwards --main-model to the backend spawn only when mainModel is non-empty", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const paraSearch = mainSrc.match(/ipcMain\.handle\("para-search"[\s\S]*?\n\}\);/)[0];
+  assert.match(paraSearch, /if \(mainModel\) args\.push\("--main-model", mainModel\)/);
+});
+
+test("main.js: list-lm-models IPC GETs LM Studio's /api/v0/models with a 3s timeout, filters out embeddings, and degrades to [] on failure", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const handler = mainSrc.match(/ipcMain\.handle\("list-lm-models"[\s\S]*?\n\}\);/)[0];
+  assert.match(handler, /localhost:1234\/api\/v0\/models/);
+  assert.match(handler, /setTimeout\(\(\) => ctrl\.abort\(\), 3000\)/);
+  assert.match(handler, /m\.type !== "embeddings"/);
+  assert.match(handler, /catch \{\s*\n\s*return \[\];\s*\n\s*\}/);
 });
 
 // ── setup gate (hard wall) ───────────────────────────────────────────────────
@@ -3772,11 +4025,57 @@ test("Обновления: check button calls checkAppUpdate and renders 'ак�
   });
   $("settingsOpen").click();
   await tick(window);
+  calls = 0; // settingsOpen already auto-triggered one check (see dedicated test below) —
+             // reset so this test isolates the manual button's own call.
   $("updateCheckBtn").click();
   await tick(window);
   assert.equal(calls, 1);
   assert.match($("updateStatusRow").querySelector(".pf-detail").textContent, /актуальная/);
   assert.equal($("updateInstallBtn").classList.contains("hidden"), true);
+});
+
+test("Обновления: opening settings automatically triggers exactly one check-app-update call", async () => {
+  let calls = 0;
+  const { window, $ } = await boot({
+    checkAppUpdate: async () => { calls++; return { ok: true, current: "1.0.0", latest: "1.0.0", hasUpdate: false, assetUrl: null, releaseNotes: null, isPackaged: true }; },
+  });
+  $("settingsOpen").click();
+  await tick(window);
+  assert.equal(calls, 1);
+  assert.match($("updateStatusRow").querySelector(".pf-detail").textContent, /актуальная/);
+});
+
+test("Обновления: a manual click while the settings-open auto-check is still in flight is ignored (no stacking)", async () => {
+  let calls = 0;
+  let resolvers = [];
+  const { window, $ } = await boot({
+    checkAppUpdate: () => new Promise((resolve) => { calls++; resolvers.push(resolve); }),
+  });
+  $("settingsOpen").click();   // fires the auto-check, left pending
+  $("updateCheckBtn").click(); // must be ignored — one check already in flight
+  assert.equal(calls, 1, "concurrent check must be ignored while one is in flight");
+  resolvers.forEach((r) => r({ ok: true, current: "1.0.0", latest: "1.0.0", hasUpdate: false, assetUrl: null, releaseNotes: null, isPackaged: true }));
+  await tick(window);
+  assert.equal(calls, 1);
+});
+
+test("Обновления: closing and reopening settings re-runs the auto-check (guard doesn't block forever)", async () => {
+  let calls = 0;
+  const { window, $ } = await boot({
+    checkAppUpdate: async () => { calls++; return { ok: true, current: "1.0.0", latest: "1.0.0", hasUpdate: false, assetUrl: null, releaseNotes: null, isPackaged: true }; },
+  });
+  $("settingsOpen").click();
+  await tick(window);
+  $("settingsClose").click();
+  $("settingsOpen").click();
+  await tick(window);
+  assert.equal(calls, 2);
+});
+
+test("settings overlay: «Обновления» section is the first section, above «Перед началом работы»", async () => {
+  const { window } = await boot();
+  const sections = window.document.querySelectorAll("#settingsOverlay .modal-sec");
+  assert.match(sections[0].querySelector("h3").textContent, /^Обновления/);
 });
 
 test("Обновления: install button appears (enabled) only once hasUpdate is true in a packaged app", async () => {

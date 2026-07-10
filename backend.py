@@ -611,7 +611,7 @@ def _diff_term_hits(orig_tokens, new_tokens, terms):
 class Pipeline:
     def __init__(self, out_dir, engine="mlx", diarize=True, cache_dir=None,
                  language="ru", do_summary=True, template="", db_path=None, glossary="",
-                 author_name="Автор", fast_model="", glossary_usage=None):
+                 author_name="Автор", fast_model="", glossary_usage=None, main_model=""):
         self.TEMPLATE = template
         self.db_path = db_path
         self.OBSIDIAN_PATH = Path(out_dir)
@@ -635,6 +635,14 @@ class Pipeline:
         # summarize() and every other LLM call deliberately never read this —
         # the reasoning summary stays on the default loaded model.
         self.FAST_MODEL = fast_model
+        # Overrides the loaded LM Studio model for SUBSTANTIVE calls (summary, speaker-
+        # inference, action-item extraction) — see summarize/infer_speaker_names/
+        # extract_actions. Empty = omit "model" from the request body, LM Studio uses
+        # whatever's loaded — today's behaviour, including the reasoning-model summary
+        # with thinking, is byte-identical when this is empty (regression lock, mirrors
+        # FAST_MODEL's own empty-string contract). Mechanical calls (correct/title/
+        # suggest) never read this — they stay on FAST_MODEL exclusively.
+        self.MAIN_MODEL = main_model
         self.HF_TOKEN = os.environ.get("HF_TOKEN")
         # cache for resumable stages (heavy work — convert/transcribe/diarize).
         self.cache_dir = Path(cache_dir) if cache_dir else None
@@ -1200,19 +1208,18 @@ class Pipeline:
                 f"Сегодняшняя дата: {datetime.now().strftime('%Y-%m-%d')}\n\n"
                 f"ТРАНСКРИПТ ВСТРЕЧИ:\n{transcript}"
             )
-            resp = requests.post(
-                self.LMSTUDIO_API,
-                json={
-                    "messages": [
-                        {"role": "system", "content": sys_msg},
-                        {"role": "user", "content": user_msg},
-                    ],
-                    # reasoning model needs headroom to think AND emit the note; a low
-                    # cap truncates mid-thought (finish=length) and leaves content empty.
-                    "temperature": 0.3, "max_tokens": 16000,
-                },
-                timeout=300,
-            )
+            payload = {
+                "messages": [
+                    {"role": "system", "content": sys_msg},
+                    {"role": "user", "content": user_msg},
+                ],
+                # reasoning model needs headroom to think AND emit the note; a low
+                # cap truncates mid-thought (finish=length) and leaves content empty.
+                "temperature": 0.3, "max_tokens": 16000,
+            }
+            if self.MAIN_MODEL:
+                payload["model"] = self.MAIN_MODEL
+            resp = requests.post(self.LMSTUDIO_API, json=payload, timeout=300)
             if resp.status_code != 200:
                 log(f"⚠️ LM Studio HTTP {resp.status_code}")
                 return None
@@ -1286,7 +1293,7 @@ class Pipeline:
         if not labels:
             return {}
         try:
-            resp = requests.post(self.LMSTUDIO_API, json={
+            payload = {
                 "messages": [
                     {"role": "system", "content": "Ты определяешь реальные имена спикеров. Отвечай только JSON."},
                     {"role": "user", "content":
@@ -1296,7 +1303,10 @@ class Pipeline:
                         f"ТРАНСКРИПТ:\n{transcript[:4000]}"},
                 ],
                 "temperature": 0.1, "max_tokens": 2500,
-            }, timeout=120)
+            }
+            if self.MAIN_MODEL:
+                payload["model"] = self.MAIN_MODEL
+            resp = requests.post(self.LMSTUDIO_API, json=payload, timeout=120)
             if resp.status_code == 200:
                 msg = (resp.json().get("choices") or [{}])[0].get("message", {})
                 c = (msg.get("content") or "") or (msg.get("reasoning_content") or "")
@@ -1349,7 +1359,7 @@ class Pipeline:
         section, no crash."""
         import requests
         try:
-            resp = requests.post(self.LMSTUDIO_API, json={
+            payload = {
                 "messages": [
                     {"role": "system", "content":
                         "Ты извлекаешь из транскрипта встречи задачи, договорённости и решения. "
@@ -1364,7 +1374,10 @@ class Pipeline:
                         f"ТРАНСКРИПТ:\n{transcript[:8000]}"},
                 ],
                 "temperature": 0.1, "max_tokens": 4000,
-            }, timeout=180)
+            }
+            if self.MAIN_MODEL:
+                payload["model"] = self.MAIN_MODEL
+            resp = requests.post(self.LMSTUDIO_API, json=payload, timeout=180)
             if resp.status_code != 200:
                 return {}
             msg = (resp.json().get("choices") or [{}])[0].get("message", {})
@@ -1762,7 +1775,7 @@ def cmd_process(args):
                     cache_dir=args.cache_dir, language=args.language, do_summary=args.summarize,
                     template=args.template, db_path=args.db, glossary=args.glossary,
                     author_name=args.author_name, fast_model=args.fast_model,
-                    glossary_usage=glossary_usage)
+                    glossary_usage=glossary_usage, main_model=args.main_model)
     try:
         pipe.process(args.infile, prompt, keep_audio_in_obsidian=args.keep_audio,
                      mic_file=args.mic, system_file=args.system, origin=args.origin)
@@ -2104,24 +2117,73 @@ def _find_audio(note_name, files):
     return None
 
 
-def _reconcile(conn, out_dir):
+def _iter_vault_notes(vault_root, skip_dir=None):
+    """os.walk vault_root for meeting-*.md files (PARA-filed notes live anywhere under
+    the vault, not just out_dir). Skips hidden dirs (.obsidian, .trash, ...) and, if
+    skip_dir is given, prunes that subtree entirely — it's already covered by the plain
+    out_dir scan in _reconcile, so walking into it again would just be wasted work over
+    a potentially large vault. Yields absolute path strings."""
+    import os
+    root = Path(vault_root)
+    if not root.exists():
+        return
+    skip_resolved = None
+    if skip_dir is not None:
+        try:
+            skip_resolved = str(Path(skip_dir).resolve())
+        except Exception:
+            skip_resolved = str(Path(skip_dir))
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+        if skip_resolved is not None:
+            try:
+                cur_resolved = str(Path(dirpath).resolve())
+            except Exception:
+                cur_resolved = dirpath
+            if cur_resolved == skip_resolved:
+                dirnames[:] = []  # don't descend — out_dir's own scan already covers it
+                continue
+        for f in filenames:
+            if f.startswith("meeting-") and f.endswith(".md"):
+                yield str(Path(dirpath) / f)
+
+
+def _reconcile(conn, out_dir, vault_root=None):
     out = Path(out_dir)
     files = [p.name for p in out.iterdir()] if out.exists() else []
     md = [f for f in files if f.startswith("meeting-") and f.endswith(".md")]
-    md_paths = {str(out / f) for f in md}
-    for (note,) in conn.execute("SELECT note FROM meetings").fetchall():
-        if note not in md_paths:  # note deleted in Obsidian → drop stale row
-            conn.execute("DELETE FROM meetings WHERE note=?", (note,))
+    # stamp (parsed from filename) is the identity used to merge the out_dir scan with
+    # the (optional) recursive vault scan below — a note keeps ONE row across a PARA move
+    # (old path deleted, new path upserted) instead of the move producing a duplicate.
+    # out_dir entries take priority: they're the canonical "not yet filed" location, and
+    # skip_dir pruning above already keeps the vault scan from re-finding them anyway.
+    chosen = {}
     for f in md:
-        note_path = str(out / f)
-        mtime = (out / f).stat().st_mtime
+        chosen[f[len("meeting-"):-3]] = str(out / f)
+    if vault_root:
+        for note_path in _iter_vault_notes(vault_root, skip_dir=out_dir):
+            stamp = Path(note_path).name[len("meeting-"):-3]
+            chosen.setdefault(stamp, note_path)
+    md_paths = set(chosen.values())
+    for (note,) in conn.execute("SELECT note FROM meetings").fetchall():
+        if note not in md_paths:  # note deleted (or moved away and re-found above) → drop stale row
+            conn.execute("DELETE FROM meetings WHERE note=?", (note,))
+    for stamp, note_path in chosen.items():
+        p = Path(note_path)
+        try:
+            mtime = p.stat().st_mtime
+        except Exception:
+            continue  # vanished between scan and stat
         cur = conn.execute("SELECT mtime FROM meetings WHERE note=?", (note_path,)).fetchone()
         if cur and abs(cur[0] - mtime) < 0.001:
             continue  # unchanged
-        fm = _parse_frontmatter((out / f).read_text(encoding="utf-8", errors="ignore")[:2048])
-        audio = _find_audio(f, files)
+        fm = _parse_frontmatter(p.read_text(encoding="utf-8", errors="ignore")[:2048])
+        # _find_audio only makes sense for out_dir-adjacent files (files list is out_dir-
+        # scoped); a note already filed elsewhere in the vault keeps whatever audio link
+        # it had (frontmatter carries no audio path), matching current out_dir-only lookup.
+        audio = _find_audio(p.name, files) if p.parent == out else None
         _db_upsert(conn, {
-            "note": note_path, "stamp": f[len("meeting-"):-3], "title": fm.get("title", ""),
+            "note": note_path, "stamp": stamp, "title": fm.get("title", ""),
             "template": fm.get("template", ""), "language": fm.get("language", ""),
             "date": fm.get("date", ""), "audio": str(out / audio) if audio else None,
             "mtime": mtime, "source": fm.get("source", "")})
@@ -2168,9 +2230,9 @@ def _parse_any_stamp(stamp):
         return None
 
 
-def cmd_history(out_dir, db_path, pending_file=None):
+def cmd_history(out_dir, db_path, pending_file=None, vault_root=None):
     conn = _db_connect(db_path)
-    _reconcile(conn, out_dir)
+    _reconcile(conn, out_dir, vault_root)
     items = _db_list(conn)
     conn.close()
     if pending_file:
@@ -2188,7 +2250,7 @@ def cmd_history(out_dir, db_path, pending_file=None):
     emit("history", items=items)
 
 
-def cmd_classify(note_path, existing_json=""):
+def cmd_classify(note_path, existing_json="", main_model=""):
     """Classify a meeting note into a PARA category + project name via the LLM.
     existing_json: optional JSON {category: [project names]} of accumulators that already
     exist — the model is told to REUSE a matching one instead of inventing a sibling,
@@ -2214,7 +2276,7 @@ def cmd_classify(note_path, existing_json=""):
                 "\nЕсли заметка относится к одному из них — верни ТОЧНО эту category и "
                 "project (имя из списка дословно). Только если ничего не подходит — новый project.\n")
     try:
-        resp = requests.post("http://localhost:1234/v1/chat/completions", json={
+        payload = {
             "messages": [
                 {"role": "system", "content": "Ты раскладываешь заметки по методу PARA. Отвечай только JSON."},
                 {"role": "user", "content":
@@ -2228,7 +2290,10 @@ def cmd_classify(note_path, existing_json=""):
                     f"ЗАМЕТКА:\n{text}"},
             ],
             "temperature": 0.2, "max_tokens": 2500,
-        }, timeout=120)
+        }
+        if main_model:
+            payload["model"] = main_model
+        resp = requests.post("http://localhost:1234/v1/chat/completions", json=payload, timeout=120)
         if resp.status_code == 200:
             msg = (resp.json().get("choices") or [{}])[0].get("message", {})
             c = (msg.get("content") or "") or (msg.get("reasoning_content") or "")
@@ -2749,7 +2814,7 @@ def _rag_retrieve(conn, retrieval_query, embed_model):
     return candidates, False
 
 
-def cmd_search(root, db_path, query=None, embed_model=None, messages=None):
+def cmd_search(root, db_path, query=None, embed_model=None, messages=None, main_model=""):
     """Hybrid RAG search over indexed vault with optional conversation history.
 
     Input:
@@ -2885,13 +2950,16 @@ def cmd_search(root, db_path, query=None, embed_model=None, messages=None):
     # ── 5. Call LM Studio chat ────────────────────────────────────────────
     answer = None
     try:
+        answer_payload = {
+            "messages": llm_messages,
+            "temperature": 0.2,
+            "max_tokens": 4096,
+        }
+        if main_model:
+            answer_payload["model"] = main_model
         resp = requests.post(
             f"{_RAG_BASE_URL}/v1/chat/completions",
-            json={
-                "messages": llm_messages,
-                "temperature": 0.2,
-                "max_tokens": 4096,
-            },
+            json=answer_payload,
             timeout=300,
         )
         if resp.status_code == 200:
@@ -3178,6 +3246,8 @@ def main():
     p_cls = sub.add_parser("classify")
     p_cls.add_argument("--note", required=True)
     p_cls.add_argument("--existing", default="")  # JSON {category: [names]} for reuse
+    # Main model override for this substantive task — see Pipeline.MAIN_MODEL.
+    p_cls.add_argument("--main-model", dest="main_model", default="")
 
     p_ext = sub.add_parser("extract")
     p_ext.add_argument("--note", required=True)
@@ -3220,11 +3290,18 @@ def main():
     p_proc.add_argument("--origin", choices=["batch", "file"], default=None)  # ignored when --mic/--system given (recording wins)
     # Fast model for mechanical LLM calls only (correct/title/suggest) — see Pipeline.FAST_MODEL.
     p_proc.add_argument("--fast-model", dest="fast_model", default="")
+    # Main model for substantive LLM calls (summary/speaker-inference/actions) — see
+    # Pipeline.MAIN_MODEL. Empty → omit "model" entirely, today's behaviour (including the
+    # reasoning-model summary with thinking) preserved byte-identical.
+    p_proc.add_argument("--main-model", dest="main_model", default="")
 
     p_hist = sub.add_parser("history")
     p_hist.add_argument("--out-dir", dest="out_dir", default=default_obsidian)
     p_hist.add_argument("--db", required=True)
     p_hist.add_argument("--pending-file", dest="pending_file", default=None)
+    # optional PARA vault root — when given, История also picks up notes that were
+    # filed (moved) out of out_dir, instead of dropping them the moment they're filed.
+    p_hist.add_argument("--vault-root", dest="vault_root", default=None)
 
     p_idx = sub.add_parser("index")
     p_idx.add_argument("--root", required=True)
@@ -3240,6 +3317,8 @@ def main():
     p_srch.add_argument("--messages", default=None,
                         help="JSON array of {role,content} objects, last item is newest user msg")
     p_srch.add_argument("--embed-model", dest="embed_model", default=None)
+    # Main model override for the answer LLM call only — see Pipeline.MAIN_MODEL.
+    p_srch.add_argument("--main-model", dest="main_model", default="")
 
     args = parser.parse_args()
 
@@ -3252,13 +3331,13 @@ def main():
     elif args.cmd == "download-models":
         cmd_download_models(args.only)
     elif args.cmd == "classify":
-        cmd_classify(args.note, args.existing)
+        cmd_classify(args.note, args.existing, args.main_model)
     elif args.cmd == "extract":
         cmd_extract(args.note)
     elif args.cmd == "classify-terms":
         cmd_classify_terms(args.terms_file, args.fast_model)
     elif args.cmd == "history":
-        cmd_history(args.out_dir, args.db, args.pending_file)
+        cmd_history(args.out_dir, args.db, args.pending_file, args.vault_root)
     elif args.cmd == "record":
         cmd_record(args.out, args.device)
     elif args.cmd == "mix":
@@ -3269,7 +3348,8 @@ def main():
         cmd_index(args.root, args.db, args.embed_model)
     elif args.cmd == "search":
         cmd_search(args.root, args.db, query=args.query,
-                   embed_model=args.embed_model, messages=args.messages)
+                   embed_model=args.embed_model, messages=args.messages,
+                   main_model=args.main_model)
 
 
 if __name__ == "__main__":

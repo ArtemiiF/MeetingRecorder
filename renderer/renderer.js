@@ -28,6 +28,7 @@ const state = {
   language: "ru",
   authorName: "Автор",
   fastModel: "",
+  mainModel: "",
   glossary: "",
   glossarySuggestions: [], // pending candidates from the "suggest" pipeline stage — accept/dismiss
   glossaryDismissed: [],   // dismissed candidates (original case; compared lowercased) — never re-suggested
@@ -71,15 +72,18 @@ document.querySelectorAll(".rtab").forEach((t) =>
   })
 );
 
-// ── copy to clipboard (result pane + chat bubbles) ──────────────────────────
+// ── copy to clipboard (result pane + chat bubbles + note-path buttons) ──────
 // Writes text via the standard Clipboard API (available in the renderer regardless
 // of contextIsolation/nodeIntegration — no IPC/main-process plumbing needed), then
-// briefly flips the button's own label to "✓" as click feedback.
-function copyToClipboard(text, btn) {
+// briefly flips the button's own label to `feedbackText` as click feedback.
+// feedbackText/duration default to the original "✓" / 1000ms used by the result-pane
+// and chat-bubble copy buttons; callers that want a different label/duration (e.g.
+// the note-path copy buttons) pass their own.
+function copyToClipboard(text, btn, feedbackText = "✓", duration = 1000) {
   navigator.clipboard.writeText(text || "").then(() => {
     const prev = btn.textContent;
-    btn.textContent = "✓";
-    setTimeout(() => { btn.textContent = prev; }, 1000);
+    btn.textContent = feedbackText;
+    setTimeout(() => { btn.textContent = prev; }, duration);
   });
 }
 
@@ -533,10 +537,13 @@ async function refreshSetupGate() {
 window.addEventListener("focus", refreshSetupGate);
 
 // ── in-app updater (settings "Обновления" section) ──────────────────────────
-// Manual button only — no auto-check on page load/settings-open (see task
-// contract), so this section starts blank and only fills in once the user
-// clicks "Проверить обновления".
+// Auto-checks once every time the settings overlay opens (in addition to the
+// manual "Проверить обновления" button) — check only, never auto-downloads.
+// appUpdateCheckInFlight guards both entry points against stacking a second
+// concurrent check while one is still running; it's independent of
+// appUpdateRunning, which guards the (much longer) install/download flow.
 let appUpdateRunning = false;
+let appUpdateCheckInFlight = false;
 let appUpdateInfo = null; // last check-app-update() result — drives the install button's visibility
 
 function renderUpdateStatusRow(text, dotClass) {
@@ -553,13 +560,15 @@ function setUpdateInstallUI(running) {
 }
 
 async function checkAppUpdate() {
-  if (appUpdateRunning) return;
+  if (appUpdateRunning || appUpdateCheckInFlight) return;
+  appUpdateCheckInFlight = true;
   $("updateCheckBtn").disabled = true;
   renderUpdateStatusRow("Проверяю…", "warn");
   $("updateInstallBtn").classList.add("hidden");
   $("updateDevHint").classList.add("hidden");
   $("updateInstallStatus").textContent = "";
   const res = await window.api.checkAppUpdate();
+  appUpdateCheckInFlight = false;
   $("updateCheckBtn").disabled = false;
   appUpdateInfo = res;
   if (!res || res.ok === false) {
@@ -608,7 +617,7 @@ window.api.onAppUpdateEvent((ev) => {
 });
 
 // settings / readiness modal
-function openSettings() { $("settingsOverlay").classList.remove("hidden"); refreshPreflight(); refreshBackendStatus(); refreshModels(); }
+function openSettings() { $("settingsOverlay").classList.remove("hidden"); refreshPreflight(); refreshBackendStatus(); refreshModels(); checkAppUpdate(); }
 function closeSettings() { $("settingsOverlay").classList.add("hidden"); }
 $("settingsOpen").addEventListener("click", openSettings);
 $("settingsClose").addEventListener("click", closeSettings);
@@ -666,6 +675,7 @@ async function init() {
   state.language = (data.language === "auto" ? "" : data.language) || "ru";
   state.authorName = data.authorName || "Автор";
   state.fastModel = data.fastModel || "";
+  state.mainModel = data.mainModel || "";
   state.glossary = data.glossary || DEFAULT_GLOSSARY;
   state.glossarySuggestions = data.glossarySuggestions || [];
   state.glossaryDismissed = data.glossaryDismissed || [];
@@ -678,6 +688,7 @@ async function init() {
   $("language").value = state.language;
   $("authorName").value = state.authorName;
   $("fastModel").value = state.fastModel;
+  $("mainModel").value = state.mainModel;
   $("glossary").value = state.glossary;
   renderGlossaryChips();
   renderGlossarySuggestions();
@@ -780,6 +791,7 @@ async function persistPresets() {
     language: state.language,
     authorName: state.authorName,
     fastModel: state.fastModel,
+    mainModel: state.mainModel,
     glossary: state.glossary,
     glossarySuggestions: state.glossarySuggestions,
     glossaryDismissed: state.glossaryDismissed,
@@ -813,6 +825,37 @@ $("fastModel").addEventListener("change", (e) => {
   state.fastModel = e.target.value || "";
   persistPresets();
 });
+
+$("mainModel").addEventListener("change", (e) => {
+  state.mainModel = e.target.value || "";
+  persistPresets();
+});
+
+// LM Studio model inventory for the fastModel/mainModel <datalist> suggestions — fetched
+// fresh every time the settings overlay opens (never polled). Registered as its OWN
+// settingsOpen click listener rather than folded into openSettings() itself, so this
+// stays clear of that function's body while other in-flight branches touch it.
+// list-lm-models degrades to [] on any LM Studio failure (see main.js) — an empty
+// datalist just means no suggestions; both inputs stay plain, freely-typable text fields.
+async function populateLmModelOptions() {
+  let ids;
+  try {
+    ids = await window.api.listLmModels();
+  } catch {
+    ids = [];
+  }
+  ids = ids || [];
+  for (const listId of ["fastModelOptions", "mainModelOptions"]) {
+    const dl = $(listId);
+    dl.innerHTML = "";
+    ids.forEach((id) => {
+      const o = document.createElement("option");
+      o.value = id;
+      dl.appendChild(o);
+    });
+  }
+}
+$("settingsOpen").addEventListener("click", populateLmModelOptions);
 
 // Textarea accepts either a comma- OR newline-separated paste ("Импорт/экспорт
 // текстом") — parseGlossaryTerms already splits on both, and routing through
@@ -1677,6 +1720,7 @@ async function startProcessing(fresh, item, override) {
     glossary: state.glossary,
     glossaryUsage: state.glossaryUsage,
     fastModel: state.fastModel,
+    mainModel: state.mainModel,
     summarize: !$("noSummary").checked,
     template: override ? override.template : (activePreset.name || ""),
     // auto-«Я»: only meaningful for a record-sourced mic/system pair — import mode
@@ -1836,6 +1880,17 @@ function sourceBadge(source) {
   return ` <span class="rail-badge" title="${escapeHtml(title)}">${icon}</span>`;
 }
 
+// Date-group divider text (item: История groups by day so the calendar isn't needed).
+// ru-RU's "day + long month" CLDR pattern is genitive by design ("8 июля", not "8 июль") —
+// no manual month-name table needed.
+const RAIL_GROUP_DATE_FMT = new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "long" });
+function formatGroupDate(isoDate) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(isoDate);
+  if (!m) return isoDate; // defensive: an unparseable stamp still gets a header, just as-is
+  const [, y, mo, d] = m;
+  return RAIL_GROUP_DATE_FMT.format(new Date(+y, +mo - 1, +d)); // local Y/M/D ctor — no UTC shift
+}
+
 // render the rail filtered by search (title/date) + language + template + date range.
 // dataset.idx points into the full historyItems so selection survives filtering.
 // Pending recordings (state.pendingRecordings) render first and ALWAYS, bypassing every
@@ -1877,7 +1932,26 @@ function renderRail() {
     rail.insertAdjacentHTML("beforeend", '<p class="hint">Ничего не найдено.</p>');
     return;
   }
+  // Date-group headers: counted over `shown` (the filtered list) so "8 июля · N" always
+  // matches what's actually visible, not the unfiltered total. `shown` is already in
+  // backend/stamp order (see comment above notes filter), so same-day rows are
+  // contiguous — a single forward pass with a running "last date seen" is enough.
+  const dateCounts = new Map();
   shown.forEach((it) => {
+    const d = (it.name || "").slice(0, 10);
+    if (!d) return;
+    dateCounts.set(d, (dateCounts.get(d) || 0) + 1);
+  });
+  let lastDate = null;
+  shown.forEach((it) => {
+    const d = (it.name || "").slice(0, 10);
+    if (d && d !== lastDate) {
+      lastDate = d;
+      const header = document.createElement("div");
+      header.className = "rail-date-header";
+      header.textContent = `${formatGroupDate(d)} · ${dateCounts.get(d)}`;
+      rail.appendChild(header);
+    }
     const idx = historyItems.indexOf(it);
     const el = document.createElement("button");
     el.className = "rail-item";
@@ -1908,12 +1982,14 @@ async function openHistoryNote(item) {
      <div class="note-actions">
        <button class="btn small" id="nvOpen">📄 Obsidian</button>
        ${item.audio ? '<button class="btn small" id="nvAudio">🎵 Аудио</button>' : ""}
+       <button class="btn small" id="nvCopyPath" title="Скопировать путь до заметки">📋 Путь</button>
        <button class="btn small ghost" id="nvReprocess">↻ Переобработать</button>
      </div>
      ${meta ? `<div class="note-meta">${escapeHtml(meta)}</div>` : ""}
      <div class="note-body">${renderMarkdown(md)}</div>`;
   $("nvOpen").onclick = () => window.api.reveal(item.note);
   if (item.audio) $("nvAudio").onclick = () => window.api.reveal(item.audio);
+  $("nvCopyPath").onclick = () => copyToClipboard(item.note, $("nvCopyPath"), "✓ Скопировано", 1500);
   $("nvReprocess").onclick = () => { if (item.audio) openReprocessPicker(item); };
 }
 
@@ -2137,10 +2213,14 @@ async function openTreeNote(el) {
   if (md == null) { view.innerHTML = '<p class="hint">Не удалось прочитать заметку.</p>'; return; }
   const name = path.split("/").pop().replace(/\.md$/i, "");
   view.innerHTML =
-    `<div class="note-actions"><button class="btn small" id="ptvOpen">📄 Obsidian</button></div>
+    `<div class="note-actions">
+       <button class="btn small" id="ptvOpen">📄 Obsidian</button>
+       <button class="btn small" id="ptvCopyPath" title="Скопировать путь до заметки">📋 Путь</button>
+     </div>
      <h2 class="note-title">${escapeHtml(name)}</h2>
      <div class="note-body">${renderMarkdown(md)}</div>`;
   $("ptvOpen").onclick = () => window.api.reveal(path);
+  $("ptvCopyPath").onclick = () => copyToClipboard(path, $("ptvCopyPath"), "✓ Скопировано", 1500);
 }
 $("paraTreeRefresh").addEventListener("click", renderParaTree);
 
@@ -2294,7 +2374,7 @@ async function runParaSearch() {
   // when the caller inspects it (the live array gets the assistant reply appended later).
   let res;
   try {
-    res = await window.api.paraSearch(state.para.root, chatMessages.slice());
+    res = await window.api.paraSearch(state.para.root, chatMessages.slice(), state.mainModel);
   } catch (e) {
     typingEl.remove();
     const errMsg = "❌ " + (e.message || String(e));
@@ -2433,7 +2513,7 @@ $("paraClassifyAll").addEventListener("click", async () => {
     paraLog(`→ ${name}`);
     setRowProcessing(row, true);
     try {
-      const r = await window.api.paraClassify({ note: it.note, root: state.para.root, folders: state.para.folders });
+      const r = await window.api.paraClassify({ note: it.note, root: state.para.root, folders: state.para.folders, mainModel: state.mainModel });
       if (!r || r.error || !r.category) {
         paraLog(`   ✗ не классифицирована: ${(r && r.error) || "категория не определена"}`);
         errors++;

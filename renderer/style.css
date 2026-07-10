@@ -98,6 +98,11 @@ main { max-width: 860px; margin: 0 auto; padding: 20px 24px 60px; }
 .rail-date { font-size: 11px; color: var(--muted); }
 .rail-item.active .rail-date { color: #cdd9ee; }
 .rail-badge { font-size: 11px; }
+/* date-group divider ("8 июля · 5") — non-interactive, no hover/active state; separates
+   История into day buckets so the calendar isn't needed to see "how much happened when". */
+.rail-date-header { font-size: 11px; font-weight: 600; color: var(--muted);
+  text-transform: uppercase; letter-spacing: .02em; padding: 10px 10px 4px; }
+.rail-date-header:first-child { padding-top: 4px; }
 
 /* pending recordings render only here, inline in the История rail (queue-item look,
    also flagged .rail-item so they sit in the same DOM flow as note rows); they're
