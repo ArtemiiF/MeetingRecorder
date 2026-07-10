@@ -2104,24 +2104,73 @@ def _find_audio(note_name, files):
     return None
 
 
-def _reconcile(conn, out_dir):
+def _iter_vault_notes(vault_root, skip_dir=None):
+    """os.walk vault_root for meeting-*.md files (PARA-filed notes live anywhere under
+    the vault, not just out_dir). Skips hidden dirs (.obsidian, .trash, ...) and, if
+    skip_dir is given, prunes that subtree entirely — it's already covered by the plain
+    out_dir scan in _reconcile, so walking into it again would just be wasted work over
+    a potentially large vault. Yields absolute path strings."""
+    import os
+    root = Path(vault_root)
+    if not root.exists():
+        return
+    skip_resolved = None
+    if skip_dir is not None:
+        try:
+            skip_resolved = str(Path(skip_dir).resolve())
+        except Exception:
+            skip_resolved = str(Path(skip_dir))
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+        if skip_resolved is not None:
+            try:
+                cur_resolved = str(Path(dirpath).resolve())
+            except Exception:
+                cur_resolved = dirpath
+            if cur_resolved == skip_resolved:
+                dirnames[:] = []  # don't descend — out_dir's own scan already covers it
+                continue
+        for f in filenames:
+            if f.startswith("meeting-") and f.endswith(".md"):
+                yield str(Path(dirpath) / f)
+
+
+def _reconcile(conn, out_dir, vault_root=None):
     out = Path(out_dir)
     files = [p.name for p in out.iterdir()] if out.exists() else []
     md = [f for f in files if f.startswith("meeting-") and f.endswith(".md")]
-    md_paths = {str(out / f) for f in md}
-    for (note,) in conn.execute("SELECT note FROM meetings").fetchall():
-        if note not in md_paths:  # note deleted in Obsidian → drop stale row
-            conn.execute("DELETE FROM meetings WHERE note=?", (note,))
+    # stamp (parsed from filename) is the identity used to merge the out_dir scan with
+    # the (optional) recursive vault scan below — a note keeps ONE row across a PARA move
+    # (old path deleted, new path upserted) instead of the move producing a duplicate.
+    # out_dir entries take priority: they're the canonical "not yet filed" location, and
+    # skip_dir pruning above already keeps the vault scan from re-finding them anyway.
+    chosen = {}
     for f in md:
-        note_path = str(out / f)
-        mtime = (out / f).stat().st_mtime
+        chosen[f[len("meeting-"):-3]] = str(out / f)
+    if vault_root:
+        for note_path in _iter_vault_notes(vault_root, skip_dir=out_dir):
+            stamp = Path(note_path).name[len("meeting-"):-3]
+            chosen.setdefault(stamp, note_path)
+    md_paths = set(chosen.values())
+    for (note,) in conn.execute("SELECT note FROM meetings").fetchall():
+        if note not in md_paths:  # note deleted (or moved away and re-found above) → drop stale row
+            conn.execute("DELETE FROM meetings WHERE note=?", (note,))
+    for stamp, note_path in chosen.items():
+        p = Path(note_path)
+        try:
+            mtime = p.stat().st_mtime
+        except Exception:
+            continue  # vanished between scan and stat
         cur = conn.execute("SELECT mtime FROM meetings WHERE note=?", (note_path,)).fetchone()
         if cur and abs(cur[0] - mtime) < 0.001:
             continue  # unchanged
-        fm = _parse_frontmatter((out / f).read_text(encoding="utf-8", errors="ignore")[:2048])
-        audio = _find_audio(f, files)
+        fm = _parse_frontmatter(p.read_text(encoding="utf-8", errors="ignore")[:2048])
+        # _find_audio only makes sense for out_dir-adjacent files (files list is out_dir-
+        # scoped); a note already filed elsewhere in the vault keeps whatever audio link
+        # it had (frontmatter carries no audio path), matching current out_dir-only lookup.
+        audio = _find_audio(p.name, files) if p.parent == out else None
         _db_upsert(conn, {
-            "note": note_path, "stamp": f[len("meeting-"):-3], "title": fm.get("title", ""),
+            "note": note_path, "stamp": stamp, "title": fm.get("title", ""),
             "template": fm.get("template", ""), "language": fm.get("language", ""),
             "date": fm.get("date", ""), "audio": str(out / audio) if audio else None,
             "mtime": mtime, "source": fm.get("source", "")})
@@ -2168,9 +2217,9 @@ def _parse_any_stamp(stamp):
         return None
 
 
-def cmd_history(out_dir, db_path, pending_file=None):
+def cmd_history(out_dir, db_path, pending_file=None, vault_root=None):
     conn = _db_connect(db_path)
-    _reconcile(conn, out_dir)
+    _reconcile(conn, out_dir, vault_root)
     items = _db_list(conn)
     conn.close()
     if pending_file:
@@ -3122,6 +3171,9 @@ def main():
     p_hist.add_argument("--out-dir", dest="out_dir", default=default_obsidian)
     p_hist.add_argument("--db", required=True)
     p_hist.add_argument("--pending-file", dest="pending_file", default=None)
+    # optional PARA vault root — when given, История also picks up notes that were
+    # filed (moved) out of out_dir, instead of dropping them the moment they're filed.
+    p_hist.add_argument("--vault-root", dest="vault_root", default=None)
 
     p_idx = sub.add_parser("index")
     p_idx.add_argument("--root", required=True)
@@ -3153,7 +3205,7 @@ def main():
     elif args.cmd == "extract":
         cmd_extract(args.note)
     elif args.cmd == "history":
-        cmd_history(args.out_dir, args.db, args.pending_file)
+        cmd_history(args.out_dir, args.db, args.pending_file, args.vault_root)
     elif args.cmd == "record":
         cmd_record(args.out, args.device)
     elif args.cmd == "mix":

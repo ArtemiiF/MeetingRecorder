@@ -1723,6 +1723,17 @@ function sourceBadge(source) {
   return ` <span class="rail-badge" title="${escapeHtml(title)}">${icon}</span>`;
 }
 
+// Date-group divider text (item: История groups by day so the calendar isn't needed).
+// ru-RU's "day + long month" CLDR pattern is genitive by design ("8 июля", not "8 июль") —
+// no manual month-name table needed.
+const RAIL_GROUP_DATE_FMT = new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "long" });
+function formatGroupDate(isoDate) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(isoDate);
+  if (!m) return isoDate; // defensive: an unparseable stamp still gets a header, just as-is
+  const [, y, mo, d] = m;
+  return RAIL_GROUP_DATE_FMT.format(new Date(+y, +mo - 1, +d)); // local Y/M/D ctor — no UTC shift
+}
+
 // render the rail filtered by search (title/date) + language + template + date range.
 // dataset.idx points into the full historyItems so selection survives filtering.
 // Pending recordings (state.pendingRecordings) render first and ALWAYS, bypassing every
@@ -1764,7 +1775,26 @@ function renderRail() {
     rail.insertAdjacentHTML("beforeend", '<p class="hint">Ничего не найдено.</p>');
     return;
   }
+  // Date-group headers: counted over `shown` (the filtered list) so "8 июля · N" always
+  // matches what's actually visible, not the unfiltered total. `shown` is already in
+  // backend/stamp order (see comment above notes filter), so same-day rows are
+  // contiguous — a single forward pass with a running "last date seen" is enough.
+  const dateCounts = new Map();
   shown.forEach((it) => {
+    const d = (it.name || "").slice(0, 10);
+    if (!d) return;
+    dateCounts.set(d, (dateCounts.get(d) || 0) + 1);
+  });
+  let lastDate = null;
+  shown.forEach((it) => {
+    const d = (it.name || "").slice(0, 10);
+    if (d && d !== lastDate) {
+      lastDate = d;
+      const header = document.createElement("div");
+      header.className = "rail-date-header";
+      header.textContent = `${formatGroupDate(d)} · ${dateCounts.get(d)}`;
+      rail.appendChild(header);
+    }
     const idx = historyItems.indexOf(it);
     const el = document.createElement("button");
     el.className = "rail-item";

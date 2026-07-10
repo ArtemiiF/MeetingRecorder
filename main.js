@@ -1543,9 +1543,14 @@ function cleanupUpdateLeftovers() {
 // at their real chronological position (option c — see HANDOFF/analyzer notes).
 ipcMain.handle("list-history", async (_e, outDir) => {
   const dir = expandHome(outDir) || DEFAULT_OUT;
+  // PARA vault root (if configured) so a note moved out of out_dir by filing still shows
+  // up in История instead of disappearing on the next reconcile — see readParaRoot below.
+  const vaultRoot = readParaRoot();
+  const histArgs = ["history", "--out-dir", dir, "--db", DB_PATH, "--pending-file", PENDING_FILE];
+  if (vaultRoot) histArgs.push("--vault-root", vaultRoot);
   const items = await new Promise((resolve) => {
     let out = [];
-    runBackend(["history", "--out-dir", dir, "--db", DB_PATH, "--pending-file", PENDING_FILE],
+    runBackend(histArgs,
       (ev) => { if (ev.event === "history") out = ev.items; },
       () => resolve(out));
   });
