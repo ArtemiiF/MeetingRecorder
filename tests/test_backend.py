@@ -310,6 +310,24 @@ def test_summarize_never_gains_model_field_even_when_fast_model_set(monkeypatch)
     assert "model" not in calls["json"]
 
 
+# ── summarize / main-model override (substantive LLM call) ─────────────────
+def test_summarize_includes_model_field_when_main_model_set(monkeypatch):
+    pipe = backend.Pipeline(out_dir="/tmp/mr-test-out", diarize=False, main_model="qwen/qwen3.5-9b")
+    payload = {"choices": [{"message": {"content": "СВОДКА"}}]}
+    calls = install_fake_requests(monkeypatch, payload=payload)
+    pipe.summarize("транскрипт", "сделай сводку")
+    assert calls["json"]["model"] == "qwen/qwen3.5-9b"
+
+
+# Regression lock: empty main_model must preserve today's behaviour byte-identical —
+# no "model" key at all, so the reasoning model with thinking stays the default loaded one.
+def test_summarize_omits_model_field_when_main_model_empty(monkeypatch, pipe):
+    payload = {"choices": [{"message": {"content": "СВОДКА"}}]}
+    calls = install_fake_requests(monkeypatch, payload=payload)
+    pipe.summarize("транскрипт", "сделай сводку")
+    assert "model" not in calls["json"]
+
+
 # ── list_devices / find_device_index (mock pyaudio) ─────────────────────────
 class FakePyAudio:
     def __init__(self, devices, default_index=0):
@@ -591,6 +609,23 @@ def test_cmd_classify_rejects_bad_category(monkeypatch, tmp_path):
         "content": '{"category":"WEIRD","project":"P"}'}}]})
     events = capture(backend.cmd_classify, str(note))
     assert any(e["event"] == "error" for e in events), f"expected error event, got: {events}"
+
+
+# ── cmd_classify / main-model override (substantive LLM call) ──────────────
+def test_cmd_classify_includes_model_field_when_main_model_set(monkeypatch, tmp_path):
+    note = tmp_path / "n.md"; note.write_text("проект лендинг к марту", encoding="utf-8")
+    calls = install_fake_requests(monkeypatch, payload={"choices": [{"message": {
+        "content": '{"category":"projects","project":"Лендинг"}'}}]})
+    capture(backend.cmd_classify, str(note), "", "qwen/qwen3.5-9b")
+    assert calls["json"]["model"] == "qwen/qwen3.5-9b"
+
+
+def test_cmd_classify_omits_model_field_when_main_model_empty(monkeypatch, tmp_path):
+    note = tmp_path / "n.md"; note.write_text("проект лендинг к марту", encoding="utf-8")
+    calls = install_fake_requests(monkeypatch, payload={"choices": [{"message": {
+        "content": '{"category":"projects","project":"Лендинг"}'}}]})
+    capture(backend.cmd_classify, str(note))
+    assert "model" not in calls["json"]
 
 
 def test_cmd_preflight_emits_checks():
@@ -1121,6 +1156,22 @@ def test_infer_speaker_names_no_labels_no_call(pipe):
     assert pipe.infer_speaker_names("обычный текст без меток") == {}
 
 
+# ── infer_speaker_names / main-model override (substantive LLM call) ───────
+def test_infer_speaker_names_includes_model_field_when_main_model_set(monkeypatch):
+    pipe = backend.Pipeline(out_dir="/tmp/mr-test-out", diarize=False, main_model="qwen/qwen3.5-9b")
+    calls = install_fake_requests(monkeypatch, payload={"choices": [{"message": {
+        "content": '{"Спикер 1": "Алексей"}'}}]})
+    pipe.infer_speaker_names("**[Спикер 1]**: привет")
+    assert calls["json"]["model"] == "qwen/qwen3.5-9b"
+
+
+def test_infer_speaker_names_omits_model_field_when_main_model_empty(monkeypatch, pipe):
+    calls = install_fake_requests(monkeypatch, payload={"choices": [{"message": {
+        "content": '{"Спикер 1": "Алексей"}'}}]})
+    pipe.infer_speaker_names("**[Спикер 1]**: привет")
+    assert "model" not in calls["json"]
+
+
 # ── extract_actions (action items / decisions structured LLM call) ─────────────
 def test_extract_actions_happy_path(monkeypatch, pipe):
     payload = {"choices": [{"message": {"content":
@@ -1177,6 +1228,22 @@ def test_extract_actions_non_200_returns_empty(monkeypatch, pipe):
 def test_extract_actions_swallows_exception(monkeypatch, pipe):
     install_fake_requests(monkeypatch, raise_exc=RuntimeError("boom"))
     assert pipe.extract_actions("транскрипт") == {}
+
+
+# ── extract_actions / main-model override (substantive LLM call) ───────────
+def test_extract_actions_includes_model_field_when_main_model_set(monkeypatch):
+    pipe = backend.Pipeline(out_dir="/tmp/mr-test-out", diarize=False, main_model="qwen/qwen3.5-9b")
+    calls = install_fake_requests(monkeypatch, payload={"choices": [{"message": {
+        "content": '{"items":[],"decisions":[]}'}}]})
+    pipe.extract_actions("транскрипт")
+    assert calls["json"]["model"] == "qwen/qwen3.5-9b"
+
+
+def test_extract_actions_omits_model_field_when_main_model_empty(monkeypatch, pipe):
+    calls = install_fake_requests(monkeypatch, payload={"choices": [{"message": {
+        "content": '{"items":[],"decisions":[]}'}}]})
+    pipe.extract_actions("транскрипт")
+    assert "model" not in calls["json"]
 
 
 # ── add_actions_section (note body assembly) ────────────────────────────────────
@@ -1745,7 +1812,7 @@ def test_cmd_process_uses_default_prompt_when_file_blank(monkeypatch, tmp_path):
         prompt_file=str(blank), out_dir=str(tmp_path), engine="mlx",
         diarize=False, infile="x.wav", keep_audio=False, cache_dir=None,
         language="ru", glossary="", summarize=True, template="", db=None,
-        mic=None, system=None, author_name="Автор", origin=None, fast_model="",
+        mic=None, system=None, author_name="Автор", origin=None, fast_model="", main_model="",
         glossary_usage_file=None)
     backend.cmd_process(args)
     assert "краткую структурированную сводку" in captured["prompt"]
@@ -1761,7 +1828,7 @@ def test_cmd_process_forwards_user_prompt(monkeypatch, tmp_path):
         prompt_file=str(pf), out_dir=str(tmp_path), engine="mlx",
         diarize=True, infile="x.wav", keep_audio=False, cache_dir=None,
         language="ru", glossary="", summarize=True, template="", db=None,
-        mic=None, system=None, author_name="Автор", origin=None, fast_model="",
+        mic=None, system=None, author_name="Автор", origin=None, fast_model="", main_model="",
         glossary_usage_file=None)
     backend.cmd_process(args)
     assert captured["p"] == "МОЙ КАСТОМНЫЙ ПРОМПТ"
@@ -2089,7 +2156,7 @@ def test_cmd_process_forwards_glossary_to_pipeline(monkeypatch, tmp_path):
         prompt_file=None, out_dir=str(tmp_path), engine="mlx",
         diarize=False, infile="x.wav", keep_audio=False, cache_dir=None,
         language="ru", glossary="Иван Петров, Mindbox", summarize=True, template="", db=None,
-        mic=None, system=None, author_name="Автор", origin=None, fast_model="",
+        mic=None, system=None, author_name="Автор", origin=None, fast_model="", main_model="",
         glossary_usage_file=None)
     backend.cmd_process(args)
     assert captured["glossary"] == "Иван Петров, Mindbox"
@@ -2111,9 +2178,30 @@ def test_cmd_process_forwards_fast_model_to_pipeline(monkeypatch, tmp_path):
         diarize=False, infile="x.wav", keep_audio=False, cache_dir=None,
         language="ru", glossary="", summarize=True, template="", db=None,
         mic=None, system=None, author_name="Автор", origin=None, fast_model="google/gemma-3-4b",
-        glossary_usage_file=None)
+        main_model="", glossary_usage_file=None)
     backend.cmd_process(args)
     assert captured["fast_model"] == "google/gemma-3-4b"
+
+
+def test_cmd_process_forwards_main_model_to_pipeline(monkeypatch, tmp_path):
+    captured = {}
+    orig_init = backend.Pipeline.__init__
+
+    def spy_init(self, *a, **kw):
+        captured["main_model"] = kw.get("main_model")
+        orig_init(self, *a, **kw)
+
+    monkeypatch.setattr(backend.Pipeline, "__init__", spy_init)
+    monkeypatch.setattr(backend.Pipeline, "process",
+                        lambda self, a, p, keep_audio_in_obsidian=True, mic_file=None, system_file=None, origin=None: None)
+    args = types.SimpleNamespace(
+        prompt_file=None, out_dir=str(tmp_path), engine="mlx",
+        diarize=False, infile="x.wav", keep_audio=False, cache_dir=None,
+        language="ru", glossary="", summarize=True, template="", db=None,
+        mic=None, system=None, author_name="Автор", origin=None, fast_model="",
+        main_model="qwen/qwen3.5-9b", glossary_usage_file=None)
+    backend.cmd_process(args)
+    assert captured["main_model"] == "qwen/qwen3.5-9b"
 
 
 def test_cmd_process_forwards_glossary_usage_file_contents_to_pipeline(monkeypatch, tmp_path):
@@ -2133,7 +2221,7 @@ def test_cmd_process_forwards_glossary_usage_file_contents_to_pipeline(monkeypat
         prompt_file=None, out_dir=str(tmp_path), engine="mlx",
         diarize=False, infile="x.wav", keep_audio=False, cache_dir=None,
         language="ru", glossary="Антон, ClickHouse", summarize=True, template="", db=None,
-        mic=None, system=None, author_name="Автор", origin=None, fast_model="",
+        mic=None, system=None, author_name="Автор", origin=None, fast_model="", main_model="",
         glossary_usage_file=str(usage_file))
     backend.cmd_process(args)
     assert captured["glossary_usage"] == {"антон": 3, "clickhouse": 1}
@@ -2154,7 +2242,7 @@ def test_cmd_process_glossary_usage_file_absent_defaults_to_empty_dict(monkeypat
         prompt_file=None, out_dir=str(tmp_path), engine="mlx",
         diarize=False, infile="x.wav", keep_audio=False, cache_dir=None,
         language="ru", glossary="", summarize=True, template="", db=None,
-        mic=None, system=None, author_name="Автор", origin=None, fast_model="",
+        mic=None, system=None, author_name="Автор", origin=None, fast_model="", main_model="",
         glossary_usage_file=None)
     backend.cmd_process(args)
     assert captured["glossary_usage"] == {}
@@ -2177,7 +2265,7 @@ def test_cmd_process_glossary_usage_file_malformed_json_degrades_to_empty(monkey
         prompt_file=None, out_dir=str(tmp_path), engine="mlx",
         diarize=False, infile="x.wav", keep_audio=False, cache_dir=None,
         language="ru", glossary="", summarize=True, template="", db=None,
-        mic=None, system=None, author_name="Автор", origin=None, fast_model="",
+        mic=None, system=None, author_name="Автор", origin=None, fast_model="", main_model="",
         glossary_usage_file=str(bad_file))
     backend.cmd_process(args)
     assert captured["glossary_usage"] == {}
@@ -2557,6 +2645,57 @@ def test_cmd_search_via_messages_single_turn(monkeypatch, tmp_path):
     # Single turn → NO rewrite call (only embed GET + query embed POST + answer POST)
     chat_calls = [u for u in calls["post_urls"] if "chat" in u]
     assert len(chat_calls) == 1, f"single-turn must make exactly 1 chat call (answer), got: {chat_calls}"
+
+
+# ── cmd_search answer call / main-model override (substantive LLM call) ────
+# Single-turn conversation (no rewrite call) isolates the answer call as the only
+# chat completion — see the "NO rewrite call" assertion in the test just above.
+def test_cmd_search_includes_model_field_in_answer_call_when_main_model_set(monkeypatch, tmp_path):
+    vault = _make_fake_vault(tmp_path, [
+        ("meeting-2026-06-10.md",
+         '---\ntitle: "Синк по релизу"\ndate: "2026-06-10"\n---\n\nРешили выпустить v2 в июле.\n'),
+    ])
+    db = str(tmp_path / "rag.db")
+    models_payload = {"data": [{"id": "text-embedding-all-minilm-v2"}]}
+    embed_payload = _make_embed_payload(n_vecs=1, dim=4)
+    answer_text = "v2 запланирован на июль [2026-06-10 · Синк по релизу]."
+
+    install_fake_requests_rag(monkeypatch, get_payload=models_payload, embed_payload=embed_payload)
+    capture(backend.cmd_index, str(vault), db)
+
+    calls = install_fake_requests_rag(
+        monkeypatch, get_payload=models_payload, embed_payload=embed_payload,
+        post_payload={"choices": [{"message": {"content": answer_text}}]},
+    )
+    messages = [{"role": "user", "content": "когда выходит v2"}]
+    capture(backend.cmd_search, str(vault), db, messages=messages, main_model="qwen/qwen3.5-9b")
+    chat_jsons = [j for u, j in zip(calls["post_urls"], calls["post_jsons"]) if "chat" in u]
+    assert len(chat_jsons) == 1
+    assert chat_jsons[0]["model"] == "qwen/qwen3.5-9b"
+
+
+def test_cmd_search_omits_model_field_in_answer_call_when_main_model_empty(monkeypatch, tmp_path):
+    vault = _make_fake_vault(tmp_path, [
+        ("meeting-2026-06-10.md",
+         '---\ntitle: "Синк по релизу"\ndate: "2026-06-10"\n---\n\nРешили выпустить v2 в июле.\n'),
+    ])
+    db = str(tmp_path / "rag.db")
+    models_payload = {"data": [{"id": "text-embedding-all-minilm-v2"}]}
+    embed_payload = _make_embed_payload(n_vecs=1, dim=4)
+    answer_text = "v2 запланирован на июль [2026-06-10 · Синк по релизу]."
+
+    install_fake_requests_rag(monkeypatch, get_payload=models_payload, embed_payload=embed_payload)
+    capture(backend.cmd_index, str(vault), db)
+
+    calls = install_fake_requests_rag(
+        monkeypatch, get_payload=models_payload, embed_payload=embed_payload,
+        post_payload={"choices": [{"message": {"content": answer_text}}]},
+    )
+    messages = [{"role": "user", "content": "когда выходит v2"}]
+    capture(backend.cmd_search, str(vault), db, messages=messages)
+    chat_jsons = [j for u, j in zip(calls["post_urls"], calls["post_jsons"]) if "chat" in u]
+    assert len(chat_jsons) == 1
+    assert "model" not in chat_jsons[0]
 
 
 def test_cmd_search_multi_turn_fires_rewrite(monkeypatch, tmp_path):

@@ -316,9 +316,19 @@
       <section class="modal-sec">
         <h3>Модель для быстрых задач</h3>
         <label>Модель для быстрых задач (коррекция, заголовок, предложения)
-          <input type="text" id="fastModel" placeholder="google/gemma-3-4b" />
+          <input type="text" id="fastModel" list="fastModelOptions" placeholder="google/gemma-3-4b" />
+          <datalist id="fastModelOptions"></datalist>
         </label>
-        <p class="hint">Механические LLM-вызовы (коррекция словаря, заголовок, предложения терминов) пойдут в эту модель вместо загруженной по умолчанию — например, <code>google/gemma-3-4b</code>. Пусто — использовать загруженную модель.</p>
+        <p class="hint">Механические LLM-вызовы (коррекция словаря, заголовок, предложения терминов) пойдут в эту модель вместо загруженной по умолчанию — например, <code>google/gemma-3-4b</code>. Пусто — использовать загруженную модель. Список подсказок — из моделей, доступных сейчас в LM Studio.</p>
+      </section>
+
+      <section class="modal-sec">
+        <h3>Модель для основных задач</h3>
+        <label>Модель для основных задач (сводка, чат по заметкам, PARA-разбор, действия, спикеры)
+          <input type="text" id="mainModel" list="mainModelOptions" placeholder="qwen/qwen3.5-9b" />
+          <datalist id="mainModelOptions"></datalist>
+        </label>
+        <p class="hint">Основные LLM-вызовы (сводка встречи, чат по заметкам, PARA-разбор, извлечение действий, определение спикеров) пойдут в эту модель вместо загруженной по умолчанию. Пусто — использовать загруженную модель (сводка останется на модели с рассуждением, как сегодня). Список подсказок — из моделей, доступных сейчас в LM Studio.</p>
       </section>
 
       <section class="modal-sec">

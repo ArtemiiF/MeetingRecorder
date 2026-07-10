@@ -611,7 +611,7 @@ def _diff_term_hits(orig_tokens, new_tokens, terms):
 class Pipeline:
     def __init__(self, out_dir, engine="mlx", diarize=True, cache_dir=None,
                  language="ru", do_summary=True, template="", db_path=None, glossary="",
-                 author_name="Автор", fast_model="", glossary_usage=None):
+                 author_name="Автор", fast_model="", glossary_usage=None, main_model=""):
         self.TEMPLATE = template
         self.db_path = db_path
         self.OBSIDIAN_PATH = Path(out_dir)
@@ -635,6 +635,14 @@ class Pipeline:
         # summarize() and every other LLM call deliberately never read this —
         # the reasoning summary stays on the default loaded model.
         self.FAST_MODEL = fast_model
+        # Overrides the loaded LM Studio model for SUBSTANTIVE calls (summary, speaker-
+        # inference, action-item extraction) — see summarize/infer_speaker_names/
+        # extract_actions. Empty = omit "model" from the request body, LM Studio uses
+        # whatever's loaded — today's behaviour, including the reasoning-model summary
+        # with thinking, is byte-identical when this is empty (regression lock, mirrors
+        # FAST_MODEL's own empty-string contract). Mechanical calls (correct/title/
+        # suggest) never read this — they stay on FAST_MODEL exclusively.
+        self.MAIN_MODEL = main_model
         self.HF_TOKEN = os.environ.get("HF_TOKEN")
         # cache for resumable stages (heavy work — convert/transcribe/diarize).
         self.cache_dir = Path(cache_dir) if cache_dir else None
@@ -1200,19 +1208,18 @@ class Pipeline:
                 f"Сегодняшняя дата: {datetime.now().strftime('%Y-%m-%d')}\n\n"
                 f"ТРАНСКРИПТ ВСТРЕЧИ:\n{transcript}"
             )
-            resp = requests.post(
-                self.LMSTUDIO_API,
-                json={
-                    "messages": [
-                        {"role": "system", "content": sys_msg},
-                        {"role": "user", "content": user_msg},
-                    ],
-                    # reasoning model needs headroom to think AND emit the note; a low
-                    # cap truncates mid-thought (finish=length) and leaves content empty.
-                    "temperature": 0.3, "max_tokens": 16000,
-                },
-                timeout=300,
-            )
+            payload = {
+                "messages": [
+                    {"role": "system", "content": sys_msg},
+                    {"role": "user", "content": user_msg},
+                ],
+                # reasoning model needs headroom to think AND emit the note; a low
+                # cap truncates mid-thought (finish=length) and leaves content empty.
+                "temperature": 0.3, "max_tokens": 16000,
+            }
+            if self.MAIN_MODEL:
+                payload["model"] = self.MAIN_MODEL
+            resp = requests.post(self.LMSTUDIO_API, json=payload, timeout=300)
             if resp.status_code != 200:
                 log(f"⚠️ LM Studio HTTP {resp.status_code}")
                 return None
@@ -1286,7 +1293,7 @@ class Pipeline:
         if not labels:
             return {}
         try:
-            resp = requests.post(self.LMSTUDIO_API, json={
+            payload = {
                 "messages": [
                     {"role": "system", "content": "Ты определяешь реальные имена спикеров. Отвечай только JSON."},
                     {"role": "user", "content":
@@ -1296,7 +1303,10 @@ class Pipeline:
                         f"ТРАНСКРИПТ:\n{transcript[:4000]}"},
                 ],
                 "temperature": 0.1, "max_tokens": 2500,
-            }, timeout=120)
+            }
+            if self.MAIN_MODEL:
+                payload["model"] = self.MAIN_MODEL
+            resp = requests.post(self.LMSTUDIO_API, json=payload, timeout=120)
             if resp.status_code == 200:
                 msg = (resp.json().get("choices") or [{}])[0].get("message", {})
                 c = (msg.get("content") or "") or (msg.get("reasoning_content") or "")
@@ -1349,7 +1359,7 @@ class Pipeline:
         section, no crash."""
         import requests
         try:
-            resp = requests.post(self.LMSTUDIO_API, json={
+            payload = {
                 "messages": [
                     {"role": "system", "content":
                         "Ты извлекаешь из транскрипта встречи задачи, договорённости и решения. "
@@ -1364,7 +1374,10 @@ class Pipeline:
                         f"ТРАНСКРИПТ:\n{transcript[:8000]}"},
                 ],
                 "temperature": 0.1, "max_tokens": 4000,
-            }, timeout=180)
+            }
+            if self.MAIN_MODEL:
+                payload["model"] = self.MAIN_MODEL
+            resp = requests.post(self.LMSTUDIO_API, json=payload, timeout=180)
             if resp.status_code != 200:
                 return {}
             msg = (resp.json().get("choices") or [{}])[0].get("message", {})
@@ -1762,7 +1775,7 @@ def cmd_process(args):
                     cache_dir=args.cache_dir, language=args.language, do_summary=args.summarize,
                     template=args.template, db_path=args.db, glossary=args.glossary,
                     author_name=args.author_name, fast_model=args.fast_model,
-                    glossary_usage=glossary_usage)
+                    glossary_usage=glossary_usage, main_model=args.main_model)
     try:
         pipe.process(args.infile, prompt, keep_audio_in_obsidian=args.keep_audio,
                      mic_file=args.mic, system_file=args.system, origin=args.origin)
@@ -2188,7 +2201,7 @@ def cmd_history(out_dir, db_path, pending_file=None):
     emit("history", items=items)
 
 
-def cmd_classify(note_path, existing_json=""):
+def cmd_classify(note_path, existing_json="", main_model=""):
     """Classify a meeting note into a PARA category + project name via the LLM.
     existing_json: optional JSON {category: [project names]} of accumulators that already
     exist — the model is told to REUSE a matching one instead of inventing a sibling,
@@ -2214,7 +2227,7 @@ def cmd_classify(note_path, existing_json=""):
                 "\nЕсли заметка относится к одному из них — верни ТОЧНО эту category и "
                 "project (имя из списка дословно). Только если ничего не подходит — новый project.\n")
     try:
-        resp = requests.post("http://localhost:1234/v1/chat/completions", json={
+        payload = {
             "messages": [
                 {"role": "system", "content": "Ты раскладываешь заметки по методу PARA. Отвечай только JSON."},
                 {"role": "user", "content":
@@ -2228,7 +2241,10 @@ def cmd_classify(note_path, existing_json=""):
                     f"ЗАМЕТКА:\n{text}"},
             ],
             "temperature": 0.2, "max_tokens": 2500,
-        }, timeout=120)
+        }
+        if main_model:
+            payload["model"] = main_model
+        resp = requests.post("http://localhost:1234/v1/chat/completions", json=payload, timeout=120)
         if resp.status_code == 200:
             msg = (resp.json().get("choices") or [{}])[0].get("message", {})
             c = (msg.get("content") or "") or (msg.get("reasoning_content") or "")
@@ -2650,7 +2666,7 @@ def _rag_retrieve(conn, retrieval_query, embed_model):
     return candidates, False
 
 
-def cmd_search(root, db_path, query=None, embed_model=None, messages=None):
+def cmd_search(root, db_path, query=None, embed_model=None, messages=None, main_model=""):
     """Hybrid RAG search over indexed vault with optional conversation history.
 
     Input:
@@ -2786,13 +2802,16 @@ def cmd_search(root, db_path, query=None, embed_model=None, messages=None):
     # ── 5. Call LM Studio chat ────────────────────────────────────────────
     answer = None
     try:
+        answer_payload = {
+            "messages": llm_messages,
+            "temperature": 0.2,
+            "max_tokens": 4096,
+        }
+        if main_model:
+            answer_payload["model"] = main_model
         resp = requests.post(
             f"{_RAG_BASE_URL}/v1/chat/completions",
-            json={
-                "messages": llm_messages,
-                "temperature": 0.2,
-                "max_tokens": 4096,
-            },
+            json=answer_payload,
             timeout=300,
         )
         if resp.status_code == 200:
@@ -3079,6 +3098,8 @@ def main():
     p_cls = sub.add_parser("classify")
     p_cls.add_argument("--note", required=True)
     p_cls.add_argument("--existing", default="")  # JSON {category: [names]} for reuse
+    # Main model override for this substantive task — see Pipeline.MAIN_MODEL.
+    p_cls.add_argument("--main-model", dest="main_model", default="")
 
     p_ext = sub.add_parser("extract")
     p_ext.add_argument("--note", required=True)
@@ -3117,6 +3138,10 @@ def main():
     p_proc.add_argument("--origin", choices=["batch", "file"], default=None)  # ignored when --mic/--system given (recording wins)
     # Fast model for mechanical LLM calls only (correct/title/suggest) — see Pipeline.FAST_MODEL.
     p_proc.add_argument("--fast-model", dest="fast_model", default="")
+    # Main model for substantive LLM calls (summary/speaker-inference/actions) — see
+    # Pipeline.MAIN_MODEL. Empty → omit "model" entirely, today's behaviour (including the
+    # reasoning-model summary with thinking) preserved byte-identical.
+    p_proc.add_argument("--main-model", dest="main_model", default="")
 
     p_hist = sub.add_parser("history")
     p_hist.add_argument("--out-dir", dest="out_dir", default=default_obsidian)
@@ -3137,6 +3162,8 @@ def main():
     p_srch.add_argument("--messages", default=None,
                         help="JSON array of {role,content} objects, last item is newest user msg")
     p_srch.add_argument("--embed-model", dest="embed_model", default=None)
+    # Main model override for the answer LLM call only — see Pipeline.MAIN_MODEL.
+    p_srch.add_argument("--main-model", dest="main_model", default="")
 
     args = parser.parse_args()
 
@@ -3149,7 +3176,7 @@ def main():
     elif args.cmd == "download-models":
         cmd_download_models(args.only)
     elif args.cmd == "classify":
-        cmd_classify(args.note, args.existing)
+        cmd_classify(args.note, args.existing, args.main_model)
     elif args.cmd == "extract":
         cmd_extract(args.note)
     elif args.cmd == "history":
@@ -3164,7 +3191,8 @@ def main():
         cmd_index(args.root, args.db, args.embed_model)
     elif args.cmd == "search":
         cmd_search(args.root, args.db, query=args.query,
-                   embed_model=args.embed_model, messages=args.messages)
+                   embed_model=args.embed_model, messages=args.messages,
+                   main_model=args.main_model)
 
 
 if __name__ == "__main__":
