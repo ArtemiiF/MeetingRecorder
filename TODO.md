@@ -1,5 +1,13 @@
 # TODO
 
+## Инцидент 2026-07-10 (диагностирован, не чинен)
+- **Гонка стоп-записи ↔ обработка**: 25-мин запись → в пайплайн попало 0.4с (mono-кеш 12КБ при живом mixed 48МБ); стоп и старт обработки в одну секунду — mixed.wav, видимо, дописывался. Guard: pending-▶ (и «Обработать все») не активировать до подтверждённой финализации mixed (файл закрыт + размер стабилен), или манифест-append строго после close. Диагностика в HANDOFF.
+
+## Не-блокеры критик-гейтов (2026-07-10, PR #11-#13)
+- `removeGlossaryTerm` не чистит `glossaryCategories[low]` удалённого термина — сироты копятся в presets.json безгранично (рендер не задет; suggestions/dismissed капятся, категории — нет). Чистить при удалении.
+- `classify-glossary-terms` IPC без guard'а на `installBackendProc`/`updateProc` (паттерн para-extract) — клик мид-установки даст «нет ответа» вместо честного «дождитесь». Выровнять с start-recording-гейтами.
+- Двойной клик по «📋 Путь»/copy-кнопкам внутри окна фидбека клоберит захваченный текст (предсуществующий паттерн copyToClipboard) — кнопка залипает на «✓ Скопировано». Косметика.
+
 ## Не-блокеры критик-гейтов (2026-07-07, упаковка .app)
 - Install atomic-rename: краш/kill между `rename(BACKEND_ENV→BACKEND_ENV.old)` и `rename(staging→BACKEND_ENV)` стрендит рабочий env в `.old`, новый в staging — ни один не на `BACKEND_ENV` (резолвится SAFE: absent→venv, но юзер теряет установку). `.old` чистится только на старте след. установки, НЕ на launch и НЕ в `uninstall-backend` → ~1.3ГБ может залипнуть. Чистить `.old` в uninstall + на launch.
 - pip-стадия НЕ hash-pinned (`--find-links … -r requirements.txt` без `--require-hashes`; requirements без хешей) — стандартный pip-over-TLS trust; python-build-standalone+ffmpeg ЗAheshированы. `--require-hashes` для 107 транзитивных деп — непропорционально, оставлено сознательно.
