@@ -35,6 +35,11 @@ const state = {
   glossaryUsage: {},       // cumulative {termLower: fireCount} — merged in from each "done" event
                            // (see mergeGlossaryUsage), fed back to backend.py to order the
                            // Whisper initial_prompt's terms before its token-budget truncation.
+  glossaryCategories: {},  // {termLower: category} — "Мои" grouping metadata ONLY (see
+                           // GLOSSARY_CATEGORIES). Lives ALONGSIDE state.glossary (the comma-
+                           // string mirror to the backend is untouched — backend doesn't need
+                           // categories); a term absent here (or Стандартные terms, which are
+                           // never categorized) falls into «Другое» — see glossaryCategoryOf.
   para: null, // { root, folders: {projects, areas, resources, archives} }
 };
 
@@ -675,6 +680,7 @@ async function init() {
   state.glossarySuggestions = data.glossarySuggestions || [];
   state.glossaryDismissed = data.glossaryDismissed || [];
   state.glossaryUsage = data.glossaryUsage || {};
+  state.glossaryCategories = data.glossaryCategories || {};
   state.para = data.para || null;
   state.secretEncrypted = data.secretEncrypted !== false;
   $("outDir").value = state.outDir;
@@ -790,6 +796,7 @@ async function persistPresets() {
     glossarySuggestions: state.glossarySuggestions,
     glossaryDismissed: state.glossaryDismissed,
     glossaryUsage: state.glossaryUsage,
+    glossaryCategories: state.glossaryCategories,
     para: state.para,
   });
 }
@@ -894,16 +901,57 @@ function usageBadge(term) {
   return n > 0 ? ` <span class="chip-usage">${n}×</span>` : "";
 }
 
-function glossaryChipHtml(t) {
+// ── glossary: "Мои" categories (V2 — «разбить по папочкам») ─────────────────
+// Fixed, small bucket set ("папочки") rather than free-form tags — Otter-style
+// precedent from this feature's research. Provisional taxonomy: derived from the
+// owner's own examples (имена → «Люди», технические → «Термины»/«Продукты и
+// инструменты»); "кулинария" wasn't promoted to its own bucket — «Другое» catches
+// whatever doesn't fit. Only "Мои" terms are ever grouped/categorized —
+// "Стандартные" stays the flat collapsed list it already was (V1).
+// Kept in sync BY HAND with the identical Python tuple in backend.py
+// (GLOSSARY_TERM_CATEGORIES) — renderer and backend never share a runtime.
+const GLOSSARY_CATEGORY_OTHER = "Другое";
+const GLOSSARY_CATEGORIES = ["Люди", "Продукты и инструменты", "Термины", GLOSSARY_CATEGORY_OTHER];
+
+// A term with no entry in state.glossaryCategories, or an entry outside the fixed
+// set (e.g. a stale value from a future/rolled-back version), always resolves to
+// «Другое» — the fixed set never rejects a term.
+function glossaryCategoryOf(term) {
+  const c = (state.glossaryCategories || {})[term.toLowerCase()];
+  return GLOSSARY_CATEGORIES.includes(c) ? c : GLOSSARY_CATEGORY_OTHER;
+}
+
+function setGlossaryTermCategory(term, category) {
+  const cat = GLOSSARY_CATEGORIES.includes(category) ? category : GLOSSARY_CATEGORY_OTHER;
+  const categories = Object.assign({}, state.glossaryCategories || {});
+  categories[term.toLowerCase()] = cat;
+  state.glossaryCategories = categories;
+  renderGlossaryChips();
+  persistPresets();
+}
+
+// withCategory=true adds a per-chip category <select> ("Мои" chips only —
+// "Стандартные" chips never carry one, V1 behaviour unchanged for that section).
+function glossaryChipHtml(t, withCategory) {
+  const categorySelect = withCategory
+    ? `<select class="chip-category" aria-label="Категория термина">` +
+      GLOSSARY_CATEGORIES.map((c) =>
+        `<option value="${escapeHtml(c)}"${c === glossaryCategoryOf(t) ? " selected" : ""}>${escapeHtml(c)}</option>`
+      ).join("") +
+      `</select>`
+    : "";
   return `<span class="chip"><span class="chip-text">${escapeHtml(t)}${usageBadge(t)}</span>` +
+    categorySelect +
     `<button type="button" class="chip-remove" aria-label="Удалить">×</button></span>`;
 }
 
-// Chips split into "Мои" (custom terms, always shown) and "Стандартные" (terms
-// that are also in DEFAULT_GLOSSARY — there can be 100+, so collapsed by
-// default with a toggle). A live substring filter narrows both sections and
-// forces "Стандартные" open while it has matches, so a hidden default term is
-// still reachable by typing instead of manually expanding first.
+// Chips split into "Мои" (custom terms, always shown — now grouped into category
+// subheaders, see GLOSSARY_CATEGORIES) and "Стандартные" (terms that are also in
+// DEFAULT_GLOSSARY — there can be 100+, so collapsed by default with a toggle,
+// flat, uncategorized — V1 behaviour). A live substring filter narrows both
+// sections (and every "Мои" category group within them) and forces "Стандартные"
+// open while it has matches, so a hidden default term is still reachable by
+// typing instead of manually expanding first.
 function renderGlossaryChips() {
   const terms = parseGlossaryTerms(state.glossary);
   const box = $("glossaryChips");
@@ -925,26 +973,46 @@ function renderGlossaryChips() {
   if (q && !totalShown) {
     box.innerHTML = '<p class="hint">Ничего не найдено по фильтру.</p>';
   } else {
+    // mineOrder tracks terms in the exact order their chips land in the DOM
+    // (grouped by category — GLOSSARY_CATEGORIES order — not mineShown's original
+    // add-order); the closures below index into it, so a click always targets the
+    // chip that was actually rendered at that position. Categories with 0 shown
+    // terms are skipped entirely (no empty subheader), same "filter narrows what's
+    // visible" contract the Стандартные toggle already has.
+    const mineOrder = [];
+    const mineHtml = GLOSSARY_CATEGORIES.map((cat) => {
+      const inCat = mineShown.filter((t) => glossaryCategoryOf(t) === cat);
+      if (!inCat.length) return "";
+      mineOrder.push(...inCat);
+      return `<div class="glossary-category-group">` +
+        `<div class="glossary-category-header">${escapeHtml(cat)} ` +
+        `<span class="glossary-count">${inCat.length}</span></div>` +
+        `<div class="chip-list">${inCat.map((t) => glossaryChipHtml(t, true)).join("")}</div>` +
+        `</div>`;
+    }).join("");
+
     const expandDefault = !glossaryDefaultCollapsed || (!!q && defaultShown.length > 0);
     const defaultCountLabel = q ? `${defaultShown.length} из ${defaultTerms.length}` : `${defaultTerms.length}`;
     box.innerHTML =
-      `<div id="glossaryChipsMine" class="chip-list">${mineShown.map(glossaryChipHtml).join("")}</div>` +
+      `<div id="glossaryChipsMine">${mineHtml}</div>` +
       (defaultTerms.length
         ? `<div class="glossary-section-default">` +
           `<button type="button" id="glossaryDefaultToggle" class="glossary-section-toggle">` +
           `<span class="glossary-caret">${expandDefault ? "▾" : "▸"}</span> Стандартные ` +
           `<span class="glossary-count">${defaultCountLabel}</span></button>` +
           `<div class="chip-list glossary-default-chips${expandDefault ? "" : " hidden"}">` +
-          `${defaultShown.map(glossaryChipHtml).join("")}</div></div>`
+          `${defaultShown.map((t) => glossaryChipHtml(t, false)).join("")}</div></div>`
         : "");
-    // Term is captured via closure (index into the SHOWN array that produced
-    // each section's innerHTML) rather than round-tripped through a data-*
-    // attribute — a term containing a `"` would otherwise break out of the
-    // attribute (escapeHtml only escapes &<>, not quotes) and also desync
-    // removal, since the garbled attribute value would no longer match the
+    // Term is captured via closure (index into mineOrder/defaultShown, the SAME
+    // arrays that produced each section's innerHTML) rather than round-tripped
+    // through a data-* attribute — a term containing a `"` would otherwise break
+    // out of the attribute (escapeHtml only escapes &<>, not quotes) and also
+    // desync removal, since the garbled attribute value would no longer match the
     // original term.
     box.querySelector("#glossaryChipsMine").querySelectorAll(".chip-remove").forEach((btn, i) =>
-      btn.addEventListener("click", () => removeGlossaryTerm(mineShown[i])));
+      btn.addEventListener("click", () => removeGlossaryTerm(mineOrder[i])));
+    box.querySelector("#glossaryChipsMine").querySelectorAll(".chip-category").forEach((sel, i) =>
+      sel.addEventListener("change", () => setGlossaryTermCategory(mineOrder[i], sel.value)));
     const defaultBox = box.querySelector(".glossary-default-chips");
     if (defaultBox) {
       defaultBox.querySelectorAll(".chip-remove").forEach((btn, i) =>
@@ -1002,6 +1070,51 @@ $("glossaryNewTerm").addEventListener("keydown", (e) => {
 });
 $("glossaryFillDefaults").addEventListener("click", mergeDefaultGlossary);
 $("glossaryToggleText").addEventListener("click", () => $("glossaryTextWrap").classList.toggle("hidden"));
+
+// ── glossary: "Мои" auto-classification ("Разложить по категориям" button) ──
+// One-shot LLM batch classify of ALL "Мои" terms (not just what the live filter
+// currently shows — the point is to sort the whole shelf, not a filtered view)
+// via backend.py's classify-terms subcommand (see main.js's classify-glossary-
+// terms handler). Mirrors the suggest-stage's LM-down degrade: an unreachable/
+// erroring LM Studio surfaces an honest hint, never a crash.
+async function classifyGlossaryTerms() {
+  const btn = $("glossaryClassifyBtn");
+  if (btn.disabled) return;
+  const mineTerms = parseGlossaryTerms(state.glossary)
+    .filter((t) => !DEFAULT_GLOSSARY_TERMS_LOWER.has(t.toLowerCase()));
+  if (!mineTerms.length) {
+    showGlossaryHint("Нет своих терминов для разбора по категориям");
+    return;
+  }
+  btn.disabled = true;
+  showGlossaryHint("Раскладываю по категориям…");
+  try {
+    const res = await window.api.classifyGlossaryTerms(mineTerms, state.fastModel);
+    if (!res || res.error) {
+      showGlossaryHint(`Не удалось разложить по категориям: ${(res && res.error) || "нет ответа"}`);
+      return;
+    }
+    const incoming = res.categories || {};
+    const mineLower = new Set(mineTerms.map((t) => t.toLowerCase()));
+    const categories = Object.assign({}, state.glossaryCategories || {});
+    let assigned = 0;
+    Object.keys(incoming).forEach((low) => {
+      // Defensive re-check on top of the backend's own gate — only accept terms
+      // that are actually in THIS batch and a category from the fixed set.
+      if (!mineLower.has(low)) return;
+      const cat = GLOSSARY_CATEGORIES.includes(incoming[low]) ? incoming[low] : GLOSSARY_CATEGORY_OTHER;
+      categories[low] = cat;
+      assigned++;
+    });
+    state.glossaryCategories = categories;
+    renderGlossaryChips();
+    persistPresets();
+    showGlossaryHint(assigned ? `Разложено терминов: ${assigned}` : "LLM не вернул категорий для этих терминов");
+  } finally {
+    btn.disabled = false;
+  }
+}
+$("glossaryClassifyBtn").addEventListener("click", classifyGlossaryTerms);
 
 // ── glossary: "Предложения" inbox (auto-suggested terms from processing) ────
 // The backend's "suggest" pipeline stage extracts candidate terms from the final

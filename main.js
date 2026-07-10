@@ -1697,6 +1697,32 @@ ipcMain.handle("para-classify", async (_e, arg) => {
   });
 });
 
+// Словарь tab's «Разложить по категориям» — one-shot LLM batch sort of the "Мои"
+// glossary terms into the fixed category buckets (backend.py's classify-terms
+// subcommand does the actual LLM call + code-gate). Terms go through a temp JSON
+// file (same file-based plumbing as --prompt-file/--glossary-usage-file above —
+// avoids CLI arg length/escaping concerns), cleaned up on close either way.
+ipcMain.handle("classify-glossary-terms", async (_e, { terms, fastModel } = {}) => {
+  const list = Array.isArray(terms) ? terms : [];
+  if (!list.length) return { categories: {} };
+  const termsFile = path.join(TMP_DIR, `glossary-terms-${Date.now()}.json`);
+  fs.writeFileSync(termsFile, JSON.stringify(list), "utf-8");
+  const args = ["classify-terms", "--terms-file", termsFile];
+  if (fastModel) args.push("--fast-model", fastModel);
+  return new Promise((resolve) => {
+    let out = null;
+    runBackend(args,
+      (ev) => {
+        if (ev.event === "classified-terms") out = { categories: ev.categories || {} };
+        else if (ev.event === "error") out = { error: ev.msg };
+      },
+      () => {
+        try { fs.unlinkSync(termsFile); } catch {}
+        resolve(out || { error: "нет ответа от backend" });
+      });
+  });
+});
+
 ipcMain.handle("para-extract", async (_e, notePath) => {
   return new Promise((resolve) => {
     let out = null;

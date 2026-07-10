@@ -691,6 +691,110 @@ def test_cmd_classify_rejects_bad_category(monkeypatch, tmp_path):
     assert any(e["event"] == "error" for e in events), f"expected error event, got: {events}"
 
 
+# ── cmd_classify_terms (Словарь tab's «Разложить по категориям» — glossary
+# «Мои» auto-classification into the fixed GLOSSARY_TERM_CATEGORIES buckets) ──
+def test_cmd_classify_terms_happy_path(monkeypatch, tmp_path):
+    terms_file = tmp_path / "terms.json"
+    terms_file.write_text(json.dumps(["Иван Петров", "Mindbox"]), encoding="utf-8")
+    install_fake_requests(monkeypatch, payload={"choices": [{"message": {
+        "content": '{"Иван Петров": "Люди", "Mindbox": "Продукты и инструменты"}'}}]})
+    ev = [e for e in capture(backend.cmd_classify_terms, str(terms_file)) if e["event"] == "classified-terms"][0]
+    assert ev["categories"] == {"иван петров": "Люди", "mindbox": "Продукты и инструменты"}
+
+
+def test_cmd_classify_terms_drops_invented_terms_not_in_input(monkeypatch, tmp_path):
+    # Hard gate (mirrors suggest_glossary_terms's own invention-guard): a key the LLM
+    # returns that wasn't in the input batch is dropped outright, never merged in.
+    terms_file = tmp_path / "terms.json"
+    terms_file.write_text(json.dumps(["Mindbox"]), encoding="utf-8")
+    install_fake_requests(monkeypatch, payload={"choices": [{"message": {
+        "content": '{"Mindbox": "Продукты и инструменты", "ChatGPT": "Люди"}'}}]})
+    ev = [e for e in capture(backend.cmd_classify_terms, str(terms_file)) if e["event"] == "classified-terms"][0]
+    assert ev["categories"] == {"mindbox": "Продукты и инструменты"}
+
+
+def test_cmd_classify_terms_invalid_category_coerced_to_other(monkeypatch, tmp_path):
+    # Unlike cmd_classify (invalid category → "error"), classify-terms is a BATCH call —
+    # one wobbly category must not blow up the whole batch, so it's coerced to «Другое».
+    terms_file = tmp_path / "terms.json"
+    terms_file.write_text(json.dumps(["Плов"]), encoding="utf-8")
+    install_fake_requests(monkeypatch, payload={"choices": [{"message": {
+        "content": '{"Плов": "Кулинария"}'}}]})
+    ev = [e for e in capture(backend.cmd_classify_terms, str(terms_file)) if e["event"] == "classified-terms"][0]
+    assert ev["categories"] == {"плов": "Другое"}
+
+
+def test_cmd_classify_terms_lm_unreachable_degrades_to_error_event(monkeypatch, tmp_path):
+    terms_file = tmp_path / "terms.json"
+    terms_file.write_text(json.dumps(["Mindbox"]), encoding="utf-8")
+    install_fake_requests(monkeypatch, raise_exc=ConnectionError("LM Studio down"))
+    ev = capture(backend.cmd_classify_terms, str(terms_file))
+    assert any(e["event"] == "error" for e in ev), f"expected error event, got: {ev}"
+    assert not any(e["event"] == "classified-terms" for e in ev)
+
+
+def test_cmd_classify_terms_non_200_degrades_to_error_event(monkeypatch, tmp_path):
+    terms_file = tmp_path / "terms.json"
+    terms_file.write_text(json.dumps(["Mindbox"]), encoding="utf-8")
+    install_fake_requests(monkeypatch, status=503, payload={})
+    ev = capture(backend.cmd_classify_terms, str(terms_file))
+    assert any(e["event"] == "error" for e in ev)
+
+
+def test_cmd_classify_terms_empty_llm_content_degrades_to_error_event(monkeypatch, tmp_path):
+    terms_file = tmp_path / "terms.json"
+    terms_file.write_text(json.dumps(["Mindbox"]), encoding="utf-8")
+    install_fake_requests(monkeypatch, payload={"choices": [{"message": {"content": ""}}]})
+    ev = capture(backend.cmd_classify_terms, str(terms_file))
+    assert any(e["event"] == "error" for e in ev)
+
+
+def test_cmd_classify_terms_salvages_from_reasoning_content_when_content_empty(monkeypatch, tmp_path):
+    terms_file = tmp_path / "terms.json"
+    terms_file.write_text(json.dumps(["Mindbox"]), encoding="utf-8")
+    install_fake_requests(monkeypatch, payload={"choices": [{"message": {
+        "content": "", "reasoning_content": '{"Mindbox": "Продукты и инструменты"}'}}]})
+    ev = [e for e in capture(backend.cmd_classify_terms, str(terms_file)) if e["event"] == "classified-terms"][0]
+    assert ev["categories"] == {"mindbox": "Продукты и инструменты"}
+
+
+def test_cmd_classify_terms_empty_terms_list_emits_empty_categories_without_calling_llm(monkeypatch, tmp_path):
+    terms_file = tmp_path / "terms.json"
+    terms_file.write_text(json.dumps([]), encoding="utf-8")
+    calls = install_fake_requests(monkeypatch, payload={"choices": [{"message": {"content": "{}"}}]})
+    ev = [e for e in capture(backend.cmd_classify_terms, str(terms_file)) if e["event"] == "classified-terms"][0]
+    assert ev["categories"] == {}
+    assert calls == {}, "requests.post must never be invoked for an empty batch"
+
+
+def test_cmd_classify_terms_unreadable_terms_file_emits_error(monkeypatch, tmp_path):
+    ev = capture(backend.cmd_classify_terms, str(tmp_path / "missing.json"))
+    assert any(e["event"] == "error" for e in ev)
+
+
+def test_cmd_classify_terms_malformed_terms_file_emits_error(monkeypatch, tmp_path):
+    terms_file = tmp_path / "terms.json"
+    terms_file.write_text('{"not": "a list"}', encoding="utf-8")
+    ev = capture(backend.cmd_classify_terms, str(terms_file))
+    assert any(e["event"] == "error" for e in ev)
+
+
+def test_cmd_classify_terms_includes_fast_model_field_when_set(monkeypatch, tmp_path):
+    terms_file = tmp_path / "terms.json"
+    terms_file.write_text(json.dumps(["Mindbox"]), encoding="utf-8")
+    calls = install_fake_requests(monkeypatch, payload={"choices": [{"message": {"content": '{"Mindbox":"Термины"}'}}]})
+    backend.cmd_classify_terms(str(terms_file), fast_model="google/gemma-3-4b")
+    assert calls["json"]["model"] == "google/gemma-3-4b"
+
+
+def test_cmd_classify_terms_omits_fast_model_field_when_empty(monkeypatch, tmp_path):
+    terms_file = tmp_path / "terms.json"
+    terms_file.write_text(json.dumps(["Mindbox"]), encoding="utf-8")
+    calls = install_fake_requests(monkeypatch, payload={"choices": [{"message": {"content": '{"Mindbox":"Термины"}'}}]})
+    backend.cmd_classify_terms(str(terms_file))
+    assert "model" not in calls["json"]
+
+
 # ── cmd_classify / main-model override (substantive LLM call) ──────────────
 def test_cmd_classify_includes_model_field_when_main_model_set(monkeypatch, tmp_path):
     note = tmp_path / "n.md"; note.write_text("проект лендинг к марту", encoding="utf-8")
