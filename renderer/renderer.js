@@ -528,10 +528,13 @@ async function refreshSetupGate() {
 window.addEventListener("focus", refreshSetupGate);
 
 // ── in-app updater (settings "Обновления" section) ──────────────────────────
-// Manual button only — no auto-check on page load/settings-open (see task
-// contract), so this section starts blank and only fills in once the user
-// clicks "Проверить обновления".
+// Auto-checks once every time the settings overlay opens (in addition to the
+// manual "Проверить обновления" button) — check only, never auto-downloads.
+// appUpdateCheckInFlight guards both entry points against stacking a second
+// concurrent check while one is still running; it's independent of
+// appUpdateRunning, which guards the (much longer) install/download flow.
 let appUpdateRunning = false;
+let appUpdateCheckInFlight = false;
 let appUpdateInfo = null; // last check-app-update() result — drives the install button's visibility
 
 function renderUpdateStatusRow(text, dotClass) {
@@ -548,13 +551,15 @@ function setUpdateInstallUI(running) {
 }
 
 async function checkAppUpdate() {
-  if (appUpdateRunning) return;
+  if (appUpdateRunning || appUpdateCheckInFlight) return;
+  appUpdateCheckInFlight = true;
   $("updateCheckBtn").disabled = true;
   renderUpdateStatusRow("Проверяю…", "warn");
   $("updateInstallBtn").classList.add("hidden");
   $("updateDevHint").classList.add("hidden");
   $("updateInstallStatus").textContent = "";
   const res = await window.api.checkAppUpdate();
+  appUpdateCheckInFlight = false;
   $("updateCheckBtn").disabled = false;
   appUpdateInfo = res;
   if (!res || res.ok === false) {
@@ -603,7 +608,7 @@ window.api.onAppUpdateEvent((ev) => {
 });
 
 // settings / readiness modal
-function openSettings() { $("settingsOverlay").classList.remove("hidden"); refreshPreflight(); refreshBackendStatus(); refreshModels(); }
+function openSettings() { $("settingsOverlay").classList.remove("hidden"); refreshPreflight(); refreshBackendStatus(); refreshModels(); checkAppUpdate(); }
 function closeSettings() { $("settingsOverlay").classList.add("hidden"); }
 $("settingsOpen").addEventListener("click", openSettings);
 $("settingsClose").addEventListener("click", closeSettings);
