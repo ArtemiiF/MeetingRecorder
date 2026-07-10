@@ -224,6 +224,24 @@ test("history reprocess (from note view) is blocked while a run is in flight", a
   assert.equal(calls, 1);                             // guard blocked a second run
 });
 
+// ── copy note path (История note view) ───────────────────────────────────────
+test("nvCopyPath: copies the note's absolute path and shows brief feedback", async () => {
+  const { window, $ } = await boot({
+    listHistory: async () => [{ name: "2026-01-01", title: "Синк", note: "/Users/x/vault/meeting-x.md", audio: null }],
+  });
+  const copied = [];
+  window.navigator.clipboard.writeText = async (text) => { copied.push(text); };
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  $("historyList").querySelector(".rail-item:not(.pending)").click(); await tick(window);
+  const btn = $("noteView").querySelector("#nvCopyPath");
+  assert.equal(btn.textContent, "📋 Путь");
+  btn.click(); await tick(window);
+  assert.equal(copied[0], "/Users/x/vault/meeting-x.md");
+  assert.equal(btn.textContent, "✓ Скопировано");
+  await new Promise((r) => window.setTimeout(r, 1600));
+  assert.equal(btn.textContent, "📋 Путь");             // reverts after the feedback window
+});
+
 test("pending row in the История rail stays visible under an active filter that would exclude it", async () => {
   const { window, $, handlers } = await boot({
     listHistory: async () => [{ name: "2026-01-01", title: "Синк", language: "ru", note: "/a.md", audio: null }],
@@ -691,6 +709,31 @@ test("PARA sub-tabs: switch to Хранилище renders the vault tree, collap
   assert.ok(dir.classList.contains("collapsed"));
   dir.querySelector(".tree-dir-head").click();
   assert.ok(!dir.classList.contains("collapsed")); // existing toggle behavior, unchanged
+});
+
+// ── copy note path (PARA Хранилище/tree note view) ───────────────────────────
+test("ptvCopyPath: copies the tree note's absolute path and shows brief feedback", async () => {
+  const { window, $ } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru",
+      para: { root: "/v", folders: { projects: "Projects", areas: "Areas", resources: "Resources", archives: "Archives" } },
+    }),
+    paraTree: async () => [
+      { name: "meeting-x.md", path: "/v/Projects/meeting-x.md", type: "note" },
+    ],
+  });
+  const copied = [];
+  window.navigator.clipboard.writeText = async (text) => { copied.push(text); };
+  window.document.querySelector('.topbtn[data-view="para"]').click(); await tick(window);
+  window.document.querySelector('.subbtn[data-sub="tree"]').click(); await tick(window);
+  $("paraTree").querySelector(".tree-note").click(); await tick(window);
+  const btn = $("paraTreeView").querySelector("#ptvCopyPath");
+  assert.equal(btn.textContent, "📋 Путь");
+  btn.click(); await tick(window);
+  assert.equal(copied[0], "/v/Projects/meeting-x.md");
+  assert.equal(btn.textContent, "✓ Скопировано");
+  await new Promise((r) => window.setTimeout(r, 1600));
+  assert.equal(btn.textContent, "📋 Путь");             // reverts after the feedback window
 });
 
 test("PARA classify-all: per-row spinner shows while processing, clears once filed", async () => {
