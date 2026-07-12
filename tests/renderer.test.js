@@ -4740,3 +4740,128 @@ test("reprocess picker: cancel closes the panel and runs nothing", async () => {
   assert.equal(calls, 0, "cancel must not trigger a run");
   assert.ok(!$("noteView").querySelector("#reprocessPresetSelect"), "panel must be removed on cancel");
 });
+
+// ── note versioning by template on reprocess (История "Переобработать") ──────────
+test("reprocess picker computes the next per-template version (max existing +1) and sends it to processAudio", async () => {
+  let sent = null;
+  const { window, $ } = await boot({
+    getPresets: async () => ({
+      presets: [{ id: "p1", name: "Митинг", prompt: "prompt M" }], defaultOutDir: "/tmp", hfToken: "", language: "ru",
+    }),
+    // two existing notes already share the base stamp "2026-01-01-100000" under
+    // template "Митинг" — one legacy (no version key → defaults to 1), one v2.
+    listHistory: async () => [
+      { name: "2026-01-01-100000", title: "Синк", template: "Митинг", note: "/o/a.md", audio: "/o/a.wav" },
+      { name: "2026-01-01-100000-r1", title: "Синк", template: "Митинг", version: 2, note: "/o/b.md", audio: "/o/a.wav" },
+    ],
+    processAudio: async (opts) => { sent = opts; return { ok: true }; },
+  });
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  $("historyList").querySelector(".rail-item:not(.pending)").click(); await tick(window);
+  $("noteView").querySelector("#nvReprocess").click(); await tick(window);
+  $("noteView").querySelector("#reprocessConfirm").click(); await tick(window);
+  assert.ok(sent, "processAudio was not called");
+  assert.equal(sent.version, 3, "max existing version for this template (2, legacy note counts as 1) + 1");
+});
+
+test("reprocess picker: a template never used for this recording still computes version 1 (not None) — the filename branch relies on this being sent", async () => {
+  let sent = null;
+  const { window, $ } = await boot({
+    getPresets: async () => ({
+      presets: [{ id: "p1", name: "Митинг", prompt: "prompt M" }, { id: "p2", name: "Новый шаблон", prompt: "prompt N" }],
+      defaultOutDir: "/tmp", hfToken: "", language: "ru",
+    }),
+    listHistory: async () => [{ name: "2026-01-01-100000", title: "Синк", template: "Митинг", note: "/o/a.md", audio: "/o/a.wav" }],
+    processAudio: async (opts) => { sent = opts; return { ok: true }; },
+  });
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  $("historyList").querySelector(".rail-item:not(.pending)").click(); await tick(window);
+  $("noteView").querySelector("#nvReprocess").click(); await tick(window);
+  $("noteView").querySelector("#reprocessPresetSelect").value = "p2"; // pick the never-used template
+  $("noteView").querySelector("#reprocessConfirm").click(); await tick(window);
+  assert.equal(sent.template, "Новый шаблон");
+  assert.equal(sent.version, 1, "no existing note under this template — still version 1, and still SENT (not omitted)");
+});
+
+test("retryBtn/freshBtn on an import-mode run never send a version field (regression lock — versioning is История-reprocess-only)", async () => {
+  const calls = [];
+  const { window, $, handlers } = await boot({
+    pickAudio: async () => ["/tmp/a.wav"],
+    processAudio: async (opts) => { calls.push(opts); return { ok: true }; },
+  });
+  goImportTab(window);
+  $("pickBtn").click(); await tick(window);
+  $("runBtn").click(); await tick(window);
+  handlers.process({ event: "error", msg: "boom" });
+  await tick(window);
+  assert.ok(!("version" in calls[0]));
+  $("retryBtn").click(); await tick(window);
+  assert.equal(calls.length, 2);
+  assert.ok(!("version" in calls[1]), "retry must not carry a version — only a История reprocess computes one");
+});
+
+test("История groups a multi-version recording into a collapsible block: descending per-template versions, latest marked, collapses/expands", async () => {
+  const { window, $ } = await boot({
+    listHistory: async () => [
+      { name: "2026-07-11-100000", title: "Планёрка", template: "Митинг", version: 1, note: "/o/a.md", audio: "/o/a.wav" },
+      { name: "2026-07-11-100000-r1", title: "Планёрка", template: "Митинг", version: 2, note: "/o/b.md", audio: "/o/a.wav" },
+      { name: "2026-07-11-100000-r2", title: "Планёрка", template: "Интервью", version: 1, note: "/o/c.md", audio: "/o/a.wav" },
+    ],
+  });
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  const group = $("historyList").querySelector(".rail-group");
+  assert.ok(group, "a recording with >1 note must render as a collapsible group, not flat rows");
+  assert.equal($("historyList").querySelectorAll(".rail-group").length, 1);
+  const header = group.querySelector(".rail-group-header");
+  assert.match(header.textContent, /Планёрка/);
+  assert.equal(header.querySelector(".glossary-caret").textContent, "▾", "expanded by default");
+  const labels = Array.from(group.querySelectorAll(".rail-version-row")).map((r) => r.textContent.trim());
+  assert.deepEqual(labels, ["Митинг · v2 (latest)", "Митинг · v1", "Интервью · v1 (latest)"],
+    "template stable order (first-seen), versions descending within a template, each template's own top marked latest");
+
+  $("historyList").querySelector(".rail-group-header").click();
+  await tick(window);
+  assert.ok($("historyList").querySelector(".rail-group-versions").classList.contains("hidden"), "collapses on click");
+  assert.equal($("historyList").querySelector(".rail-group-header .glossary-caret").textContent, "▸");
+
+  $("historyList").querySelector(".rail-group-header").click();
+  await tick(window);
+  assert.ok(!$("historyList").querySelector(".rail-group-versions").classList.contains("hidden"), "re-expands on a second click");
+});
+
+// Regression guard (critic nit on ccad5ba): buildHistoryVersionGroup's rows are built
+// via innerHTML + closure-wired click handlers, and originally never got a
+// dataset.idx — selectNote's `+e.dataset.idx === idx` highlight match silently never
+// fired for them (NaN !== idx), so a clicked version row opened the note but never
+// showed selected. Plain (single-version) rows always set dataset.idx and were fine.
+test("clicking a version row inside a История group highlights it with .active (and only that row)", async () => {
+  const { window, $ } = await boot({
+    listHistory: async () => [
+      { name: "2026-07-11-100000", title: "Планёрка", template: "Митинг", version: 1, note: "/o/a.md", audio: "/o/a.wav" },
+      { name: "2026-07-11-100000-r1", title: "Планёрка", template: "Митинг", version: 2, note: "/o/b.md", audio: "/o/a.wav" },
+    ],
+  });
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  const rows = Array.from($("historyList").querySelectorAll(".rail-version-row"));
+  assert.equal(rows.length, 2);
+  assert.ok(rows.every((r) => !r.classList.contains("active")), "nothing selected yet");
+
+  rows[0].click(); // "Митинг · v2 (latest)" — rendered first (highest version)
+  await tick(window);
+  assert.ok(rows[0].classList.contains("active"), "clicked version row must get .active");
+  assert.ok(!rows[1].classList.contains("active"), "only the clicked row is active");
+
+  rows[1].click(); // "Митинг · v1"
+  await tick(window);
+  assert.ok(!rows[0].classList.contains("active"), "active must move off the previously-selected row");
+  assert.ok(rows[1].classList.contains("active"), "clicking a different version row selects it instead");
+});
+
+test("История: a single-version recording still renders as a plain row, not wrapped in a group", async () => {
+  const { window, $ } = await boot({
+    listHistory: async () => [{ name: "2026-01-01", title: "Синк", template: "Митинг", note: "/o/a.md", audio: "/o/a.wav" }],
+  });
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  assert.equal($("historyList").querySelectorAll(".rail-group").length, 0);
+  assert.ok($("historyList").querySelector(".rail-item:not(.pending)"));
+});

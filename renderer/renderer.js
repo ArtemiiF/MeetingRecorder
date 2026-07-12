@@ -1772,6 +1772,11 @@ async function startProcessing(fresh, item, override) {
     mainModel: state.mainModel,
     summarize: !$("noSummary").checked,
     template: override ? override.template : (activePreset.name || ""),
+    // Note versioning by template on reprocess — set ONLY by the История reprocess
+    // picker's override (see reprocessHistory/nextVersionFor); every other caller
+    // (record/import first run, retryBtn/freshBtn) omits it, so backend.py's default
+    // (None) preserves today's overwrite-by-cached-stamp behaviour exactly.
+    ...(override && override.version ? { version: override.version } : {}),
     // auto-«Я»: only meaningful for a record-sourced mic/system pair — import mode
     // never passes an item, so these stay undefined and the backend sees identical
     // argv to today.
@@ -1940,6 +1945,132 @@ function formatGroupDate(isoDate) {
   return RAIL_GROUP_DATE_FMT.format(new Date(+y, +mo - 1, +d)); // local Y/M/D ctor — no UTC shift
 }
 
+// ── note versioning by template on reprocess (История "Переобработать") ──────────
+// Strip a note's language suffix (-en/-auto — mirrors backend.py's _NOTE_LANGS) and/or
+// revision suffix (-r<seq> — backend.py Pipeline.process's versioned-reprocess
+// filenames) from its stamp, recovering the shared "meeting-<timestamp>" recording
+// identity. Mirrors backend.py's _find_audio stem-stripping (same order: revision
+// suffix first, then language) so a reprocessed note's version-group and its shared
+// audio agree on what "the same recording" means. One helper, reused by both the
+// next-version computation (openReprocessPicker) and the rail's grouping (renderRail).
+const NOTE_LANG_SUFFIXES = new Set(["en", "auto"]);
+function baseStampOf(stamp) {
+  let s = String(stamp || "");
+  const rev = /^(.*)-r\d+$/.exec(s);
+  if (rev) s = rev[1];
+  const lang = /^(.*)-([a-z]{2,4})$/.exec(s);
+  if (lang && NOTE_LANG_SUFFIXES.has(lang[2])) s = lang[1];
+  return s;
+}
+
+// Next per-template version number for a История reprocess: 1 + the highest existing
+// version among ALL history notes (not just whatever the current search/date filter
+// shows — numbering must stay correct even when sibling versions are filtered out)
+// sharing this recording's base stamp AND the chosen template. A legacy note with no
+// version field defaults to 1 (mirrors main.js's list-history mapping default).
+function nextVersionFor(baseStamp, templateName) {
+  const maxV = historyItems.reduce((m, it) => {
+    if (it.kind === "pending") return m;
+    if (baseStampOf(it.name) !== baseStamp) return m;
+    if ((it.template || "") !== (templateName || "")) return m;
+    return Math.max(m, it.version || 1);
+  }, 0);
+  return maxV + 1;
+}
+
+// Groups a note list into recording-groups keyed by base stamp, preserving each
+// group's position at its first occurrence in `items` (already backend-ordered by
+// stamp DESC) — see renderRail's per-group date-header + collapse rendering below.
+function groupByBaseStamp(items) {
+  const order = [];
+  const groups = new Map();
+  items.forEach((it) => {
+    const base = baseStampOf(it.name);
+    if (!groups.has(base)) { groups.set(base, []); order.push(base); }
+    groups.get(base).push(it);
+  });
+  return { order, groups };
+}
+
+// Session-only collapsed-state for История's per-recording version groups — same
+// lifetime/rationale as glossaryCategoryCollapsed (glossary "Мои" category folders,
+// see renderGlossaryChips): UI-only, reset every session, never persisted. Keyed by
+// base stamp (app-derived from the note filename, not a user/LLM string) so the same
+// recording's group stays collapsed/expanded across a renderRail() re-render
+// triggered by a filter change.
+let historyGroupCollapsed = new Set();
+
+// A single, ungrouped note row — the pre-existing renderRail row, extracted so it can
+// be reused both for a solitary (single-version) recording and untouched otherwise.
+function buildHistoryRow(it) {
+  const idx = historyItems.indexOf(it);
+  const el = document.createElement("button");
+  el.className = "rail-item";
+  el.dataset.idx = idx;
+  el.innerHTML = `<span class="rail-title">${escapeHtml(it.title || "Без темы")}</span>` +
+    `<span class="rail-date">${escapeHtml(it.name)}${sourceBadge(it.source)}</span>`;
+  el.addEventListener("click", () => selectNote(idx));
+  return el;
+}
+
+// Multi-version recording group (История "Переобработать" — see backend.py
+// Pipeline.process's version/-r<seq> scheme): one collapsible block per recording
+// that has more than one (currently shown) note, versions organized by template
+// (stable order = first-seen within the group, which is already backend stamp-DESC)
+// and, within a template, ordered by version DESCENDING — the highest version per
+// template is marked "(latest)". Caret/hidden-class/session-Set collapse mechanics
+// mirror renderGlossaryChips' "Мои" category folders (see glossaryCategoryCollapsed)
+// — same discipline: no user/LLM string (title, template name) ever lands in an HTML
+// attribute; rows wire via closure-by-index, not a data-* attribute.
+function buildHistoryVersionGroup(baseStamp, notes) {
+  const wrap = document.createElement("div");
+  wrap.className = "rail-group";
+
+  const templateOrder = [];
+  const byTemplate = new Map();
+  notes.forEach((it) => {
+    const t = it.template || "";
+    if (!byTemplate.has(t)) { byTemplate.set(t, []); templateOrder.push(t); }
+    byTemplate.get(t).push(it);
+  });
+
+  // rowOrder tracks the exact order rows land in the DOM (template-grouped, version-
+  // descending) — the click-wiring below indexes into it by rendered position, same
+  // discipline as renderGlossaryChips' mineOrder.
+  const rowOrder = [];
+  const rowsHtml = templateOrder.map((tmpl) => {
+    const versions = byTemplate.get(tmpl).slice().sort((a, b) => (b.version || 1) - (a.version || 1));
+    const maxV = versions[0] ? (versions[0].version || 1) : 1;
+    return versions.map((it) => {
+      rowOrder.push(it);
+      const v = it.version || 1;
+      const latest = v === maxV ? ' <span class="rail-latest">(latest)</span>' : "";
+      return `<button type="button" class="rail-item rail-version-row">` +
+        `<span class="rail-title">${escapeHtml(tmpl || "Без шаблона")} · v${v}${latest}</span></button>`;
+    }).join("");
+  }).join("");
+
+  const collapsed = historyGroupCollapsed.has(baseStamp);
+  const title = notes[0].title || "Без темы";
+  wrap.innerHTML =
+    `<button type="button" class="rail-group-header">` +
+    `<span class="glossary-caret">${collapsed ? "▸" : "▾"}</span> ${escapeHtml(title)} ` +
+    `<span class="glossary-count">${notes.length}</span></button>` +
+    `<div class="rail-group-versions${collapsed ? " hidden" : ""}">${rowsHtml}</div>`;
+
+  wrap.querySelector(".rail-group-header").addEventListener("click", () => {
+    if (historyGroupCollapsed.has(baseStamp)) historyGroupCollapsed.delete(baseStamp);
+    else historyGroupCollapsed.add(baseStamp);
+    renderRail();
+  });
+  wrap.querySelectorAll(".rail-version-row").forEach((btn, i) => {
+    const idx = historyItems.indexOf(rowOrder[i]);
+    btn.dataset.idx = idx; // selectNote's `.rail-item` active-highlight match relies on this
+    btn.addEventListener("click", () => selectNote(idx));
+  });
+  return wrap;
+}
+
 // render the rail filtered by search (title/date) + language + template + date range.
 // dataset.idx points into the full historyItems so selection survives filtering.
 // Pending recordings (state.pendingRecordings) render first and ALWAYS, bypassing every
@@ -1991,9 +2122,16 @@ function renderRail() {
     if (!d) return;
     dateCounts.set(d, (dateCounts.get(d) || 0) + 1);
   });
+  // Recordings that share a base stamp (История "Переобработать" — see baseStampOf)
+  // render as ONE collapsible group instead of N flat rows (see buildHistoryVersionGroup);
+  // a solitary (single-version) recording still renders as a plain row (buildHistoryRow),
+  // same look as before this feature. Grouping is computed over `shown` — the already-
+  // filtered set — so "N notes today"/group membership always match what's visible.
   let lastDate = null;
-  shown.forEach((it) => {
-    const d = (it.name || "").slice(0, 10);
+  const { order: groupOrder, groups: groupMap } = groupByBaseStamp(shown);
+  groupOrder.forEach((base) => {
+    const groupNotes = groupMap.get(base);
+    const d = (groupNotes[0].name || "").slice(0, 10);
     if (d && d !== lastDate) {
       lastDate = d;
       const header = document.createElement("div");
@@ -2001,14 +2139,9 @@ function renderRail() {
       header.textContent = `${formatGroupDate(d)} · ${dateCounts.get(d)}`;
       rail.appendChild(header);
     }
-    const idx = historyItems.indexOf(it);
-    const el = document.createElement("button");
-    el.className = "rail-item";
-    el.dataset.idx = idx;
-    el.innerHTML = `<span class="rail-title">${escapeHtml(it.title || "Без темы")}</span>` +
-      `<span class="rail-date">${escapeHtml(it.name)}${sourceBadge(it.source)}</span>`;
-    el.addEventListener("click", () => selectNote(idx));
-    rail.appendChild(el);
+    rail.appendChild(groupNotes.length > 1
+      ? buildHistoryVersionGroup(base, groupNotes)
+      : buildHistoryRow(groupNotes[0]));
   });
 }
 ["historySearch"].forEach((id) => $(id).addEventListener("input", renderRail));
@@ -2111,8 +2244,13 @@ function openReprocessPicker(item, audioPath) {
   confirmBtn.textContent = "▶ Запустить";
   confirmBtn.addEventListener("click", () => {
     const presetId = sel.value;
+    // Note versioning by template on reprocess: computed HERE (not inside
+    // reprocessHistory) because `item` — the note being reprocessed, needed for its
+    // base stamp — is only in scope in this closure.
+    const chosen = state.presets.find((p) => p.id === presetId);
+    const version = nextVersionFor(baseStampOf(item.name), chosen ? chosen.name : "");
     closeReprocessPicker();
-    reprocessHistory(audioPath, presetId);
+    reprocessHistory(audioPath, presetId, version);
   });
 
   const cancelBtn = document.createElement("button");
@@ -2166,7 +2304,10 @@ function removeHistoryProgressPanel() {
 // presetId: the chosen template's stable id (from the reprocess picker) — resolved
 // here to a {prompt, template} override rather than trusting whatever the record
 // card's own state.currentPreset happens to be at call time.
-function reprocessHistory(audio, presetId) {
+// version: the next per-template version number (nextVersionFor, computed by the
+// picker's confirm handler above) — forwarded into the override so startProcessing
+// sends it to the backend; a plain runBtn/retryBtn/freshBtn run never passes one.
+function reprocessHistory(audio, presetId, version) {
   if (state.recording || state.processing) return; // don't hijack an active run
   const preset = state.presets.find((p) => p.id === presetId);
   // Deliberately NOT calling switchView("record") — the owner wants this run to stay
@@ -2185,7 +2326,7 @@ function reprocessHistory(audio, presetId) {
   buildHistoryProgressPanel();
   setImportQueue([audio]); // queue-of-1 — same path as an N-file batch
   $("pickedFile").textContent = audio.split("/").pop();
-  startQueueRun(false, preset ? { prompt: preset.prompt, template: preset.name } : undefined);
+  startQueueRun(false, preset ? { prompt: preset.prompt, template: preset.name, version } : undefined);
 }
 
 // ── minimal, XSS-safe markdown renderer for the note viewer ───────────────────

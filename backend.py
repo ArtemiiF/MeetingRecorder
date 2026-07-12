@@ -1470,7 +1470,7 @@ class Pipeline:
 
     # ── main entry ──────────────────────────────────────────────────────────
     def process(self, audio_file, user_prompt, keep_audio_in_obsidian=True,
-                mic_file=None, system_file=None, origin=None):
+                mic_file=None, system_file=None, origin=None, version=None):
         self.OBSIDIAN_PATH.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")  # seconds → no same-minute collision
 
@@ -1709,10 +1709,18 @@ class Pipeline:
         # regardless of what the caller passed as `origin` — that param only disambiguates
         # a plain import (batch vs single file), which has no mic/system track at all.
         source = "recording" if (mic_file or system_file) else (origin or "")
-        # record title + which template (preset) was used + language in frontmatter
-        note = self.set_frontmatter(note, {
+        # record title + which template (preset) was used + language in frontmatter.
+        # `version` (History "Переобработать" — note versioning by template) is set
+        # ONLY when the caller passes one — the very first processing of a recording
+        # (record-tab/import run) never does, so that note stays byte-identical to
+        # today (implicitly "version 1", same convention the DB/renderer use for a
+        # missing key — see _reconcile/main.js's list-history default below).
+        frontmatter_fields = {
             "title": title, "template": self.TEMPLATE, "language": self.LANGUAGE,
-            "speakers": speakers_str, "source": source})
+            "speakers": speakers_str, "source": source}
+        if version is not None:
+            frontmatter_fields["version"] = version
+        note = self.set_frontmatter(note, frontmatter_fields)
 
         note = self.add_audio_link(note, audio_basename)
         note = self.add_actions_section(note, actions)
@@ -1722,7 +1730,32 @@ class Pipeline:
         stage("save", "Сохранение заметки")
         # language suffix so switching ru→en on the same source keeps both notes
         lang_suffix = "" if self.LANGUAGE == "ru" else f"-{self.LANGUAGE}"
-        note_path = self.OBSIDIAN_PATH / f"meeting-{timestamp}{lang_suffix}.md"
+        # `version is not None` ⇒ a deliberate История reprocess (see frontmatter above).
+        # This must NEVER reuse the plain meeting-<timestamp>[-lang].md path — not even
+        # when the caller's own per-template version number happens to be 1 (a template
+        # that's never been used for this recording before, picked fresh from the
+        # История template picker): that plain path already belongs to whichever
+        # template was used at first-processing time, and a filename carries no
+        # template info, so reusing it would silently clobber that other template's
+        # note — exactly the bug this feature exists to fix. Instead mint a monotonic
+        # revision index (`-r<seq>`) by scanning the vault for this timestamp —
+        # globally unique across every template's versions of this recording,
+        # independent of the caller-supplied per-template version number (which is
+        # display-only, carried in frontmatter's `version` key above). A sanitized/
+        # translit template token was considered instead of a bare index, but template
+        # names can hold spaces/cyrillic/punctuation — unsafe for a filesystem path —
+        # so a plain monotonic counter is the least-fragile choice.
+        if version is not None:
+            rev_re = _re.compile(rf"^meeting-{_re.escape(timestamp)}(?:-[a-z]+)?-r(\d+)\.md$")
+            seq = 0
+            for f in self.OBSIDIAN_PATH.glob(f"meeting-{timestamp}*-r*.md"):
+                m = rev_re.match(f.name)
+                if m:
+                    seq = max(seq, int(m.group(1)))
+            stamp_suffix = f"{lang_suffix}-r{seq + 1}"
+        else:
+            stamp_suffix = lang_suffix
+        note_path = self.OBSIDIAN_PATH / f"meeting-{timestamp}{stamp_suffix}.md"
         note_path.write_text(note, encoding="utf-8")
         log(f"✅ Заметка сохранена: {note_path}")
         # update the derived SQLite index
@@ -1730,11 +1763,12 @@ class Pipeline:
             try:
                 conn = _db_connect(self.db_path)
                 _db_upsert(conn, {
-                    "note": str(note_path), "stamp": f"{timestamp}{lang_suffix}",
+                    "note": str(note_path), "stamp": f"{timestamp}{stamp_suffix}",
                     "title": title, "template": self.TEMPLATE, "language": self.LANGUAGE,
                     "date": datetime.now().strftime("%Y-%m-%d"),
                     "audio": str(vault_audio if keep_audio_in_obsidian else audio_file),
-                    "mtime": note_path.stat().st_mtime, "source": source})
+                    "mtime": note_path.stat().st_mtime, "source": source,
+                    "version": version if isinstance(version, int) and version > 0 else 1})
                 conn.close()
             except Exception as e:
                 log(f"⚠️ Индекс не обновлён: {e}")
@@ -1778,7 +1812,8 @@ def cmd_process(args):
                     glossary_usage=glossary_usage, main_model=args.main_model)
     try:
         pipe.process(args.infile, prompt, keep_audio_in_obsidian=args.keep_audio,
-                     mic_file=args.mic, system_file=args.system, origin=args.origin)
+                     mic_file=args.mic, system_file=args.system, origin=args.origin,
+                     version=args.version)
     except Exception as e:
         import traceback
         emit("error", msg=f"{e}")
@@ -2055,7 +2090,7 @@ def cmd_mix(mic, system, out, mic_delay=0, sys_delay=0):
 # SQLite index — DERIVED from note frontmatter (md remains the source of truth).
 # Self-healing: reconcile() adds notes found on disk, drops rows for deleted notes.
 # ──────────────────────────────────────────────────────────────────────────
-_DB_COLS = ["note", "stamp", "title", "template", "language", "date", "audio", "mtime", "source"]
+_DB_COLS = ["note", "stamp", "title", "template", "language", "date", "audio", "mtime", "source", "version"]
 _NOTE_LANGS = {"en", "auto"}
 _AUDIO_EXT = {".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".mp4", ".mov"}
 
@@ -2070,7 +2105,7 @@ def _db_connect(db_path):
     conn.execute("PRAGMA busy_timeout=10000")
     conn.execute("""CREATE TABLE IF NOT EXISTS meetings(
         note TEXT PRIMARY KEY, stamp TEXT, title TEXT, template TEXT,
-        language TEXT, date TEXT, audio TEXT, mtime REAL, source TEXT)""")
+        language TEXT, date TEXT, audio TEXT, mtime REAL, source TEXT, version INTEGER)""")
     # index.db predates the `source` column (note-origin typing) — ALTER TABLE an
     # existing on-disk DB rather than force a rebuild. index.db is rebuildable
     # (derived from frontmatter, see cmd_history/_reconcile), so deleting it also
@@ -2080,14 +2115,21 @@ def _db_connect(db_path):
         conn.commit()
     except Exception:
         pass  # column already exists
+    # index.db predates the `version` column (note versioning by template on
+    # reprocess) — same guarded-migration rationale as `source` above.
+    try:
+        conn.execute("ALTER TABLE meetings ADD COLUMN version INTEGER")
+        conn.commit()
+    except Exception:
+        pass  # column already exists
     return conn
 
 
 def _db_upsert(conn, row):
-    conn.execute("""INSERT INTO meetings(note,stamp,title,template,language,date,audio,mtime,source)
-        VALUES(:note,:stamp,:title,:template,:language,:date,:audio,:mtime,:source)
+    conn.execute("""INSERT INTO meetings(note,stamp,title,template,language,date,audio,mtime,source,version)
+        VALUES(:note,:stamp,:title,:template,:language,:date,:audio,:mtime,:source,:version)
         ON CONFLICT(note) DO UPDATE SET stamp=:stamp,title=:title,template=:template,
-        language=:language,date=:date,audio=:audio,mtime=:mtime,source=:source""", row)
+        language=:language,date=:date,audio=:audio,mtime=:mtime,source=:source,version=:version""", row)
     conn.commit()
 
 
@@ -2109,6 +2151,13 @@ def _parse_frontmatter(text):
 def _find_audio(note_name, files):
     import re
     stem = note_name[:-3]  # strip .md
+    # A versioned reprocess note (Pipeline.process's `-r<seq>` revision suffix) still
+    # shares its audio with the original recording — strip that suffix first (it's
+    # always the last component of the filename), then the language suffix, to
+    # recover the base "meeting-<timestamp>" stem the audio was actually saved under.
+    rev_m = re.match(r"^(.*)-r\d+$", stem)
+    if rev_m:
+        stem = rev_m.group(1)
     m = re.match(r"^(.*)-([a-z]{2,4})$", stem)
     astem = m.group(1) if (m and m.group(2) in _NOTE_LANGS) else stem
     for f in files:
@@ -2182,11 +2231,18 @@ def _reconcile(conn, out_dir, vault_root=None):
         # scoped); a note already filed elsewhere in the vault keeps whatever audio link
         # it had (frontmatter carries no audio path), matching current out_dir-only lookup.
         audio = _find_audio(p.name, files) if p.parent == out else None
+        # A missing/garbled `version` key (absent on every pre-this-feature note, and on
+        # the very first processing of any new one) defaults to 1 — same convention
+        # main.js's list-history mapping uses for the same missing-key case.
+        try:
+            file_version = int(fm.get("version") or 1)
+        except (TypeError, ValueError):
+            file_version = 1
         _db_upsert(conn, {
             "note": note_path, "stamp": stamp, "title": fm.get("title", ""),
             "template": fm.get("template", ""), "language": fm.get("language", ""),
             "date": fm.get("date", ""), "audio": str(out / audio) if audio else None,
-            "mtime": mtime, "source": fm.get("source", "")})
+            "mtime": mtime, "source": fm.get("source", ""), "version": file_version})
     conn.commit()
 
 
@@ -3288,6 +3344,11 @@ def main():
     p_proc.add_argument("--system", default=None)  # system.wav, ditto
     p_proc.add_argument("--author-name", dest="author_name", default="Автор")
     p_proc.add_argument("--origin", choices=["batch", "file"], default=None)  # ignored when --mic/--system given (recording wins)
+    # Note versioning by template on reprocess (История "Переобработать" only) — the
+    # renderer computes the next per-template version number and sends it ONLY for a
+    # deliberate История reprocess; a plain record/import run never sends this, so the
+    # default (None) preserves today's behaviour exactly (see Pipeline.process).
+    p_proc.add_argument("--version", type=int, default=None)
     # Fast model for mechanical LLM calls only (correct/title/suggest) — see Pipeline.FAST_MODEL.
     p_proc.add_argument("--fast-model", dest="fast_model", default="")
     # Main model for substantive LLM calls (summary/speaker-inference/actions) — see
