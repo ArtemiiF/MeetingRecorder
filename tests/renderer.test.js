@@ -226,6 +226,52 @@ test("history reprocess (from note view) is blocked while a run is in flight", a
   assert.equal(calls, 1);                             // guard blocked a second run
 });
 
+// ── reprocess audio resolution (Task 1: always resolve audio, never a silent no-op) ──
+// backend.py's out_dir-only pairing (_reconcile/_find_audio) leaves item.audio null for
+// any note whose parent dir isn't out_dir (e.g. PARA-archived) — the renderer must still
+// recover the audio from the note's own ![[...]] embed rather than silently doing nothing.
+test("nvReprocess resolves audio from the note's ![[...]] embed when item.audio is null (e.g. a PARA-archived note)", async () => {
+  let sentAudioFile = null;
+  const { window, $ } = await boot({
+    listHistory: async () => [{
+      name: "2026-01-01", title: "Архивная", note: "/vault/Projects/P1/meeting-2026-01-01-100000.md", audio: null,
+    }],
+    readNote: async () =>
+      '---\ntitle: "Архивная"\n---\n\n## Сводка\n\nтекст\n\n## 🎵 Аудио запись\n\n![[meeting-2026-01-01-100000.wav]]\n',
+    processAudio: async (opts) => { sentAudioFile = opts.audioFile; return { ok: true }; },
+  });
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  $("historyList").querySelector(".rail-item:not(.pending)").click(); await tick(window);
+  const btn = $("noteView").querySelector("#nvReprocess");
+  assert.equal(btn.disabled, false, "must not be disabled — the embed still resolves the audio");
+  btn.click(); await tick(window);
+  $("noteView").querySelector("#reprocessConfirm").click(); await tick(window);
+  assert.equal(sentAudioFile, "/vault/Projects/P1/meeting-2026-01-01-100000.wav",
+    "resolved from the note's own directory + the embedded filename, not item.audio (which was null)");
+});
+
+test("nvReprocess is disabled with a visible reason when audio is genuinely unrecoverable (no item.audio, no embed in the note)", async () => {
+  const { window, $ } = await boot({
+    listHistory: async () => [{ name: "2026-01-01", title: "Без аудио", note: "/vault/meeting-x.md", audio: null }],
+    readNote: async () => '---\ntitle: "Без аудио"\n---\n\n## Сводка\n\nтекст без ссылки на аудио',
+  });
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  $("historyList").querySelector(".rail-item:not(.pending)").click(); await tick(window);
+  const btn = $("noteView").querySelector("#nvReprocess");
+  assert.equal(btn.disabled, true, "never a silent no-op — the button itself must show it's unavailable");
+  assert.match(btn.title, /Аудио не найдено/);
+});
+
+// ── jump-to-recording button in note headers (Task 3) ────────────────────────
+test("nvGoRecord (История note header) switches to the Запись view", async () => {
+  const { window, $ } = await boot();
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  $("historyList").querySelector(".rail-item:not(.pending)").click(); await tick(window);
+  $("noteView").querySelector("#nvGoRecord").click(); await tick(window);
+  assert.ok(!$("view-record").classList.contains("hidden"));
+  assert.ok($("view-history").classList.contains("hidden"));
+});
+
 // ── copy note path (История note view) ───────────────────────────────────────
 test("nvCopyPath: copies the note's absolute path and shows brief feedback", async () => {
   const { window, $ } = await boot({
@@ -800,6 +846,25 @@ test("ptvCopyPath: copies the tree note's absolute path and shows brief feedback
   assert.equal(btn.textContent, "✓ Скопировано");
   await new Promise((r) => window.setTimeout(r, 1600));
   assert.equal(btn.textContent, "📋 Путь");             // reverts after the feedback window
+});
+
+// ── jump-to-recording button in note headers (Task 3) ────────────────────────
+test("ptvGoRecord (PARA tree note header) switches to the Запись view", async () => {
+  const { window, $ } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru",
+      para: { root: "/v", folders: { projects: "Projects", areas: "Areas", resources: "Resources", archives: "Archives" } },
+    }),
+    paraTree: async () => [
+      { name: "meeting-x.md", path: "/v/Projects/meeting-x.md", type: "note" },
+    ],
+  });
+  window.document.querySelector('.topbtn[data-view="para"]').click(); await tick(window);
+  window.document.querySelector('.subbtn[data-sub="tree"]').click(); await tick(window);
+  $("paraTree").querySelector(".tree-note").click(); await tick(window);
+  $("paraTreeView").querySelector("#ptvGoRecord").click(); await tick(window);
+  assert.ok(!$("view-record").classList.contains("hidden"));
+  assert.ok($("view-para").classList.contains("hidden"));
 });
 
 test("PARA classify-all: per-row spinner shows while processing, clears once filed", async () => {
@@ -1992,8 +2057,9 @@ test("«Мои» terms group into fixed category subheaders (name + count); a te
   await tick(window);
   const mine = $("glossaryChipsMine");
   const headers = Array.from(mine.querySelectorAll(".glossary-category-header")).map((el) => el.textContent.trim());
-  assert.deepEqual(headers, ["Люди 1", "Продукты и инструменты 1", "Другое 1"],
-    "only categories with ≥1 shown term render a subheader, in the fixed GLOSSARY_CATEGORIES order");
+  assert.deepEqual(headers, ["▾ Люди 1", "▾ Продукты и инструменты 1", "▾ Другое 1"],
+    "only categories with ≥1 shown term render a subheader, in the fixed GLOSSARY_CATEGORIES order; " +
+    "▾ = expanded by default (Task 4: «Мои» folders start open, unlike «Стандартные»)");
   const chips = Array.from(mine.querySelectorAll(".chip-text")).map((el) => el.textContent);
   assert.deepEqual(chips, ["Иван Петров", "Mindbox", "Плов"], "«Плов» has no glossaryCategories entry → falls into «Другое»");
 });
@@ -2008,7 +2074,42 @@ test("an unrecognized/stale category value in glossaryCategories still resolves 
   });
   await tick(window);
   const headers = Array.from($("glossaryChipsMine").querySelectorAll(".glossary-category-header")).map((el) => el.textContent.trim());
-  assert.deepEqual(headers, ["Другое 1"]);
+  assert.deepEqual(headers, ["▾ Другое 1"]);
+});
+
+// ── glossary: "Мои" category folders collapse individually (Task 4) ────────────
+test("«Мои» category folders start expanded and each collapses/expands independently on click", async () => {
+  const { $, window } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru",
+      glossary: "Иван Петров, Mindbox",
+      glossaryCategories: { "иван петров": "Люди", "mindbox": "Продукты и инструменты" },
+    }),
+  });
+  await tick(window);
+  const mine = $("glossaryChipsMine");
+  let groups = mine.querySelectorAll(".glossary-category-group");
+  assert.equal(groups.length, 2);
+  // expanded by default — unlike «Стандартные» — so the user's own terms stay discoverable
+  groups.forEach((g) => assert.ok(!g.querySelector(".chip-list").classList.contains("hidden")));
+  const peopleHeader = Array.from(mine.querySelectorAll(".glossary-category-header"))
+    .find((el) => el.textContent.includes("Люди"));
+  assert.equal(peopleHeader.querySelector(".glossary-caret").textContent, "▾");
+
+  peopleHeader.click();
+  await tick(window);
+  groups = $("glossaryChipsMine").querySelectorAll(".glossary-category-group");
+  const peopleGroup = Array.from(groups).find((g) => g.querySelector(".glossary-category-header").textContent.includes("Люди"));
+  const toolsGroup = Array.from(groups).find((g) => g.querySelector(".glossary-category-header").textContent.includes("Продукты"));
+  assert.ok(peopleGroup.querySelector(".chip-list").classList.contains("hidden"), "clicked category collapses");
+  assert.equal(peopleGroup.querySelector(".glossary-caret").textContent, "▸");
+  assert.ok(!toolsGroup.querySelector(".chip-list").classList.contains("hidden"), "the OTHER category is untouched");
+
+  peopleGroup.querySelector(".glossary-category-header").click();
+  await tick(window);
+  const peopleGroupAgain = Array.from($("glossaryChipsMine").querySelectorAll(".glossary-category-group"))
+    .find((g) => g.querySelector(".glossary-category-header").textContent.includes("Люди"));
+  assert.ok(!peopleGroupAgain.querySelector(".chip-list").classList.contains("hidden"), "re-expands on a second click");
 });
 
 test("the live filter narrows terms within every «Мои» category group, and each subheader's count follows the filter", async () => {
@@ -2028,7 +2129,7 @@ test("the live filter narrows terms within every «Мои» category group, and 
   await tick(window);
   const mine = $("glossaryChipsMine");
   const headers = Array.from(mine.querySelectorAll(".glossary-category-header")).map((el) => el.textContent.trim());
-  assert.deepEqual(headers, ["Люди 1"], "«Продукты и инструменты» has zero matches under the filter → subheader hidden entirely");
+  assert.deepEqual(headers, ["▾ Люди 1"], "«Продукты и инструменты» has zero matches under the filter → subheader hidden entirely");
   const chips = Array.from(mine.querySelectorAll(".chip-text")).map((el) => el.textContent);
   assert.deepEqual(chips, ["Иван Петров"]);
 });
@@ -2041,13 +2142,13 @@ test("changing a chip's category via its per-chip select re-groups it under the 
   });
   await tick(window);
   let headers = Array.from($("glossaryChipsMine").querySelectorAll(".glossary-category-header")).map((el) => el.textContent.trim());
-  assert.deepEqual(headers, ["Другое 1"], "starts uncategorized");
+  assert.deepEqual(headers, ["▾ Другое 1"], "starts uncategorized");
   const select = $("glossaryChipsMine").querySelector(".chip-category");
   select.value = "Термины";
   select.dispatchEvent(new window.Event("change"));
   await tick(window);
   headers = Array.from($("glossaryChipsMine").querySelectorAll(".glossary-category-header")).map((el) => el.textContent.trim());
-  assert.deepEqual(headers, ["Термины 1"]);
+  assert.deepEqual(headers, ["▾ Термины 1"]);
   assert.deepEqual(saved.glossaryCategories, { "плов": "Термины" });
 });
 
@@ -2073,7 +2174,7 @@ test("terms added via «Импорт/экспорт текстом» paste have 
   $("glossary").dispatchEvent(new window.Event("change"));
   await tick(window);
   const headers = Array.from($("glossaryChipsMine").querySelectorAll(".glossary-category-header")).map((el) => el.textContent.trim());
-  assert.deepEqual(headers, ["Другое 2"]);
+  assert.deepEqual(headers, ["▾ Другое 2"]);
 });
 
 // ── glossary: "Разложить по категориям" (auto-classify via backend LLM call) ─
@@ -2096,7 +2197,7 @@ test("«Разложить по категориям» sends only «Мои» ter
   await tick(window);
   assert.deepEqual(sentTerms, ["Иван Петров", "Mindbox"], "only «Мои» terms are sent — «Стандартные» stays out of the batch");
   const headers = Array.from($("glossaryChipsMine").querySelectorAll(".glossary-category-header")).map((el) => el.textContent.trim());
-  assert.deepEqual(headers, ["Люди 1", "Продукты и инструменты 1"],
+  assert.deepEqual(headers, ["▾ Люди 1", "▾ Продукты и инструменты 1"],
     "«выдуманный» wasn't part of the batch (invention) — the renderer's own gate must drop it too");
   assert.deepEqual(saved.glossaryCategories, { "иван петров": "Люди", "mindbox": "Продукты и инструменты" });
 });
@@ -2110,7 +2211,7 @@ test("«Разложить по категориям» coerces an out-of-set cat
   $("glossaryClassifyBtn").click();
   await tick(window);
   const headers = Array.from($("glossaryChipsMine").querySelectorAll(".glossary-category-header")).map((el) => el.textContent.trim());
-  assert.deepEqual(headers, ["Другое 1"]);
+  assert.deepEqual(headers, ["▾ Другое 1"]);
 });
 
 test("«Разложить по категориям» degrades to an honest hint (no crash, no mutation) when the backend reports an error", async () => {
@@ -2123,7 +2224,7 @@ test("«Разложить по категориям» degrades to an honest hin
   await tick(window);
   assert.match($("glossaryHint").textContent, /Не удалось разложить по категориям/);
   const headers = Array.from($("glossaryChipsMine").querySelectorAll(".glossary-category-header")).map((el) => el.textContent.trim());
-  assert.deepEqual(headers, ["Другое 1"], "stays uncategorized — no partial/garbage mutation on failure");
+  assert.deepEqual(headers, ["▾ Другое 1"], "stays uncategorized — no partial/garbage mutation on failure");
 });
 
 test("«Разложить по категориям» is a no-op with a hint (not a crash) when there are no «Мои» terms to classify", async () => {
@@ -3427,6 +3528,67 @@ test("reprocessHistory() still triggers a single run once confirmed in the picke
   assert.equal(calls, 1);
   const rows = $("importQueue").querySelectorAll(".queue-item");
   assert.equal(rows.length, 1);
+});
+
+// ── История reprocess renders its own progress/logs panel in place (Task 2) ────────
+test("reprocess from История stays on the История view and drives its own #histStages/#histLogs panel (not #stages/#logs)", async () => {
+  const { window, $, handlers } = await boot({ processAudio: async () => ({ ok: true }) });
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  $("historyList").querySelector(".rail-item:not(.pending)").click(); await tick(window);
+  $("noteView").querySelector("#nvReprocess").click(); await tick(window); // opens the template picker
+  $("noteView").querySelector("#reprocessConfirm").click(); await tick(window); // confirm → run
+
+  // still looking at История — no view-jump to Запись (the old switchView("record") bug)
+  assert.ok(!$("view-history").classList.contains("hidden"), "must stay on История");
+  assert.ok($("view-record").classList.contains("hidden"), "must NOT jump to Запись");
+
+  handlers.process({ event: "stage", stage: "transcribe", msg: "Транскрибация" });
+  handlers.process({ event: "log", stage: "transcribe", msg: "строка лога" });
+  await tick(window);
+
+  const histStage = $("noteView").querySelector("#histStage-transcribe");
+  assert.ok(histStage, "the История panel must render its own stage pills");
+  assert.ok(histStage.classList.contains("active"));
+  assert.ok($("noteView").querySelector("#histLogs").textContent.includes("строка лога"));
+
+  // the Запись tab's own progress elements must stay untouched by a История run
+  assert.equal($("stages").children.length, 0, "#stages must not be populated by a История reprocess run");
+  assert.equal($("logs").textContent, "");
+});
+
+// Regression guard for the ~1817 cross-panel leak: a cached stage_end during a
+// История reprocess must mark the VISIBLE #histStage-<key>, never the (possibly
+// stale, hidden) Запись-tab #stage-<key> — reprocess runs are fresh=false, so a
+// cache-hit stage_end is the common case, not an edge case.
+test("stage_end cached flag lands on #histStage-<key> during a История reprocess, never on a stale #stage-<key> Запись node", async () => {
+  const { window, $, handlers } = await boot({ processAudio: async () => ({ ok: true }) });
+
+  // A prior normal Запись-tab run leaves its own #stage-transcribe pill behind in the
+  // (now hidden) record view — buildStages() only clears/repopulates #stages at the
+  // START of a Запись-tab run, so this stale node survives into the История run below.
+  handlers.record({ event: "recorded", id: "r1", name: "Запись 1", file: "/tmp/mixed.wav", mic: "/tmp/m.wav", system: null, tracks: 1 });
+  $("historyList").querySelector(".pending-play-btn").click(); await tick(window);
+  handlers.process({ event: "done", note: "/n1.md", audio: "/a1.wav", transcript: "t", summary: "s" });
+  await tick(window);
+  assert.ok($("stage-transcribe"), "sanity: a prior Запись-tab run left its stage pill in the DOM");
+  assert.ok(!$("stage-transcribe").classList.contains("cached"));
+
+  // Now reprocess the (single, default-mocked) history note — this run must target
+  // #histStage-*, not the stale #stage-transcribe above.
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  $("historyList").querySelector(".rail-item:not(.pending)").click(); await tick(window);
+  $("noteView").querySelector("#nvReprocess").click(); await tick(window);
+  $("noteView").querySelector("#reprocessConfirm").click(); await tick(window);
+
+  handlers.process({ event: "stage", stage: "transcribe", msg: "Транскрибация" });
+  handlers.process({ event: "stage_end", stage: "transcribe", status: "ok", msg: "12 сегм. (из кеша)" });
+  await tick(window);
+
+  const histStage = $("noteView").querySelector("#histStage-transcribe");
+  assert.ok(histStage, "История panel must render its own stage pill");
+  assert.ok(histStage.classList.contains("cached"), "cached class must land on the visible История pill");
+  assert.ok(!$("stage-transcribe").classList.contains("cached"),
+    "cached class must NOT leak onto the stale, hidden Запись-tab pill");
 });
 
 // Regression guard for the commit-0a79d98 gate being deliberately reverted (owner

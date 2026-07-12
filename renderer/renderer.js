@@ -896,6 +896,14 @@ const DEFAULT_GLOSSARY_TERMS_LOWER = new Set(parseGlossaryTerms(DEFAULT_GLOSSARY
 let glossaryFilterQuery = "";        // transient live-filter text — UI-only, never persisted
 let glossaryDefaultCollapsed = true; // "Стандартные" starts collapsed each session — UI-only, never persisted
 
+// "Мои" category folders (Люди/Продукты и инструменты/Термины/Другое) collapse
+// individually — a category name present in this Set is collapsed. Starts empty
+// (every category expanded): these are the user's OWN terms, so — unlike «Стандартные»
+// (100+ imported defaults, collapsed by default) — discoverability wins; collapsing is
+// a new capability the user opts into per folder, not a default. Session-only, never
+// persisted — same lifetime as glossaryDefaultCollapsed above.
+let glossaryCategoryCollapsed = new Set();
+
 function usageBadge(term) {
   const n = (state.glossaryUsage || {})[term.toLowerCase()] || 0;
   return n > 0 ? ` <span class="chip-usage">${n}×</span>` : "";
@@ -980,14 +988,23 @@ function renderGlossaryChips() {
     // terms are skipped entirely (no empty subheader), same "filter narrows what's
     // visible" contract the Стандартные toggle already has.
     const mineOrder = [];
+    // Parallel to mineOrder above but one entry per RENDERED category group (skipping
+    // categories with 0 shown terms, same as mineOrder skips filtered-out terms) — the
+    // toggle wiring below indexes into it by rendered position, same closure-over-index
+    // discipline as mineOrder/chip-remove (no category name ever round-trips through an
+    // HTML attribute).
+    const renderedCategories = [];
     const mineHtml = GLOSSARY_CATEGORIES.map((cat) => {
       const inCat = mineShown.filter((t) => glossaryCategoryOf(t) === cat);
       if (!inCat.length) return "";
       mineOrder.push(...inCat);
+      renderedCategories.push(cat);
+      const collapsed = glossaryCategoryCollapsed.has(cat);
       return `<div class="glossary-category-group">` +
-        `<div class="glossary-category-header">${escapeHtml(cat)} ` +
-        `<span class="glossary-count">${inCat.length}</span></div>` +
-        `<div class="chip-list">${inCat.map((t) => glossaryChipHtml(t, true)).join("")}</div>` +
+        `<button type="button" class="glossary-category-header">` +
+        `<span class="glossary-caret">${collapsed ? "▸" : "▾"}</span> ${escapeHtml(cat)} ` +
+        `<span class="glossary-count">${inCat.length}</span></button>` +
+        `<div class="chip-list${collapsed ? " hidden" : ""}">${inCat.map((t) => glossaryChipHtml(t, true)).join("")}</div>` +
         `</div>`;
     }).join("");
 
@@ -1013,6 +1030,13 @@ function renderGlossaryChips() {
       btn.addEventListener("click", () => removeGlossaryTerm(mineOrder[i])));
     box.querySelector("#glossaryChipsMine").querySelectorAll(".chip-category").forEach((sel, i) =>
       sel.addEventListener("change", () => setGlossaryTermCategory(mineOrder[i], sel.value)));
+    box.querySelector("#glossaryChipsMine").querySelectorAll(".glossary-category-header").forEach((btn, i) =>
+      btn.addEventListener("click", () => {
+        const cat = renderedCategories[i];
+        if (glossaryCategoryCollapsed.has(cat)) glossaryCategoryCollapsed.delete(cat);
+        else glossaryCategoryCollapsed.add(cat);
+        renderGlossaryChips();
+      }));
     const defaultBox = box.querySelector(".glossary-default-chips");
     if (defaultBox) {
       defaultBox.querySelectorAll(".chip-remove").forEach((btn, i) =>
@@ -1604,15 +1628,33 @@ let runEnded = false;             // guard so a clean end isn't overwritten by t
 let selectedStage = STAGE_KEYS[0]; // which stage's logs the pane currently shows
 let logsByStage = {};
 
+// Set for the entire duration of a История-initiated reprocess run (see
+// reprocessHistory) so the render helpers below target the in-place История progress
+// panel (#histStages/#histLogs) instead of the Запись tab's #progressCard/#stages/
+// #logs — mirrors how activePendingId/queueSingleRetry track "what kind of run is
+// this" for their own terminal-handling branches. Reset in finishProcessing once the
+// run ends, so a later record-tab/import-tab run always falls back to the default ids.
+let reprocessTargetsHistory = false;
+
+// Single source of truth for "where do live pipeline events render" — every render
+// helper below resolves its target through this one point so a История-initiated run
+// and a normal Запись-tab run never write into each other's DOM.
+function progressTargetIds() {
+  return reprocessTargetsHistory
+    ? { stagesId: "histStages", logsId: "histLogs", stagePrefix: "histStage-" }
+    : { stagesId: "stages", logsId: "logs", stagePrefix: "stage-" };
+}
+
 function buildStages() {
-  const wrap = $("stages");
+  const { stagesId, stagePrefix } = progressTargetIds();
+  const wrap = $(stagesId);
   wrap.innerHTML = "";
   logsByStage = {};
   STAGE_KEYS.forEach((k) => {
     logsByStage[k] = [];
     const el = document.createElement("span");
     el.className = "stage";
-    el.id = "stage-" + k;
+    el.id = stagePrefix + k;
     el.dataset.stage = k;
     el.textContent = STAGE_LABELS[k];
     el.title = "Показать логи этапа";
@@ -1627,9 +1669,13 @@ let pinned = false;
 function showStageLogs(stageKey, isUserClick) {
   selectedStage = stageKey;
   if (isUserClick) pinned = true;
-  document.querySelectorAll(".stage").forEach((el) =>
+  const { stagesId, logsId } = progressTargetIds();
+  // Scoped to the active container only — a leftover run's stage pills in the OTHER
+  // container (e.g. a previous Запись-tab run's #stages, still in the DOM but hidden)
+  // must not have their "selected" class toggled by a История run's clicks, or vice versa.
+  $(stagesId).querySelectorAll(".stage").forEach((el) =>
     el.classList.toggle("selected", el.dataset.stage === stageKey));
-  const el = $("logs");
+  const el = $(logsId);
   el.textContent = (logsByStage[stageKey] || []).join("\n");
   el.scrollTop = el.scrollHeight;
 }
@@ -1640,7 +1686,8 @@ function pushLog(stageKey, msg) {
   if (!logsByStage[stageKey]) logsByStage[stageKey] = [];
   logsByStage[stageKey].push(msg);
   if (selectedStage === stageKey) {
-    const el = $("logs");
+    const { logsId } = progressTargetIds();
+    const el = $(logsId);
     el.textContent += msg + "\n";
     el.scrollTop = el.scrollHeight;
   }
@@ -1649,7 +1696,8 @@ function pushLog(stageKey, msg) {
 function appendLog(msg) { pushLog(lastStage, msg); }
 
 function setStageClass(stageKey, cls) {
-  const el = $("stage-" + stageKey);
+  const { stagePrefix } = progressTargetIds();
+  const el = $(stagePrefix + stageKey);
   if (!el) return;
   el.classList.remove("active", "done", "failed", "skip");
   el.classList.add(cls);
@@ -1680,6 +1728,7 @@ function finishProcessing() {
   $("stopBtn").disabled = false;
   setProcessingUI(false);
   refreshRunBtn();
+  reprocessTargetsHistory = false; // run over — next run defaults back to the Запись ids
 }
 
 // fresh=true clears the cache (full recompute); otherwise resume from cached stages.
@@ -1765,7 +1814,7 @@ window.api.onProcessEvent((ev) => {
     const cls = ev.status === "ok" ? "done" : ev.status === "skip" ? "skip" : "failed";
     setStageClass(ev.stage, cls);
     const cached = ev.status === "ok" && /кеша/.test(ev.msg || "");
-    if (cached) $("stage-" + ev.stage)?.classList.add("cached");
+    if (cached) $(progressTargetIds().stagePrefix + ev.stage)?.classList.add("cached");
     if (ev.msg) {
       const icon = cached ? "💾 " : ev.status === "ok" ? "✅ " : ev.status === "skip" ? "⏭ " : "⚠️ ";
       pushLog(ev.stage, icon + ev.msg);
@@ -1971,16 +2020,38 @@ function selectNote(idx) {
   openHistoryNote(historyItems[idx]);
 }
 
+// Backend pairing gap (backend.py _reconcile/_find_audio) only resolves `audio` for
+// notes still sitting in out_dir — a PARA-archived note (parent dir != out_dir) always
+// gets audio=null even though its wav sits right next to it (PARA filing moves note+
+// audio together, keeping basenames — see backend.py Pipeline.process's audio_basename/
+// vault_audio and _reconcile's out_dir-only _find_audio call). Rather than fixing the
+// backend pairing (separate concern), the reprocess button recovers the same info from
+// the note's own embedded ![[filename.ext]] link (written once by add_audio_link at
+// record time) — same directory as the note holds for both out_dir and any archive
+// location, so no path beyond "next to the note" is ever needed.
+const AUDIO_EMBED_RE = /!\[\[([^\]\|]+\.(?:wav|mp3|m4a|aac|flac|ogg|mp4|mov))(?:\|[^\]]*)?\]\]/i;
+function resolveReprocessAudio(notePath, md) {
+  const m = AUDIO_EMBED_RE.exec(md || "");
+  if (!m) return null;
+  const slash = notePath.lastIndexOf("/"); // note paths are POSIX-style throughout this app
+  const dir = slash >= 0 ? notePath.slice(0, slash) : "";
+  return dir ? `${dir}/${m[1]}` : m[1];
+}
+
 async function openHistoryNote(item) {
   const view = $("noteView");
   const md = await window.api.readNote(item.note);
   if (md == null) { view.innerHTML = '<p class="hint">Не удалось прочитать заметку.</p>'; return; }
+  // item.audio (already resolved by the backend) wins when present; the embed-derived
+  // path is purely a fallback for the out_dir-only pairing gap described above.
+  const resolvedAudio = item.audio || resolveReprocessAudio(item.note, md);
   const meta = [item.template && `шаблон: ${item.template}`, item.language && `язык: ${item.language}`]
     .filter(Boolean).join(" · ");
   view.innerHTML =
     `<h2 class="note-title">${escapeHtml(item.title || item.name)}</h2>
      <div class="note-actions">
        <button class="btn small" id="nvOpen">📄 Obsidian</button>
+       <button class="btn small" id="nvGoRecord">🎙 К записи</button>
        ${item.audio ? '<button class="btn small" id="nvAudio">🎵 Аудио</button>' : ""}
        <button class="btn small" id="nvCopyPath" title="Скопировать путь до заметки">📋 Путь</button>
        <button class="btn small ghost" id="nvReprocess">↻ Переобработать</button>
@@ -1988,9 +2059,21 @@ async function openHistoryNote(item) {
      ${meta ? `<div class="note-meta">${escapeHtml(meta)}</div>` : ""}
      <div class="note-body">${renderMarkdown(md)}</div>`;
   $("nvOpen").onclick = () => window.api.reveal(item.note);
+  $("nvGoRecord").onclick = () => switchView("record");
   if (item.audio) $("nvAudio").onclick = () => window.api.reveal(item.audio);
   $("nvCopyPath").onclick = () => copyToClipboard(item.note, $("nvCopyPath"), "✓ Скопировано", 1500);
-  $("nvReprocess").onclick = () => { if (item.audio) openReprocessPicker(item); };
+  const reprocessBtn = $("nvReprocess");
+  if (resolvedAudio) {
+    reprocessBtn.disabled = false;
+    reprocessBtn.title = "";
+    reprocessBtn.onclick = () => openReprocessPicker(item, resolvedAudio);
+  } else {
+    // Never a silent no-op: audio is genuinely unrecoverable (no item.audio AND no
+    // embed found in the note body) — disable with a visible reason instead.
+    reprocessBtn.disabled = true;
+    reprocessBtn.title = "Аудио не найдено — переобработка недоступна";
+    reprocessBtn.onclick = null;
+  }
 }
 
 // Small inline panel appended to #noteView (not a full modal) letting the user pick
@@ -1998,7 +2081,10 @@ async function openHistoryNote(item) {
 // card last held. Built entirely via createElement/textContent/property assignment —
 // no innerHTML of user strings — so a template name can never break out as markup or
 // an HTML attribute (same discipline as the chip/rail renderers).
-function openReprocessPicker(item) {
+// audioPath: the resolved audio to reprocess with — passed explicitly by the caller
+// (openHistoryNote) rather than read from item.audio, since item.audio can be null
+// while a derived (embed-recovered) path is still available (see resolveReprocessAudio).
+function openReprocessPicker(item, audioPath) {
   if (state.recording || state.processing) return; // don't hijack an active run
   closeReprocessPicker(); // toggle-safe if one is already open (e.g. re-click)
 
@@ -2026,7 +2112,7 @@ function openReprocessPicker(item) {
   confirmBtn.addEventListener("click", () => {
     const presetId = sel.value;
     closeReprocessPicker();
-    reprocessHistory(item.audio, presetId);
+    reprocessHistory(audioPath, presetId);
   });
 
   const cancelBtn = document.createElement("button");
@@ -2052,17 +2138,51 @@ function closeReprocessPicker() {
   if (el) el.remove();
 }
 
+// In-place progress/logs panel for a История-initiated reprocess (owner decision: no
+// more yanking the user into the Запись tab mid-История-session — see reprocessHistory
+// below). Mirrors openReprocessPicker's append-to-#noteView pattern; buildStages/
+// pushLog/showStageLogs/setStageClass (see progressTargetIds) populate #histStages/
+// #histLogs instead of the record view's #stages/#logs while reprocessTargetsHistory
+// is set. Left in place after the run finishes (same "leave the final state visible"
+// behavior #progressCard already has on the Запись tab) — only removed when the note
+// view itself is next rebuilt (openHistoryNote replaces #noteView's innerHTML wholesale).
+function buildHistoryProgressPanel() {
+  removeHistoryProgressPanel(); // toggle-safe, same rationale as closeReprocessPicker
+  const panel = document.createElement("div");
+  panel.id = "histProgressPanel";
+  panel.className = "card";
+  panel.innerHTML =
+    `<h2>Прогресс переобработки</h2>
+     <div class="stages" id="histStages"></div>
+     <p class="hint">Кликни по этапу — увидишь его логи. 🟢 ок · 🔴 ошибка · ⚪ пропущен</p>
+     <pre id="histLogs"></pre>`;
+  $("noteView").appendChild(panel);
+}
+function removeHistoryProgressPanel() {
+  const el = $("histProgressPanel");
+  if (el) el.remove();
+}
+
 // presetId: the chosen template's stable id (from the reprocess picker) — resolved
 // here to a {prompt, template} override rather than trusting whatever the record
 // card's own state.currentPreset happens to be at call time.
 function reprocessHistory(audio, presetId) {
   if (state.recording || state.processing) return; // don't hijack an active run
   const preset = state.presets.find((p) => p.id === presetId);
-  switchView("record");
+  // Deliberately NOT calling switchView("record") — the owner wants this run to stay
+  // visually inside История, not jump to Запись (see buildHistoryProgressPanel above).
+  // state.mode/tab-pane ARE still flipped to "import" (mirrors what a manual "Загрузить
+  // файл" tab click would do): the queue/processing functions below key off state.mode,
+  // not view visibility, so this has no visible effect on the currently-shown История
+  // view — it only keeps state.mode consistent with what's rendered if the user later
+  // switches to Запись manually (avoids a stale state.mode="import" while that tab's
+  // own pane still shows "Запись").
   state.mode = "import";
   document.querySelectorAll(".tab").forEach((x) => x.classList.toggle("active", x.dataset.tab === "import"));
   $("pane-record").classList.add("hidden");
   $("pane-import").classList.remove("hidden");
+  reprocessTargetsHistory = true;
+  buildHistoryProgressPanel();
   setImportQueue([audio]); // queue-of-1 — same path as an N-file batch
   $("pickedFile").textContent = audio.split("/").pop();
   startQueueRun(false, preset ? { prompt: preset.prompt, template: preset.name } : undefined);
@@ -2215,11 +2335,13 @@ async function openTreeNote(el) {
   view.innerHTML =
     `<div class="note-actions">
        <button class="btn small" id="ptvOpen">📄 Obsidian</button>
+       <button class="btn small" id="ptvGoRecord">🎙 К записи</button>
        <button class="btn small" id="ptvCopyPath" title="Скопировать путь до заметки">📋 Путь</button>
      </div>
      <h2 class="note-title">${escapeHtml(name)}</h2>
      <div class="note-body">${renderMarkdown(md)}</div>`;
   $("ptvOpen").onclick = () => window.api.reveal(path);
+  $("ptvGoRecord").onclick = () => switchView("record");
   $("ptvCopyPath").onclick = () => copyToClipboard(path, $("ptvCopyPath"), "✓ Скопировано", 1500);
 }
 $("paraTreeRefresh").addEventListener("click", renderParaTree);

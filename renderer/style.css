@@ -162,6 +162,7 @@ select:focus, input:focus, textarea:focus { outline: none; border-color: var(--a
 .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 .btn.primary:hover { background: var(--accent2); }
 .btn.primary:disabled { opacity: .4; cursor: not-allowed; }
+.btn:disabled { opacity: .4; cursor: not-allowed; }
 .btn.big { padding: 13px 28px; font-size: 15px; font-weight: 600; }
 .btn.small { padding: 6px 12px; font-size: 13px; }
 .btn.ghost { background: transparent; }
@@ -249,12 +250,15 @@ body.processing .history-row button { opacity: .4; pointer-events: none; }
 .glossary-caret { font-size: 10px; }
 .chip-usage { color: var(--muted); font-size: 11px; }
 
-/* glossary: "Мои" category groups (V2 — «разбить по папочкам») */
+/* glossary: "Мои" category groups (V2 — «разбить по папочкам»; V2.1 — collapsible) */
 .glossary-category-group { margin-bottom: 10px; }
 .glossary-category-header {
-  display: flex; align-items: center; gap: 6px;
+  display: flex; align-items: center; gap: 6px; width: 100%;
   font-size: 12px; font-weight: 600; color: var(--muted); margin-bottom: 6px;
+  background: transparent; border: none; padding: 0; font-family: inherit;
+  text-align: left; cursor: pointer;
 }
+.glossary-category-header:hover { color: var(--fg); }
 .chip-category {
   background: transparent; border: none; color: var(--muted); font-size: 11px;
   font-family: inherit; cursor: pointer; max-width: 120px;
@@ -321,7 +325,7 @@ pre {
   font-family: "SF Mono", ui-monospace, Menlo, monospace;
   white-space: pre-wrap; word-break: break-word; max-height: 340px; overflow: auto;
 }
-#logs { color: var(--muted); max-height: 200px; }
+#logs, #histLogs { color: var(--muted); max-height: 200px; }
 .result-pane { color: var(--fg); max-height: 460px; }
 .result-actions { display: flex; gap: 8px; margin-bottom: 12px; }
 .speaker-map { background: var(--card2); border: 1px solid var(--line); border-radius: 8px; padding: 12px; margin-bottom: 12px; }
