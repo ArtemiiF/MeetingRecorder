@@ -850,7 +850,7 @@ function cacheDirFor(audioFile) {
 
 // processing pipeline
 ipcMain.handle("process-audio", async (_e, opts) => {
-  const { audioFile, prompt, diarize, outDir, engine, hfToken, fresh, language, glossary, summarize, template, micFile, systemFile, authorName, origin, fastModel, mainModel, glossaryUsage } = opts;
+  const { audioFile, prompt, diarize, outDir, engine, hfToken, fresh, language, glossary, summarize, template, micFile, systemFile, authorName, origin, fastModel, mainModel, glossaryUsage, version } = opts;
   if (procProc) return { ok: false, error: "Обработка уже идёт" };
   if (modelDlProc) return { ok: false, error: "Дождитесь окончания скачивания моделей" };
   // Same reasoning as start-recording's guard above: processing spawns pythonBin(),
@@ -897,6 +897,13 @@ ipcMain.handle("process-audio", async (_e, opts) => {
   // note-origin typing for a plain import (batch vs single file) — record-mode never
   // sends this, the backend infers "recording" from micFile/systemFile above instead.
   if (origin) args.push("--origin", origin);
+  // Note versioning by template on reprocess (История "Переобработать" only — see
+  // reprocessHistory/openReprocessPicker in renderer.js). The renderer computes the
+  // next per-template version number and sends it ONLY for a deliberate История
+  // reprocess; a plain record/import run never sends this, so backend.py's --version
+  // default (None) preserves today's behaviour (same filename, overwrite-by-cached-
+  // stamp) exactly.
+  if (version) args.push("--version", String(version));
   // Fast model for mechanical LLM calls only (correct/title/suggest) — empty means
   // omit the flag entirely, backend.py's --fast-model default ("") preserves today's
   // behaviour (no "model" field sent, LM Studio uses whatever's loaded).
@@ -1634,6 +1641,10 @@ ipcMain.handle("list-history", async (_e, outDir) => {
     audio: it.audio,
     mtime: it.mtime,
     source: it.source,
+    // note versioning by template on reprocess — a legacy note (or the DB row
+    // before its next mtime-triggered reconcile) has no version key; default 1
+    // (mirrors backend.py's own _reconcile/process default for the same case).
+    version: it.version || 1,
   });
 });
 

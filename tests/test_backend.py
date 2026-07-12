@@ -2,6 +2,7 @@
 import io
 import json
 import os
+import re
 import signal
 import sys
 import threading
@@ -1985,7 +1986,7 @@ def test_find_device_index_matches_substring(monkeypatch):
 def test_cmd_process_uses_default_prompt_when_file_blank(monkeypatch, tmp_path):
     captured = {}
 
-    def fake_process(self, audio, prompt, keep_audio_in_obsidian=True, mic_file=None, system_file=None, origin=None):
+    def fake_process(self, audio, prompt, keep_audio_in_obsidian=True, mic_file=None, system_file=None, origin=None, version=None):
         captured["prompt"] = prompt
 
     monkeypatch.setattr(backend.Pipeline, "process", fake_process)
@@ -1997,7 +1998,7 @@ def test_cmd_process_uses_default_prompt_when_file_blank(monkeypatch, tmp_path):
         diarize=False, infile="x.wav", keep_audio=False, cache_dir=None,
         language="ru", glossary="", summarize=True, template="", db=None,
         mic=None, system=None, author_name="Автор", origin=None, fast_model="", main_model="",
-        glossary_usage_file=None)
+        glossary_usage_file=None, version=None)
     backend.cmd_process(args)
     assert "краткую структурированную сводку" in captured["prompt"]
 
@@ -2005,7 +2006,7 @@ def test_cmd_process_uses_default_prompt_when_file_blank(monkeypatch, tmp_path):
 def test_cmd_process_forwards_user_prompt(monkeypatch, tmp_path):
     captured = {}
     monkeypatch.setattr(backend.Pipeline, "process",
-                        lambda self, a, p, keep_audio_in_obsidian=True, mic_file=None, system_file=None, origin=None: captured.update(p=p))
+                        lambda self, a, p, keep_audio_in_obsidian=True, mic_file=None, system_file=None, origin=None, version=None: captured.update(p=p))
     pf = tmp_path / "p.txt"
     pf.write_text("МОЙ КАСТОМНЫЙ ПРОМПТ")
     args = types.SimpleNamespace(
@@ -2013,7 +2014,7 @@ def test_cmd_process_forwards_user_prompt(monkeypatch, tmp_path):
         diarize=True, infile="x.wav", keep_audio=False, cache_dir=None,
         language="ru", glossary="", summarize=True, template="", db=None,
         mic=None, system=None, author_name="Автор", origin=None, fast_model="", main_model="",
-        glossary_usage_file=None)
+        glossary_usage_file=None, version=None)
     backend.cmd_process(args)
     assert captured["p"] == "МОЙ КАСТОМНЫЙ ПРОМПТ"
 
@@ -2492,6 +2493,136 @@ def test_process_survives_failed_transcription(monkeypatch, tmp_path):
     ends = {e["stage"]: e["status"] for e in events if e["event"] == "stage_end"}
     assert ends["transcribe"] == "fail"     # no segments → red
     assert ends["llm"] == "fail"
+
+
+# ── note versioning by template on reprocess (История "Переобработать") ──────────
+def test_find_audio_strips_revision_suffix():
+    files = ["meeting-s-r2.md", "meeting-s.wav"]
+    assert backend._find_audio("meeting-s-r2.md", files) == "meeting-s.wav"
+
+
+def test_find_audio_strips_revision_and_lang_suffix():
+    files = ["meeting-s-en-r3.md", "meeting-s.wav"]
+    assert backend._find_audio("meeting-s-en-r3.md", files) == "meeting-s.wav"
+
+
+def test_process_no_version_keeps_plain_filename_and_no_frontmatter_key(monkeypatch, tmp_path):
+    """Regression lock: a plain record/import run (no `version` passed) must behave
+    byte-identically to before this feature — plain filename, no version frontmatter key."""
+    src = tmp_path / "in.wav"; src.write_bytes(b"x")
+    pipe = _mock_pipe(monkeypatch, str(tmp_path / "v"), {"segments": [seg("hi", 0, 2)], "text": "x"}, None)
+    done = [e for e in capture(pipe.process, str(src), "p") if e["event"] == "done"][0]
+    note_path = Path(done["note"])
+    assert re.match(r"^meeting-\d{4}-\d{2}-\d{2}-\d{6}\.md$", note_path.name)  # no -r<seq> revision suffix
+    assert 'version:' not in note_path.read_text(encoding="utf-8")
+
+
+def test_process_versioned_reprocess_writes_new_file_not_overwrite(monkeypatch, tmp_path):
+    """История reprocess (version=2) must NOT overwrite the original note — a new,
+    uniquely-named file appears, the original stays byte-identical, and both share
+    the same audio (versions of one recording never duplicate the audio)."""
+    out = tmp_path / "v"
+    cache = tmp_path / "cache"; cache.mkdir()
+    (cache / "stamp.txt").write_text("2026-07-11-120000", encoding="utf-8")
+    src = tmp_path / "in.wav"; src.write_bytes(b"x")
+
+    pipe1 = _mock_pipe(monkeypatch, str(out), {"segments": [seg("original", 0, 2)], "text": "x"}, None)
+    pipe1.cache_dir = cache
+    first = [e for e in capture(pipe1.process, str(src), "p") if e["event"] == "done"][0]
+    original_note = Path(first["note"])
+    original_text = original_note.read_text(encoding="utf-8")
+    assert original_note.name == "meeting-2026-07-11-120000.md"
+
+    pipe2 = _mock_pipe(monkeypatch, str(out), {"segments": [seg("reprocessed", 0, 2)], "text": "x"}, None)
+    pipe2.cache_dir = cache
+    second = [e for e in capture(pipe2.process, str(src), "p", version=2) if e["event"] == "done"][0]
+    versioned_note = Path(second["note"])
+
+    assert versioned_note != original_note
+    assert versioned_note.name == "meeting-2026-07-11-120000-r1.md"
+    assert original_note.exists() and original_note.read_text(encoding="utf-8") == original_text
+    assert 'version: "2"' in versioned_note.read_text(encoding="utf-8")
+    assert second["audio"] == first["audio"]  # shared audio, not duplicated
+
+
+def test_process_versioned_reprocess_with_new_template_still_gets_unique_filename(monkeypatch, tmp_path):
+    """Edge case this feature must not regress: reprocessing with a template that has
+    NEVER been used for this recording computes a per-template version of 1 (the
+    renderer's nextVersionFor) — but the filename must still be revision-suffixed, not
+    the plain meeting-<timestamp>.md path, or it would silently clobber whatever OTHER
+    template already owns that path (filenames carry no template info)."""
+    out = tmp_path / "v"
+    cache = tmp_path / "cache"; cache.mkdir()
+    (cache / "stamp.txt").write_text("2026-07-11-130000", encoding="utf-8")
+    src = tmp_path / "in.wav"; src.write_bytes(b"x")
+
+    pipe1 = _mock_pipe(monkeypatch, str(out), {"segments": [seg("a", 0, 2)], "text": "x"}, None)
+    pipe1.cache_dir = cache
+    pipe1.TEMPLATE = "Митинг"
+    first = [e for e in capture(pipe1.process, str(src), "p") if e["event"] == "done"][0]
+    original_note = Path(first["note"])
+    original_text = original_note.read_text(encoding="utf-8")
+
+    pipe2 = _mock_pipe(monkeypatch, str(out), {"segments": [seg("b", 0, 2)], "text": "x"}, None)
+    pipe2.cache_dir = cache
+    pipe2.TEMPLATE = "Новый шаблон"
+    # A reprocess ALWAYS passes version explicitly (never None) — even though this
+    # template's own per-template count is 1 (never used before for this recording).
+    second = [e for e in capture(pipe2.process, str(src), "p", version=1) if e["event"] == "done"][0]
+    versioned_note = Path(second["note"])
+
+    assert versioned_note != original_note
+    assert original_note.exists() and original_note.read_text(encoding="utf-8") == original_text
+    assert 'template: "Митинг"' in original_text
+    assert 'template: "Новый шаблон"' in versioned_note.read_text(encoding="utf-8")
+    assert 'version: "1"' in versioned_note.read_text(encoding="utf-8")
+
+
+def test_process_stores_version_in_db_index(monkeypatch, tmp_path):
+    out = tmp_path / "v"
+    db = str(tmp_path / "i.db")
+    src = tmp_path / "in.wav"; src.write_bytes(b"x")
+    pipe = backend.Pipeline(out_dir=str(out), diarize=False, template="Митинг", db_path=db)
+    monkeypatch.setattr(pipe, "convert_to_mono", lambda f: f)
+    monkeypatch.setattr(pipe, "remove_silence_vad", lambda f: (f, None))
+    monkeypatch.setattr(pipe, "transcribe", lambda f: {"segments": [seg("hi", 0, 2)], "text": "x"})
+    monkeypatch.setattr(pipe, "summarize", lambda t, pr: None)
+    capture(pipe.process, str(src), "p", version=3)
+    conn = backend._db_connect(db)
+    items = backend._db_list(conn)
+    conn.close()
+    assert len(items) == 1 and items[0]["version"] == 3
+
+
+def test_process_no_version_defaults_to_1_in_db_index(monkeypatch, tmp_path):
+    out = tmp_path / "v"
+    db = str(tmp_path / "i.db")
+    src = tmp_path / "in.wav"; src.write_bytes(b"x")
+    pipe = backend.Pipeline(out_dir=str(out), diarize=False, template="Митинг", db_path=db)
+    monkeypatch.setattr(pipe, "convert_to_mono", lambda f: f)
+    monkeypatch.setattr(pipe, "remove_silence_vad", lambda f: (f, None))
+    monkeypatch.setattr(pipe, "transcribe", lambda f: {"segments": [seg("hi", 0, 2)], "text": "x"})
+    monkeypatch.setattr(pipe, "summarize", lambda t, pr: None)
+    capture(pipe.process, str(src), "p")  # no version — first-ever processing
+    conn = backend._db_connect(db)
+    items = backend._db_list(conn)
+    conn.close()
+    assert len(items) == 1 and items[0]["version"] == 1
+
+
+def test_reconcile_reads_version_from_frontmatter_defaults_to_1_when_absent(tmp_path):
+    out = tmp_path / "vault"; out.mkdir()
+    (out / "meeting-2026-01-01-1000.md").write_text(
+        '---\ntitle: "A"\ntemplate: "Митинг"\nversion: "3"\n---\n# x', encoding="utf-8")
+    (out / "meeting-2026-01-01-1000-r1.md").write_text(
+        '---\ntitle: "B"\ntemplate: "Другой"\n---\n# x', encoding="utf-8")  # no version key (legacy-shaped)
+    db = str(tmp_path / "i.db")
+    conn = backend._db_connect(db)
+    backend._reconcile(conn, str(out))
+    items = {it["title"]: it["version"] for it in backend._db_list(conn)}
+    conn.close()
+    assert items["A"] == 3
+    assert items["B"] == 1  # missing key → default 1
 
 
 # ── RAG helpers ─────────────────────────────────────────────────────────────
