@@ -7,7 +7,7 @@ const path = require("path");
 const {
   buildWavHeader, WavWriter, rmsLevel, cacheKey,
   pairHistory, encodeTokenBlob, decodeTokenBlob, isStale,
-  rewriteNoteSpeakers, isOutsideRoot, indexRunReducer, diskGuardVerdict,
+  rewriteNoteSpeakers, isOutsideRoot, indexRunReducer, upsertById, diskGuardVerdict,
   resolveOutDirOnVaultChange, trayMenuTemplate,
   resolvePythonBin, resolveFfmpegBin, resolveResourcePath, resolveAudioTeeBin, resolveAssetPath, backendInstallStatus,
   parseFfmpegVersion,
@@ -297,6 +297,29 @@ test("indexRunReducer: undefined state defaults to idle, trigger starts", () => 
   const r = indexRunReducer(undefined, "trigger");
   assert.equal(r.shouldStart, true);
   assert.deepEqual(r.state, { inFlight: true, queued: false });
+});
+
+// ── list upsert-by-id ────────────────────────────────────────────────────────
+test("upsertById: unknown id appends", () => {
+  const list = [{ id: "a", v: 1 }];
+  const next = upsertById(list, { id: "b", v: 2 });
+  assert.deepEqual(next, [{ id: "a", v: 1 }, { id: "b", v: 2 }]);
+});
+test("upsertById: existing id replaces in place instead of duplicating", () => {
+  const list = [{ id: "a", v: 1 }, { id: "b", v: 2 }, { id: "c", v: 3 }];
+  const next = upsertById(list, { id: "b", v: 99 });
+  assert.deepEqual(next, [{ id: "a", v: 1 }, { id: "b", v: 99 }, { id: "c", v: 3 }]);
+  assert.equal(next.length, 3, "must replace, not append a duplicate id");
+});
+test("upsertById: is pure — never mutates the input list or entry", () => {
+  const list = [{ id: "a", v: 1 }];
+  const listCopy = list.map((e) => ({ ...e }));
+  upsertById(list, { id: "a", v: 2 });
+  assert.deepEqual(list, listCopy, "input list must be untouched");
+});
+test("upsertById: empty list appends as the sole entry", () => {
+  const next = upsertById([], { id: "a", v: 1 });
+  assert.deepEqual(next, [{ id: "a", v: 1 }]);
 });
 
 // ── tray menu (macOS menu-bar icon) ──────────────────────────────────────────

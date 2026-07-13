@@ -12,7 +12,7 @@ const readline = require("readline");
 const {
   WavWriter, rmsLevel, cacheKey, pairHistory,
   encodeTokenBlob, decodeTokenBlob, isStale,
-  rewriteNoteSpeakers, isOutsideRoot, indexRunReducer, diskGuardVerdict,
+  rewriteNoteSpeakers, isOutsideRoot, indexRunReducer, upsertById, diskGuardVerdict,
   resolveOutDirOnVaultChange, trayMenuTemplate,
   resolvePythonBin, resolveFfmpegBin, resolveResourcePath, resolveAudioTeeBin, resolveAssetPath, backendInstallStatus,
   parseFfmpegVersion,
@@ -109,6 +109,17 @@ let installBackendCanceled = false; // set when the user cancels an in-flight ba
 let tee = null;        // AudioTee instance (system audio)
 let sysWav = null;     // WavWriter for system.wav
 let session = null;    // { dir, micPath, sysPath, mixedPath, micRecorded }
+// True while a mix (spawned in stop-recording, see runBackend below) is still
+// running in the background. `session` is reassigned unconditionally on every
+// start-recording call — without this flag a new recording could start (and
+// reassign `session`) while an older recording's mix is still in flight, which
+// used to let the mix's completion closure read the WRONG (new) session for
+// id/dir/mic/system while `mixed` still pointed at the OLD file (cross-link
+// bug). Set true right before the mix's runBackend call, cleared in that
+// call's onClose — onClose is guaranteed to fire on success, backend error, AND
+// process-spawn failure (see runBackend's proc.on("close"/"error") below), so a
+// failed mix can never wedge recording permanently.
+let mixInFlight = false;
 
 function pythonBin() {
   return resolvePythonBin(
@@ -626,6 +637,10 @@ ipcMain.handle("pick-out-dir", async () => {
 // recording: start — mic (python/pyaudio) + system audio (AudioTee), in parallel
 ipcMain.handle("start-recording", async (_e, opts) => {
   if (recordProc || tee) return { ok: false, error: "Запись уже идёт" };
+  // A previous recording's mix (stop-recording) is still finishing in the background —
+  // starting now would reassign the module-level `session` out from under it. See
+  // mixInFlight's declaration above for the cross-link bug this closes.
+  if (mixInFlight) return { ok: false, error: "Дождитесь завершения обработки предыдущей записи" };
   // Recording spawns pythonBin() too (mic capture) — a concurrent install-backend
   // run can be actively overwriting that same interpreter file underneath it.
   if (installBackendProc) return { ok: false, error: "Дождитесь окончания установки бэкенда" };
@@ -755,12 +770,19 @@ ipcMain.handle("stop-recording", async () => {
     }
   }
   // 3. mix whatever tracks we actually got
+  // Snapshot THIS recording's identity/paths now, before the async mix — `session`
+  // is a module-level singleton that start-recording reassigns unconditionally, and
+  // the mix below can still be running when a new recording starts (that window is
+  // what mixInFlight, below, now closes — this snapshot is the direct fix so the
+  // manifest entry can never cross-link even if some future path reopens the window).
+  // The "mixed" closure must read ONLY `sess`, never the live `session`.
+  const sess = session;
   const nonEmpty = (p) => fs.existsSync(p) && fs.statSync(p).size > 44;
-  const micOk = nonEmpty(session.micPath);
-  const sysOk = nonEmpty(session.sysPath);
-  const args = ["mix", "--out", session.mixedPath];
-  if (micOk) args.push("--mic", session.micPath);
-  if (sysOk) args.push("--system", session.sysPath);
+  const micOk = nonEmpty(sess.micPath);
+  const sysOk = nonEmpty(sess.sysPath);
+  const args = ["mix", "--out", sess.mixedPath];
+  if (micOk) args.push("--mic", sess.micPath);
+  if (sysOk) args.push("--system", sess.sysPath);
   // NOTE: no auto track-alignment. A receipt-time delta (Date.now at first mic event
   // vs first AudioTee chunk) is dominated by python/pyaudio startup latency, not by the
   // real audio-start offset — injecting it as adelay added hundreds of ms of skew to
@@ -768,6 +790,7 @@ ipcMain.handle("stop-recording", async () => {
   // at t=0 (the raw-capture baseline) is the honest default. build_mix_filter still
   // supports adelay for a future real measurement.
 
+  mixInFlight = true;
   runBackend(
     args,
     (ev) => {
@@ -775,12 +798,14 @@ ipcMain.handle("stop-recording", async () => {
         // Recording finished capture — persist it to the pending-recordings manifest
         // (survives an app restart) before telling the renderer, so the queue and the
         // notification can never disagree about what's waiting to be processed.
-        const id = session.stamp;
-        const name = `Запись ${session.displayStamp}`;
-        const manifest = loadPendingManifest();
-        manifest.push({
-          id, name, stamp: session.stamp, dir: session.dir,
-          mixed: ev.file, mic: micOk ? session.micPath : null, system: sysOk ? session.sysPath : null,
+        const id = sess.stamp;
+        const name = `Запись ${sess.displayStamp}`;
+        // Upsert-by-id (defense-in-depth): even with the snapshot above and the
+        // mixInFlight start-guard below, replace-by-id rather than blind push so a
+        // duplicate id can never land in the manifest if two completions ever raced.
+        const manifest = upsertById(loadPendingManifest(), {
+          id, name, stamp: sess.stamp, dir: sess.dir,
+          mixed: ev.file, mic: micOk ? sess.micPath : null, system: sysOk ? sess.sysPath : null,
           tracks: ev.tracks,
         });
         savePendingManifest(manifest);
@@ -788,8 +813,8 @@ ipcMain.handle("stop-recording", async () => {
           event: "recorded",
           id, name,
           file: ev.file,
-          mic: micOk ? session.micPath : null,
-          system: sysOk ? session.sysPath : null,
+          mic: micOk ? sess.micPath : null,
+          system: sysOk ? sess.sysPath : null,
           tracks: ev.tracks,
         });
       } else if (ev.event === "error") {
@@ -798,7 +823,11 @@ ipcMain.handle("stop-recording", async () => {
         send("record-event", ev);
       }
     },
-    () => {}
+    // Clears mixInFlight unconditionally on the process's own close/error (see
+    // runBackend's proc.on("close"/"error") — always fires exactly once), not inside
+    // the "mixed"/"error" stdout-event branches above: this is the fail-safe that
+    // guarantees a crashed or hung-then-killed mix can never wedge recording forever.
+    () => { mixInFlight = false; }
   );
   return { ok: true };
 });

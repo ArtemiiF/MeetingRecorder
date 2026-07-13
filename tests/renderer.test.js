@@ -3860,10 +3860,54 @@ test("main.js: stop-recording persists a pending-recordings manifest entry and i
   const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
   const stopRecording = mainSrc.match(/ipcMain\.handle\("stop-recording"[\s\S]*?\n\}\);/)[0];
   assert.match(stopRecording, /loadPendingManifest\(\)/);
-  assert.match(stopRecording, /manifest\.push\(/);
+  // Upsert-by-id, not a blind push — see the manifest cross-link/duplicate regression
+  // lock below for why (upsertById replaces same-id instead of duplicating).
+  assert.match(stopRecording, /upsertById\(loadPendingManifest\(\),/);
   assert.match(stopRecording, /savePendingManifest\(manifest\)/);
   assert.match(stopRecording, /event: "recorded",\s*\n\s*id, name,/,
     "the recorded IPC event must carry id/name for the renderer's pending queue");
+});
+
+// Regression lock for the recording-manifest cross-link/duplicate bug: a double-start
+// (stop-recording A's mix still running in the background when B starts) used to let
+// A's mix-completion closure read the module-level `session` LIVE — by the time it
+// fired, `session` had been reassigned to B, so A's manifest entry got B's id/dir/mic
+// while `mixed` still pointed at A's own file. main.js can't be exercised directly
+// under `node --test` (it requires "electron") — these lock the fix at the source
+// level, the same convention as the stop-recording tests above.
+test("main.js: stop-recording snapshots session into a local BEFORE the async mix, so the mix closure never reads the live (possibly-reassigned) session", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const stopRecording = mainSrc.match(/ipcMain\.handle\("stop-recording"[\s\S]*?\n\}\);/)[0];
+  const snapshotIdx = stopRecording.search(/const sess = session;/);
+  const runBackendIdx = stopRecording.search(/runBackend\(\s*\n\s*args,/);
+  assert.ok(snapshotIdx >= 0, "must snapshot `session` into a local (e.g. `const sess = session;`)");
+  assert.ok(runBackendIdx >= 0, "must find the mix's runBackend(args, ...) call");
+  assert.ok(snapshotIdx < runBackendIdx, "the snapshot must happen BEFORE the mix's runBackend call, not after");
+
+  const mixCallback = stopRecording.slice(runBackendIdx, stopRecording.indexOf("() => { mixInFlight = false; }"));
+  for (const field of ["stamp", "dir", "micPath", "sysPath", "displayStamp"]) {
+    assert.doesNotMatch(mixCallback, new RegExp(`session\\.${field}\\b`),
+      `the mix closure must never read session.${field} live — only sess.${field}`);
+    assert.match(mixCallback, new RegExp(`sess\\.${field}\\b`),
+      `the mix closure must read sess.${field} (the snapshot), not the live session`);
+  }
+});
+
+// Regression lock for the start-guard half of the same fix: without this, a new
+// recording could start (and reassign `session`) while a previous recording's mix is
+// still running — the exact window the cross-link bug above needed.
+test("main.js: start-recording refuses to start while a previous recording's mix is still in flight, and stop-recording sets/clears the flag around the mix", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const startRecording = mainSrc.match(/ipcMain\.handle\("start-recording"[\s\S]*?\n\}\);/)[0];
+  assert.match(startRecording, /if \(mixInFlight\) return \{ ok: false,/,
+    "start-recording must refuse while mixInFlight is true");
+
+  const stopRecording = mainSrc.match(/ipcMain\.handle\("stop-recording"[\s\S]*?\n\}\);/)[0];
+  const setIdx = stopRecording.search(/mixInFlight = true;/);
+  const runBackendIdx = stopRecording.search(/runBackend\(\s*\n\s*args,/);
+  assert.ok(setIdx >= 0 && setIdx < runBackendIdx, "mixInFlight must be set true before the mix's runBackend call");
+  assert.match(stopRecording, /\(\) => \{ mixInFlight = false; \}/,
+    "mixInFlight must be cleared in the mix's onClose — fires on success, backend error, AND spawn failure, so a failed mix can never wedge recording");
 });
 
 test("main.js: list-pending-recordings drops (and persists dropping) manifest entries whose mixed file no longer exists", () => {
@@ -3906,6 +3950,28 @@ test("pending recordings: a recorded event appends a row; a second appends a sec
   await tick(window);
   rows = $("historyList").querySelectorAll(".queue-item");
   assert.equal(rows.length, 2, "second recording must append, not overwrite the first");
+});
+
+// Regression lock (renderer half of the manifest cross-link/duplicate fix): a
+// "recorded" IPC event delivered twice for the SAME id (e.g. a race on the
+// main-process side) must replace the existing pending row, never add a duplicate.
+test("pending recordings: a second recorded event for the SAME id replaces the row, not duplicates it", async () => {
+  const { window, $, handlers } = await boot();
+  handlers.record({
+    event: "recorded", id: "r1", name: "Запись 1",
+    file: "/rec/r1/mixed.wav", mic: "/rec/r1/mic.wav", system: null, tracks: 1,
+  });
+  await tick(window);
+  assert.equal($("historyList").querySelectorAll(".queue-item").length, 1);
+
+  // Same id, corrected/updated payload (mirrors what a real re-delivery would carry).
+  handlers.record({
+    event: "recorded", id: "r1", name: "Запись 1",
+    file: "/rec/r1/mixed-corrected.wav", mic: "/rec/r1/mic.wav", system: "/rec/r1/system.wav", tracks: 2,
+  });
+  await tick(window);
+  const rows = $("historyList").querySelectorAll(".queue-item");
+  assert.equal(rows.length, 1, "same id must replace the existing row, not add a second one");
 });
 
 // Regression lock for the critic-rejected dual-path: the old single-slot
