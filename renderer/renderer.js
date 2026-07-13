@@ -1545,6 +1545,19 @@ function fmtTime(s) {
   return String(m).padStart(2, "0") + ":" + String(s % 60).padStart(2, "0");
 }
 
+// Replace-or-append by `.id`: mirrors main.js's lib/mainutil upsertById (renderer.js
+// is window.eval'd in a require()-less browser context, no shared import across the
+// main/renderer boundary — see that copy's comment). Guards state.pendingRecordings
+// against a duplicate id if a "recorded" IPC event were ever delivered twice for the
+// same recording. Pure — returns a new array, list/entry untouched.
+function upsertById(list, entry) {
+  const idx = list.findIndex((it) => it.id === entry.id);
+  if (idx < 0) return [...list, entry];
+  const next = list.slice();
+  next[idx] = entry;
+  return next;
+}
+
 window.api.onRecordEvent((ev) => {
   if (ev.event === "level") {
     // direct write (not rAF): the recorder window is backgrounded during a call,
@@ -1577,7 +1590,10 @@ window.api.onRecordEvent((ev) => {
     // recording, causing finishPendingItem to delete an unprocessed recording while
     // the actually-finished one lingered pending forever.
     if (ev.id) {
-      state.pendingRecordings.push({
+      // Upsert-by-id, not blind push: a duplicate "recorded" event for the same id
+      // (e.g. a race on the main-process side) must replace the existing row, never
+      // add a second one.
+      state.pendingRecordings = upsertById(state.pendingRecordings, {
         id: ev.id, name: ev.name || `Запись ${ev.id}`,
         mixed: ev.file, mic: ev.mic, system: ev.system, tracks: ev.tracks,
         status: "pending",
