@@ -321,6 +321,84 @@ test("▶ on the rail's inline pending row starts processing (reuses processPend
   assert.equal(calls, 1);
 });
 
+// ── Запись-tab «Обработать» quick action (#processLatestBtn) ────────────────
+// Always targets the LATEST finished recording (last-appended entry in
+// state.pendingRecordings) directly from the record view — distinct from the
+// История rail's per-row ▶ / "Обработать все". Gated the same way as
+// processPendingRecording: blocked while state.recording or state.processing.
+test("#processLatestBtn: no pending recordings → disabled (refreshProcessLatestBtn actively enforces it, not just the HTML default)", async () => {
+  const { window, $ } = await boot();
+  $("processLatestBtn").disabled = false; // force-enable first, so the assertion below is load-bearing
+  window.refreshProcessLatestBtn();
+  assert.equal($("processLatestBtn").disabled, true);
+});
+
+test("#processLatestBtn: after a 'recorded' event with no active recording, enabled and processes the latest pending item", async () => {
+  const opts = [];
+  const { window, $, handlers } = await boot({
+    processAudio: async (o) => { opts.push(o); return { ok: true }; },
+  });
+  handlers.record({ event: "recorded", id: "r1", name: "Запись 1", file: "/tmp/mixed1.wav", mic: "/tmp/m1.wav", system: null, tracks: 1 });
+  assert.equal($("processLatestBtn").disabled, false);
+  $("processLatestBtn").click(); await tick(window);
+  assert.equal(opts.length, 1);
+  assert.equal(opts[0].audioFile, "/tmp/mixed1.wav");
+});
+
+test("#processLatestBtn: disabled while a recording is active, even with a pending item queued", async () => {
+  const { window, $, handlers } = await boot();
+  handlers.record({ event: "recorded", id: "r1", name: "Запись 1", file: "/tmp/mixed1.wav", mic: "/tmp/m1.wav", system: null, tracks: 1 });
+  assert.equal($("processLatestBtn").disabled, false);
+  $("recBtn").click(); await tick(window); // start a new recording
+  assert.equal($("processLatestBtn").disabled, true);
+});
+
+test("#processLatestBtn: record→stop→record blocks during the 2nd recording AND its mixing window (Fix #1 race), then targets the 2nd (latest) recording once it lands", async () => {
+  const opts = [];
+  const { window, $, handlers } = await boot({
+    processAudio: async (o) => { opts.push(o); return { ok: true }; },
+  });
+  // 1st recording finishes and lands in the pending queue, left unprocessed.
+  handlers.record({ event: "recorded", id: "r1", name: "Запись 1", file: "/tmp/mixed1.wav", mic: "/tmp/m1.wav", system: null, tracks: 1 });
+  assert.equal($("processLatestBtn").disabled, false, "enabled after the 1st recording finishes");
+
+  // Start the 2nd recording — must block again even though r1 is still pending.
+  $("recBtn").click(); await tick(window);
+  assert.equal($("processLatestBtn").disabled, true, "blocked while the 2nd recording is active");
+
+  // Stop the 2nd recording — its "recorded" event has NOT landed yet (still mixing).
+  // This is the exact window Fix #1 (awaitingRecorded) closes: without it,
+  // latestPendingRecording() would still return r1 (the only item so far) and the
+  // button would wrongly enable, targeting the WRONG (stale) recording.
+  $("recBtn").click(); await tick(window);
+  assert.equal($("processLatestBtn").disabled, true,
+    "must stay disabled during the mixing window — must NOT target the older r1");
+
+  // Now the 2nd recording's mix lands, appended after r1 as the new latest.
+  handlers.record({ event: "recorded", id: "r2", name: "Запись 2", file: "/tmp/mixed2.wav", mic: "/tmp/m2.wav", system: null, tracks: 1 });
+  assert.equal($("processLatestBtn").disabled, false, "enabled once the 2nd recording actually lands");
+
+  $("processLatestBtn").click(); await tick(window);
+  assert.equal(opts.length, 1);
+  assert.equal(opts[0].audioFile, "/tmp/mixed2.wav", "targets the latest (2nd) recording, never the older r1");
+});
+
+test("#processLatestBtn: disabled while state.processing is true, even when the run is processing a NON-latest item (Fix #2 — isolates the !state.processing clause from item.status)", async () => {
+  const { window, $, handlers } = await boot({
+    processAudio: () => new Promise(() => {}), // never resolves — keep processing in flight
+  });
+  // Two pending items: r1 (older) and r2 (latest), both left "pending".
+  handlers.record({ event: "recorded", id: "r1", name: "Запись 1", file: "/tmp/mixed1.wav", mic: "/tmp/m1.wav", system: null, tracks: 1 });
+  handlers.record({ event: "recorded", id: "r2", name: "Запись 2", file: "/tmp/mixed2.wav", mic: "/tmp/m2.wav", system: null, tracks: 1 });
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  // Process the OLDER row (r1) via its own per-row ▶ (История rail) — r2, the
+  // "latest" item processLatestBtn targets, is left untouched at status "pending".
+  $("historyList").querySelectorAll(".rail-item.pending")[0].querySelector(".pending-play-btn").click();
+  await tick(window);
+  assert.equal($("processLatestBtn").disabled, true,
+    "state.processing alone must disable the button, even though the latest item (r2) is still 'pending'");
+});
+
 test("import-mode origin: a multi-file queue reports 'batch', a single pick reports 'file'", async () => {
   const opts = [];
   const { window, $ } = await boot({

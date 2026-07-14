@@ -238,6 +238,7 @@ body.processing .history-row button { opacity: .4; pointer-events: none; }
 .rec-row { display: flex; align-items: center; gap: 16px; margin-top: 14px; }
 .timer { font-variant-numeric: tabular-nums; font-size: 22px; color: var(--muted); }
 .timer.live { color: var(--danger); }
+#processLatestBtn { margin-top: 14px; }
 
 /* glossary: chip list */
 .glossary-toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
