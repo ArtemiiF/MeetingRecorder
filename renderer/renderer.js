@@ -1355,6 +1355,55 @@ function processPendingRecording(idx) {
   runPendingItem(item);
 }
 
+// Запись-tab quick action (index.html #processLatestBtn, below the record controls)
+// — always targets the LATEST finished recording: the last-appended entry in
+// state.pendingRecordings (upsertById above only appends a new id at the end, never
+// reorders on update), i.e. whichever recording just finished. Distinct from the
+// История rail's per-row ▶ (explicit pick) and "Обработать все" (whole-queue drain);
+// "latest" is defined once here and reused by both the click handler and the
+// button's enable/disable check below.
+function latestPendingRecording() {
+  const list = state.pendingRecordings || [];
+  return list.length ? list[list.length - 1] : null;
+}
+
+// Gated identically to processPendingRecording — can't hijack an active recording or
+// an already-running process — then reuses the exact same runPendingItem() path
+// (no parallel processing flow).
+function processLatestRecording() {
+  if (state.recording || state.processing) return;
+  const item = latestPendingRecording();
+  if (!item || item.status === "running") return;
+  runPendingItem(item);
+}
+
+// True from the moment a recording is stopped until ITS "recorded" (mix landed)
+// or "error" (mix failed) event arrives — the "⏳ Свожу дорожки…" window. Without
+// this, latestPendingRecording() during that window would still return whatever
+// OLDER item was already pending (the new one hasn't landed yet), so the button
+// would enable and target the WRONG recording — exactly the "processed the wrong
+// audio" failure mode this button exists to avoid. Set in toggleRecording's stop
+// branch; cleared in onRecordEvent's "recorded" branch (the fail-safe: also
+// cleared on "error", so a mix that never lands can't wedge the button disabled
+// forever).
+let awaitingRecorded = false;
+
+// Single source of truth for #processLatestBtn's enabled state — mirrors
+// refreshRunBtn() for the import-mode row. Called from refreshRunBtn() (covers
+// state.recording transitions: toggleRecording start+stop, the "recorded"-event
+// error branch, markRunFailed, finishProcessing), from setProcessingUI() (covers
+// BOTH state.processing transitions — start and end), and from renderRail()
+// (covers every state.pendingRecordings transition: a new "recorded" event, a
+// per-row delete, a run finishing/failing, the restart-time initial load) — never
+// toggled ad hoc at an individual call site.
+function refreshProcessLatestBtn() {
+  const item = latestPendingRecording();
+  const canRun = !state.recording && !state.processing && !awaitingRecorded &&
+    !!item && item.status !== "running";
+  $("processLatestBtn").disabled = !canRun;
+}
+$("processLatestBtn").addEventListener("click", processLatestRecording);
+
 // "Удалить" — removes the manifest entry + its on-disk session dir. Never deletes
 // the row that's currently being processed (its outcome must land first).
 function deletePendingRecording(idx) {
@@ -1534,6 +1583,8 @@ async function toggleRecording() {
     $("vuMic").style.width = "0%";
     $("vuSys").style.width = "0%";
     setSysStatus("⏳ Свожу дорожки…", "");
+    awaitingRecorded = true; // block #processLatestBtn until THIS recording's mix lands (see declaration)
+    refreshRunBtn(); // state.recording just flipped false — #processLatestBtn must re-evaluate
     await window.api.stopRecording();
   }
 }
@@ -1598,6 +1649,7 @@ window.api.onRecordEvent((ev) => {
         mixed: ev.file, mic: ev.mic, system: ev.system, tracks: ev.tracks,
         status: "pending",
       });
+      awaitingRecorded = false; // this recording landed — #processLatestBtn may target it now
       renderRail();
     }
     const parts = [];
@@ -1612,6 +1664,11 @@ window.api.onRecordEvent((ev) => {
     $("recBtn").textContent = "● Начать запись";
     $("recBtn").classList.remove("recording");
     $("timer").classList.remove("live");
+    // Fail-safe: this "error" is the mix backend's failure path (main.js's
+    // runBackend error branch on the post-stop mix, never a mid-recording event) —
+    // a mix that never lands as "recorded" must not wedge #processLatestBtn
+    // disabled forever.
+    awaitingRecorded = false;
     refreshRunBtn();
   }
 });
@@ -1630,6 +1687,7 @@ function currentAudio() {
 }
 function refreshRunBtn() {
   $("runBtn").disabled = !currentAudio() || state.recording;
+  refreshProcessLatestBtn();
 }
 
 // ── run processing ───────────────────────────────────────────────────────────
@@ -1729,6 +1787,8 @@ function markRunFailed() {
 // Toggle Run ↔ Stop, and show Retry/Fresh only after a run has happened on this audio.
 function setProcessingUI(running) {
   state.processing = running;
+  refreshProcessLatestBtn(); // reflect state.processing on #processLatestBtn on BOTH transitions —
+  // refreshRunBtn() only re-checks on the end transition (via finishProcessing), never on start.
   document.body.classList.toggle("processing", running); // CSS disables history reprocess
   $("runBtn").style.display = running ? "none" : "";
   $("stopBtn").style.display = running ? "" : "none";
@@ -2108,6 +2168,10 @@ function renderRail() {
   pending.forEach((item, idx) => rail.appendChild(buildPendingRow(item, idx)));
   const hasWork = pending.some((it) => it.status === "pending" || it.status === "failed");
   $("pendingProcessAll").classList.toggle("hidden", !hasWork);
+  // Placed before the notes early-returns below (empty/no-match) so the Запись-tab
+  // button always re-evaluates on every renderRail() call, regardless of История's
+  // current filter/search state.
+  refreshProcessLatestBtn();
   // Backend-merged listHistory rows carry kind:"pending" too (cmd_history --pending-file) —
   // real notes never do. Exclude them here so a restart-era pending row (already covered by
   // state.pendingRecordings above, loaded from the same manifest) isn't rendered a second
