@@ -1,0 +1,19 @@
+# Minimal Python deps for CI (mocked test_backend.py suite only).
+#
+# backend.py imports only stdlib at module level; every heavy dependency
+# (torch, mlx/mlx-whisper, openai-whisper, pyannote-audio, PyAudio, requests)
+# is imported lazily inside functions, and the test suite's autouse fixture
+# monkeypatches network/model calls so those lazy branches are never hit.
+# This file is the empirically-derived subset actually needed to import
+# backend.py and run tests/test_backend.py green under `pytest tests/ -q`
+# (derived by installing pytest alone, reading each ModuleNotFoundError, and
+# adding exactly the missing package — see requirements.txt for full dev set
+# with pinned versions this file mirrors).
+#
+# Drift note: a new test that imports a new package directly (or exercises a
+# backend.py code path that lazily imports one) will fail CI until that
+# package is added here.
+pytest==9.1.1
+numpy==2.4.4
+scipy==1.17.1
+tqdm==4.67.3

@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  js-tests:
+    name: js-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run test:js
+
+  py-tests:
+    name: py-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: requirements-ci.txt
+      - run: pip install -r requirements-ci.txt
+      # ffmpeg is a system binary (not a pip dep): cmd_mix / cmd_preflight
+      # guard on `shutil.which("ffmpeg")`. subprocess.run is mocked in the
+      # tests, so ffmpeg is never executed — it only has to be on PATH, or 7
+      # mix/preflight tests bail early and fail. Present on the dev machine
+      # (system install), absent on a clean ubuntu runner.
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      # Call pytest directly (not `npm run test:py`, which hardcodes
+      # ../venv/bin/python — a local dev-machine venv path that doesn't
+      # exist in CI).
+      - run: python -m pytest tests/ -q
+
+  # Only meaningful on push to main: decides whether package.json's version
+  # is new (no matching GitHub release yet) and therefore whether the
+  # release job below should run.
+  check-version:
+    name: check-version
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    outputs:
+      should_release: ${{ steps.check.outputs.should_release }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read version from package.json
+        id: version
+        run: echo "version=$(jq -r .version package.json)" >> "$GITHUB_OUTPUT"
+      - name: Check whether the release tag already exists
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="v${{ steps.version.outputs.version }}"
+          if gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  # Runs only after js-tests + py-tests + check-version all succeed, on a
+  # push to main, and only when the version was bumped (no existing release
+  # tag) — i.e. merge → tests re-run → release only if green and versioned.
+  release:
+    name: release
+    runs-on: macos-latest
+    needs: [js-tests, py-tests, check-version]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.check-version.outputs.should_release == 'true'
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # --publish never: the gh CLI step below is the sole publisher.
+      # electron-builder 26.x otherwise reads GH_TOKEN and may auto-publish
+      # to a pre-existing draft (default policy onTagOrDraft).
+      - run: npx electron-builder --mac --arm64 --publish never
+      - name: Create GitHub release
+        run: |
+          tag="v${{ needs.check-version.outputs.version }}"
+          gh release create "$tag" dist/*.dmg dist/*.zip --target main --title "$tag" --generate-notes
