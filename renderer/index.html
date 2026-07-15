@@ -129,23 +129,28 @@
           </div>
           <div class="rail-filters">
             <input id="historySearch" type="text" placeholder="🔍 Поиск по теме" />
-            <select id="historyLang">
-              <option value="">Все языки</option>
-              <option value="ru">ru</option>
-              <option value="en">en</option>
-              <option value="auto">auto</option>
-            </select>
-            <select id="historyTemplate"><option value="">Все шаблоны</option></select>
-            <div class="rail-dates">
-              <input id="historyFrom" type="date" title="С даты" />
-              <input id="historyTo" type="date" title="По дату" />
+            <button type="button" id="historyFiltersToggle" class="rail-filters-toggle">
+              <span id="historyFiltersCaret">▸</span> Фильтры<span id="historyFiltersBadge" class="filters-badge hidden"></span>
+            </button>
+            <div id="historyFiltersBody" class="rail-filters-body hidden">
+              <select id="historyLang">
+                <option value="">Все языки</option>
+                <option value="ru">ru</option>
+                <option value="en">en</option>
+                <option value="auto">auto</option>
+              </select>
+              <select id="historyTemplate"><option value="">Все шаблоны</option></select>
+              <div class="rail-dates">
+                <input id="historyFrom" type="date" title="С даты" />
+                <input id="historyTo" type="date" title="По дату" />
+              </div>
             </div>
           </div>
           <button id="pendingProcessAll" class="btn small hidden">▶ Обработать все</button>
           <div id="historyList"></div>
         </aside>
         <section class="note-view" id="noteView">
-          <p class="hint">Выбери заметку слева.</p>
+          <p class="hint history-placeholder">Выбери заметку слева.</p>
         </section>
       </div>
     </div>

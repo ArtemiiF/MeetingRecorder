@@ -67,9 +67,29 @@ main:has(> #view-prompts:not(.hidden)) { max-width: 1200px; }
   overflow: hidden; text-overflow: ellipsis; }
 .rail-filters { display: flex; flex-direction: column; gap: 6px; padding: 0 6px 8px; }
 .rail-filters input, .rail-filters select { font-size: 12px; padding: 6px 8px; }
+.rail-filters-toggle {
+  display: flex; align-items: center; gap: 6px; width: 100%; text-align: left;
+  background: transparent; border: none; color: var(--muted); font-size: 12px;
+  font-family: inherit; cursor: pointer; padding: 4px 6px; border-radius: 6px;
+}
+.rail-filters-toggle:hover { background: var(--card2); color: var(--fg); }
+.rail-filters-body { display: flex; flex-direction: column; gap: 6px; }
+.filters-badge {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 16px; height: 16px; padding: 0 4px; border-radius: 999px;
+  background: var(--accent-fill); color: #fff; font-size: 10px; font-weight: 600;
+}
 .rail-dates { display: flex; gap: 6px; }
 .rail-dates input { flex: 1; min-width: 0; }
 .note-title { font-size: 20px; margin-bottom: 12px; }
+/* История empty states: nothing recorded yet (centered, mirrors the record-view CTA), or
+   auto-opened most-recent note replacing the old static "Выбери заметку слева" hint. */
+.note-view-empty {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  text-align: center; gap: 8px; min-height: 260px; padding: 40px 20px;
+}
+.note-view-empty-icon { font-size: 40px; }
+.note-view-empty-title { font-size: 16px; font-weight: 600; color: var(--fg); }
 .para-layout { display: flex; gap: 16px; align-items: flex-start; }
 .para-subnav { flex: 0 0 160px; display: flex; flex-direction: column; gap: 4px;
   position: sticky; top: 110px; }
