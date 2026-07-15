@@ -2289,7 +2289,7 @@ async function openHistoryNote(item) {
   }
 }
 
-// Small inline panel appended to #noteView (not a full modal) letting the user pick
+// Small inline panel inserted above the transcript in #noteView (not a full modal) letting the user pick
 // which template to reprocess with, instead of silently reusing whatever the record
 // card last held. Built entirely via createElement/textContent/property assignment —
 // no innerHTML of user strings — so a template name can never break out as markup or
@@ -2349,16 +2349,28 @@ function openReprocessPicker(item, audioPath) {
   panel.className = "reprocess-picker";
   panel.appendChild(label);
   panel.appendChild(row);
-  $("noteView").appendChild(panel);
+  insertAboveNoteBody(panel);
 }
 function closeReprocessPicker() {
   const el = $("reprocessPicker");
   if (el) el.remove();
 }
 
+// Insert a panel at the TOP of the note view — right above the transcript body —
+// instead of appended after it. The reprocess trigger (#nvReprocess) lives in the
+// note header, so its picker and the progress panel must surface next to the button,
+// not a full transcript-length scroll below it. Falls back to append if the body node
+// isn't present (defensive — openHistoryNote always renders .note-body).
+function insertAboveNoteBody(panel) {
+  const view = $("noteView");
+  const body = view.querySelector(".note-body");
+  if (body) view.insertBefore(panel, body);
+  else view.appendChild(panel);
+}
+
 // In-place progress/logs panel for a История-initiated reprocess (owner decision: no
 // more yanking the user into the Запись tab mid-История-session — see reprocessHistory
-// below). Mirrors openReprocessPicker's append-to-#noteView pattern; buildStages/
+// below). Mirrors openReprocessPicker's insert-above-.note-body placement; buildStages/
 // pushLog/showStageLogs/setStageClass (see progressTargetIds) populate #histStages/
 // #histLogs instead of the record view's #stages/#logs while reprocessTargetsHistory
 // is set. Left in place after the run finishes (same "leave the final state visible"
@@ -2374,7 +2386,7 @@ function buildHistoryProgressPanel() {
      <div class="stages" id="histStages"></div>
      <p class="hint">Кликни по этапу — увидишь его логи. 🟢 ок · 🔴 ошибка · ⚪ пропущен</p>
      <pre id="histLogs"></pre>`;
-  $("noteView").appendChild(panel);
+  insertAboveNoteBody(panel);
 }
 function removeHistoryProgressPanel() {
   const el = $("histProgressPanel");
