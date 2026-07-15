@@ -872,6 +872,75 @@ test("PARA: classify fills rows, manual file marks row filed (grey, disabled, no
   assert.equal(rows[0].querySelector(".para-file-btn").textContent, "✓ Разложена");
 });
 
+test("PARA: fileParaRow with empty category auto-classifies via LLM, then files", async () => {
+  let classifyArg = null;
+  const { window, $ } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru",
+      para: { root: "/v", folders: { projects: "Projects", areas: "Areas", resources: "Resources", archives: "Archives" } },
+    }),
+    listHistory: async () => [{ name: "2026-01-01", title: "T", note: "/n.md", audio: null }],
+    paraClassify: async (arg) => { classifyArg = arg; return { category: "projects", project: "Лендинг" }; },
+    paraFile: async () => ({ ok: true }),
+  });
+  window.document.querySelector('.topbtn[data-view="para"]').click();
+  await tick(window);
+  const rows = $("paraInbox").querySelectorAll(".para-row");
+  assert.equal(rows[0].querySelector(".para-cat").value, "", "no category picked yet");
+  rows[0].querySelector(".para-file-btn").click();
+  await tick(window); await tick(window); await tick(window);
+  assert.ok(classifyArg, "paraClassify was not called");
+  assert.equal(classifyArg.note, "/n.md");
+  assert.equal(rows[0].querySelector(".para-cat").value, "projects");
+  assert.equal(rows[0].querySelector(".para-proj").value, "Лендинг");
+  assert.ok(rows[0].classList.contains("filed"));
+});
+
+test("PARA: fileParaRow with a manually-picked category skips classify, files directly", async () => {
+  let classifyCalled = false;
+  const { window, $ } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru",
+      para: { root: "/v", folders: { projects: "Projects", areas: "Areas", resources: "Resources", archives: "Archives" } },
+    }),
+    listHistory: async () => [{ name: "2026-01-01", title: "T", note: "/n.md", audio: null }],
+    paraClassify: async () => { classifyCalled = true; return { category: "projects", project: "P" }; },
+    paraFile: async () => ({ ok: true }),
+  });
+  window.document.querySelector('.topbtn[data-view="para"]').click();
+  await tick(window);
+  const rows = $("paraInbox").querySelectorAll(".para-row");
+  rows[0].querySelector(".para-cat").value = "areas";
+  rows[0].querySelector(".para-file-btn").click();
+  await tick(window); await tick(window);
+  assert.equal(classifyCalled, false, "paraClassify must not be called when a category was already picked");
+  assert.ok(rows[0].classList.contains("filed"));
+});
+
+test("PARA: fileParaRow auto-classify failure alerts and leaves the row unfiled", async () => {
+  const { window, $ } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru",
+      para: { root: "/v", folders: { projects: "Projects", areas: "Areas", resources: "Resources", archives: "Archives" } },
+    }),
+    listHistory: async () => [{ name: "2026-01-01", title: "T", note: "/n.md", audio: null }],
+    paraClassify: async () => ({ error: "модель недоступна" }),
+  });
+  let alerted = null;
+  window.alert = (msg) => { alerted = msg; };
+  window.document.querySelector('.topbtn[data-view="para"]').click();
+  await tick(window);
+  const rows = $("paraInbox").querySelectorAll(".para-row");
+  const btn = rows[0].querySelector(".para-file-btn");
+  const prevLabel = btn.textContent;
+  btn.click();
+  await tick(window); await tick(window);
+  assert.ok(alerted && alerted.includes("модель недоступна"), `expected alert mentioning the error, got: ${alerted}`);
+  assert.equal(rows[0].classList.contains("filed"), false);
+  assert.equal(btn.disabled, false);
+  assert.equal(btn.textContent, prevLabel);
+});
+
 test("PARA sub-tabs: switch to Хранилище renders the vault tree, collapsed by default", async () => {
   const { window, $ } = await boot({
     getPresets: async () => ({
@@ -2550,6 +2619,35 @@ test("'это я' button fills speaker row input with authorName; Apply sends it
   $("applySpeakers").click(); await tick(window);
   assert.ok(renamed, "renameSpeakers was not called");
   assert.equal(renamed.map["Спикер 1"], "Алёна");
+});
+
+test("История note view exposes a speaker editor; apply calls renameSpeakers and refreshes the note", async () => {
+  let readCount = 0;
+  let renamedArg = null;
+  const { window, $ } = await boot({
+    listHistory: async () => [{ name: "2026-01-01", title: "Синк", note: "/o/meeting-x.md", audio: "/o/meeting-x.wav" }],
+    readNote: async () => {
+      readCount++;
+      return readCount === 1
+        ? '---\ntitle: "T"\n---\n\n**[Спикер 1]**: привет\n\n**[Спикер 2]**: пока'
+        : '---\ntitle: "T"\n---\n\n**[Алёна]**: привет\n\n**[Спикер 2]**: пока';
+    },
+    renameSpeakers: async (notePath, map) => { renamedArg = { notePath, map }; return { ok: true }; },
+  });
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  $("historyList").querySelector(".rail-item").click(); await tick(window);
+  assert.notEqual($("nvSpeakerMap").style.display, "none");
+  const box = $("nvSpeakerInputs");
+  const inputs = box.querySelectorAll("input");
+  assert.equal(inputs.length, 2, "expected one input per detected speaker label");
+  inputs[0].value = "Алёна";
+  $("nvApplySpeakers").click();
+  await tick(window); await tick(window);
+  assert.ok(renamedArg, "renameSpeakers was not called");
+  assert.equal(renamedArg.notePath, "/o/meeting-x.md");
+  assert.equal(renamedArg.map["Спикер 1"], "Алёна");
+  assert.equal(readCount, 2, "note must be re-read after rename to refresh the view");
+  assert.ok($("noteView").textContent.includes("Алёна"), "refreshed note view should show the new label");
 });
 
 // ── PARA auto-index log buffer ──────────────────────────────────────────────

@@ -2270,6 +2270,11 @@ async function openHistoryNote(item) {
        <button class="btn small ghost" id="nvReprocess">↻ Переобработать</button>
      </div>
      ${meta ? `<div class="note-meta">${escapeHtml(meta)}</div>` : ""}
+     <div id="nvSpeakerMap" class="speaker-map" style="display:none">
+       <div class="speaker-title">Переименовать спикеров</div>
+       <div id="nvSpeakerInputs"></div>
+       <button id="nvApplySpeakers" class="btn small">Применить</button>
+     </div>
      <div class="note-body">${renderMarkdown(md)}</div>`;
   $("nvOpen").onclick = () => window.api.reveal(item.note);
   $("nvGoRecord").onclick = () => switchView("record");
@@ -2286,6 +2291,28 @@ async function openHistoryNote(item) {
     reprocessBtn.disabled = true;
     reprocessBtn.title = "Аудио не найдено — переобработка недоступна";
     reprocessBtn.onclick = null;
+  }
+  // Speaker reassignment for an already-saved История note — same rename-speakers IPC
+  // the record card's #applySpeakers uses (rewriteNoteSpeakers works on any saved note,
+  // no backend change needed), just targeting this note's own labels/container instead
+  // of the record card's fixed #speakerMap + module-global currentNote.
+  const labels = detectSpeakers(md);
+  if (labels.length) {
+    $("nvSpeakerMap").style.display = "";
+    renderSpeakerRows($("nvSpeakerInputs"), labels);
+    $("nvApplySpeakers").onclick = async () => {
+      const map = readSpeakerMap($("nvSpeakerInputs"));
+      if (!Object.keys(map).length) return;
+      const btn = $("nvApplySpeakers");
+      btn.disabled = true;
+      const res = await window.api.renameSpeakers(item.note, map);
+      if (res && res.ok === false) {
+        alert("Не удалось переименовать: " + res.error);
+        btn.disabled = false;
+        return;
+      }
+      await openHistoryNote(item); // re-read + re-render so the new labels show
+    };
   }
 }
 
@@ -2453,12 +2480,14 @@ function detectSpeakers(t) {
   while ((m = re.exec(t || ""))) set.add(m[1]);
   return [...set];
 }
-function buildSpeakerMap(transcript, prefill = {}) {
-  const labels = detectSpeakers(transcript);
-  const box = $("speakerInputs");
-  box.innerHTML = "";
-  if (!labels.length) { $("speakerMap").style.display = "none"; return; }
-  $("speakerMap").style.display = "";
+// Renders one "oldLabel → [input] [это я]" row per label into `container`, built
+// entirely via createElement/textContent (no innerHTML of a speaker name — a name
+// must never be able to break out as markup, same discipline as the chip/rail
+// renderers). Shared between the record card's #speakerInputs and the История
+// note-view's own speaker editor (see openHistoryNote) — the only difference
+// between call sites is which container + prefill values they pass in.
+function renderSpeakerRows(container, labels, prefill = {}) {
+  container.innerHTML = "";
   labels.forEach((l) => {
     const row = document.createElement("div");
     row.className = "speaker-row";
@@ -2479,16 +2508,29 @@ function buildSpeakerMap(transcript, prefill = {}) {
     row.appendChild(old);
     row.appendChild(inp);
     row.appendChild(meBtn);
-    box.appendChild(row);
+    container.appendChild(row);
   });
 }
-$("applySpeakers").addEventListener("click", async () => {
-  if (!currentNote) return;
+// Reads back the {oldLabel: newName} map from a container built by renderSpeakerRows,
+// skipping rows the user left blank — same contract renameSpeakers expects.
+function readSpeakerMap(container) {
   const map = {};
-  $("speakerInputs").querySelectorAll("input").forEach((i) => {
+  container.querySelectorAll("input").forEach((i) => {
     const v = i.value.trim();
     if (v) map[i.dataset.old] = v;
   });
+  return map;
+}
+function buildSpeakerMap(transcript, prefill = {}) {
+  const labels = detectSpeakers(transcript);
+  const box = $("speakerInputs");
+  if (!labels.length) { box.innerHTML = ""; $("speakerMap").style.display = "none"; return; }
+  $("speakerMap").style.display = "";
+  renderSpeakerRows(box, labels, prefill);
+}
+$("applySpeakers").addEventListener("click", async () => {
+  if (!currentNote) return;
+  const map = readSpeakerMap($("speakerInputs"));
   if (!Object.keys(map).length) return;
   const res = await window.api.renameSpeakers(currentNote, map);
   if (res && res.ok === false) { alert("Не удалось переименовать: " + res.error); return; }
@@ -2936,12 +2978,28 @@ function markRowFiled(row) {
 
 async function fileParaRow(idx, row) {
   const it = paraInboxItems[idx];
-  const category = row.querySelector(".para-cat").value;
-  const project = row.querySelector(".para-proj").value.trim();
-  if (!category) { alert("Выбери категорию"); return; }
+  let category = row.querySelector(".para-cat").value;
+  let project = row.querySelector(".para-proj").value.trim();
   const btn = row.querySelector(".para-file-btn");
   const prev = btn.textContent;
   btn.disabled = true;
+  if (!category) {
+    // No category picked — auto-classify via the same LLM path paraClassifyAll uses
+    // (the paraClassify call inside paraClassifyAll above) instead of blocking with an alert.
+    btn.textContent = "Категоризирую…";
+    const cl = await window.api.paraClassify({ note: it.note, root: state.para.root, folders: state.para.folders, mainModel: state.mainModel });
+    if (!cl || cl.error || !cl.category) {
+      alert("Не удалось определить категорию автоматически — выбери вручную: " + ((cl && cl.error) || "категория не определена"));
+      btn.disabled = false; btn.textContent = prev; return;
+    }
+    category = cl.category;
+    row.querySelector(".para-cat").value = category;
+    // Keep a user-entered project as-is; only fill from classify if the field was empty.
+    if (!project && cl.project) {
+      project = cl.project;
+      row.querySelector(".para-proj").value = project;
+    }
+  }
   btn.textContent = "Извлекаю…";
   const ex = await window.api.paraExtract(it.note);
   if (!ex || ex.error || !ex.content) {
