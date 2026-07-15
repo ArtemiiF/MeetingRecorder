@@ -1911,7 +1911,15 @@ def _read_mono_decimated(path, max_seconds, target_rate):
 # mic_share sidesteps that: it never looks at the system track, only asks "of all the
 # energy that hit THIS mic, how much happened during this label's segments" — the
 # author alone on mic approaches 1.0, everyone else ~0 (7ic8 observation, see report).
-_AUTHOR_MIN_MIC_SHARE = 0.5   # top label's share of total mic energy (multi-speaker path)
+#
+# _AUTHOR_MIN_MIC_SHARE / _AUTHOR_MIN_MARGIN set from the actual 7ic8 run (6 diarized
+# labels, real mic/system WAVs): author SPEAKER_04 mic_share=0.53, runner-up
+# SPEAKER_00 mic_share=0.34 (margin 0.19), everyone else 0.01-0.06. 0.5 left only a
+# 0.03 clearance over the observed author value — brittle, a slightly quieter mic
+# take would miss it. 0.40 gives 0.13 clearance instead, while _AUTHOR_MIN_MARGIN
+# (0.15, just under the observed 0.19 margin) still rejects ambiguous cases — a
+# runner-up would have to close to within 0.15 of the top share to block a decision.
+_AUTHOR_MIN_MIC_SHARE = 0.40  # top label's share of total mic energy (multi-speaker path)
 _AUTHOR_MIN_MARGIN = 0.15     # top vs runner-up margin, now measured on mic_share
 _AUTHOR_MIN_DURATION_S = 3.0  # top label must have at least this much speech
 _AUTHOR_MIN_MIC_RMS = 50.0    # single-speaker path: absolute mic-activity floor, in the
@@ -1921,6 +1929,15 @@ _AUTHOR_MIN_MIC_RMS = 50.0    # single-speaker path: absolute mic-activity floor
                               # (e.g. user only watched something on the system track)
                               # from being labeled author just because a lone label
                               # trivially "shares" 100% of ~zero mic energy.
+                              # UNCALIBRATED against any real silent-mic/ambient-mic
+                              # recording (no such sample available yet) — 50.0 is a
+                              # guess, not measured. Known deferred risk: real room
+                              # ambient noise picked up by an idle mic could plausibly
+                              # clear this floor and falsely label a solo "just
+                              # watching, not speaking" recording as authored. Left as
+                              # a HYPO floor (not raised) rather than tuned blind —
+                              # raising it without a real ambient sample risks instead
+                              # rejecting a genuine soft-spoken solo author.
 
 
 def _shift_chunks(chunks, delay_ms, rate, max_len):

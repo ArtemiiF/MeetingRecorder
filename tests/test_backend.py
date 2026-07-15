@@ -1793,20 +1793,24 @@ def test_pick_author_label_clear_winner():
     assert backend.pick_author_label(scores) == "SPEAKER_00"
 
 
-def test_pick_author_label_six_speaker_one_dominant_matches_7ic8_shape():
-    """Regression for the real 7ic8 recording shape (background, HANDOFF): one label
-    (the author, wearing the mic) claims nearly all the mic energy; five others sit at
-    ~0.01-0.05 each (silent on mic — they're not wearing it). mic_share picks the
-    dominant label even though the old mic/system ratio would have rejected it (author
-    ratio observed ~0.46 there, below the old 0.65 gate, because the system track also
-    carried the author's own voice)."""
+def test_pick_author_label_six_speaker_matches_real_7ic8_observed_values():
+    """Regression pinned to the ACTUAL numbers logged from a real end-to-end run on the
+    7ic8 recording (backend.py process, real mic.wav/system.wav, real pyannote
+    diarization — see developer report), not a rounder/more-forgiving stand-in: author
+    SPEAKER_04 mic_share=0.53, runner-up SPEAKER_00 mic_share=0.34 (margin only 0.19),
+    everyone else 0.01-0.06. An earlier version of this test used mic_share=0.87 for
+    the author — far more forgiving than reality (margin 0.82) — which would not have
+    caught a regression that pushed the real thresholds/margin back toward failure.
+    mic_share still resolves the author here even though the old mic/system ratio
+    observed for this same speaker was only ~0.46 (below the old 0.65 gate, because the
+    system track also carried the author's own voice)."""
     scores = {
-        "SPEAKER_00": {"mic_share": 0.02, "mic_level": 20.0, "duration_s": 15.0},
-        "SPEAKER_01": {"mic_share": 0.03, "mic_level": 25.0, "duration_s": 12.0},
-        "SPEAKER_02": {"mic_share": 0.01, "mic_level": 15.0, "duration_s": 8.0},
-        "SPEAKER_03": {"mic_share": 0.02, "mic_level": 18.0, "duration_s": 10.0},
-        "SPEAKER_04": {"mic_share": 0.87, "mic_level": 900.0, "duration_s": 120.0},  # the author
-        "SPEAKER_05": {"mic_share": 0.05, "mic_level": 30.0, "duration_s": 20.0},
+        "SPEAKER_03": {"mic_share": 0.06, "mic_level": 18.8, "duration_s": 108.6},
+        "SPEAKER_05": {"mic_share": 0.04, "mic_level": 17.4, "duration_s": 78.4},
+        "SPEAKER_00": {"mic_share": 0.34, "mic_level": 86.7, "duration_s": 129.3},  # runner-up
+        "SPEAKER_04": {"mic_share": 0.53, "mic_level": 268.6, "duration_s": 65.5},  # the author
+        "SPEAKER_02": {"mic_share": 0.02, "mic_level": 20.4, "duration_s": 40.6},
+        "SPEAKER_01": {"mic_share": 0.01, "mic_level": 20.4, "duration_s": 20.6},
     }
     assert backend.pick_author_label(scores) == "SPEAKER_04"
 
@@ -1820,7 +1824,7 @@ def test_pick_author_label_two_labels_share_mic_within_margin_returns_none():
 
 
 def test_pick_author_label_below_min_mic_share_returns_none():
-    scores = {"SPEAKER_00": {"mic_share": 0.4, "mic_level": 300.0, "duration_s": 10.0},   # below default 0.5
+    scores = {"SPEAKER_00": {"mic_share": 0.35, "mic_level": 300.0, "duration_s": 10.0},  # below default 0.40
               "SPEAKER_01": {"mic_share": 0.1, "mic_level": 50.0, "duration_s": 10.0}}
     assert backend.pick_author_label(scores) is None
 
@@ -1843,11 +1847,31 @@ def test_pick_author_label_single_speaker_active_mic_returns_author():
 
 
 def test_pick_author_label_single_speaker_silent_mic_returns_none():
-    """Single diarized label but the mic never picked up real activity (e.g. all sound
-    came from the system track only, user just watched something) -> not the author,
-    below the mic_level floor."""
+    """Single diarized label but the mic never picked up ANY activity at all (hard
+    zero — e.g. all sound came from the system track only, user just watched
+    something) -> not the author, below the mic_level floor. See the two tests below
+    for the more realistic near-floor/ambient-noise boundary, not just hard zero."""
     scores = {"SPEAKER_00": {"mic_share": 1.0, "mic_level": 0.0, "duration_s": 10.0}}
     assert backend.pick_author_label(scores) is None
+
+
+def test_pick_author_label_single_speaker_ambient_mic_just_below_floor_returns_none():
+    """Low-level ambient mic noise (e.g. room hum picked up by an idle mic, not real
+    speech) just UNDER _AUTHOR_MIN_MIC_RMS=50.0 -> still not authored. _AUTHOR_MIN_MIC_RMS
+    is an uncalibrated HYPO floor (no real silent/ambient sample exists yet — see its
+    definition) — this pins current boundary behavior, not a verified real-world
+    guarantee that 49 RMS is always "just ambient"."""
+    scores = {"SPEAKER_00": {"mic_share": 1.0, "mic_level": 49.0, "duration_s": 10.0}}
+    assert backend.pick_author_label(scores) is None
+
+
+def test_pick_author_label_single_speaker_ambient_mic_just_above_floor_returns_author():
+    """Mic level just OVER the floor -> author. Documents the known, deferred
+    false-positive risk head-on: real ambient noise that happens to clear this HYPO
+    floor would be accepted exactly the same way a real solo author would be — see the
+    _AUTHOR_MIN_MIC_RMS comment (uncalibrated, risk not yet resolved)."""
+    scores = {"SPEAKER_00": {"mic_share": 1.0, "mic_level": 51.0, "duration_s": 10.0}}
+    assert backend.pick_author_label(scores) == "SPEAKER_00"
 
 
 def test_pick_author_label_single_speaker_too_short_returns_none():
@@ -1873,13 +1897,53 @@ def test_detect_author_speaker_missing_system_file_returns_none(tmp_path, pipe):
 def test_detect_author_speaker_single_speaker_silent_mic_returns_none(tmp_path, pipe):
     """Single diarized label used to be skipped outright by a hard `< 2 labels` gate;
     that gate is gone, so this now flows into the real single-speaker path — and is
-    still rejected, but because the mic is silent (below _AUTHOR_MIN_MIC_RMS), not
-    because there was only one label."""
+    still rejected, but because the mic is HARD-ZERO silent (below _AUTHOR_MIN_MIC_RMS),
+    not because there was only one label. See the two tests below for the more
+    realistic near-floor ambient-noise boundary through the real RMS/resample pipeline,
+    not just a hard-zero WAV."""
     mic, sysf = tmp_path / "mic.wav", tmp_path / "system.wav"
     make_wav(mic, seconds=2.0)   # all-zero samples -> mic never picked up anything
     make_wav(sysf, seconds=2.0)
     timeline = [(0.0, 2.0, "SPEAKER_00")]
     assert pipe.detect_author_speaker(str(mic), str(sysf), None, timeline, {}) is None
+
+
+def test_detect_author_speaker_single_speaker_ambient_mic_below_floor_returns_none(monkeypatch, tmp_path, pipe):
+    """Low-level ambient mic noise (constant-amplitude signal, RMS=40 in the raw int16
+    scale _track_rms operates in) just under _AUTHOR_MIN_MIC_RMS=50.0 -> not authored.
+    Exercises the real WAV-read/RMS path (not a hand-set mic_level like the
+    pick_author_label-level tests), at a native 16000 rate so no resampling drift
+    changes the RMS. _AUTHOR_MIN_MIC_RMS is an uncalibrated HYPO floor (see its
+    definition) — this pins current behavior at the boundary, not a verified
+    real-world guarantee."""
+    monkeypatch.setattr(backend, "estimate_start_offset_ms", lambda m, s: (0, 0, 1.0))
+    import numpy as np
+    rate = 16000
+    ambient = (np.ones(4 * rate) * 40).astype("<i2")  # constant amplitude -> RMS == 40.0
+    mic_path, sys_path = tmp_path / "mic.wav", tmp_path / "system.wav"
+    make_wav_from_samples(mic_path, ambient, rate, 1)
+    make_wav_from_samples(sys_path, ambient, rate, 1)
+    timeline = [(0.0, 4.0, "SPEAKER_00")]
+    assert pipe.detect_author_speaker(str(mic_path), str(sys_path), None, timeline, {}) is None
+
+
+def test_detect_author_speaker_single_speaker_ambient_mic_above_floor_returns_author(monkeypatch, tmp_path, pipe):
+    """Same near-floor ambient shape as above but just OVER _AUTHOR_MIN_MIC_RMS=50.0 ->
+    author. Makes the known, deferred false-positive risk concrete end-to-end: this is
+    indistinguishable, at the metric level, from real ambient room noise picked up by
+    an idle mic on a solo "just watching" recording — see _AUTHOR_MIN_MIC_RMS comment
+    (uncalibrated, no real silent/ambient sample to tune against yet)."""
+    monkeypatch.setattr(backend, "estimate_start_offset_ms", lambda m, s: (0, 0, 1.0))
+    import numpy as np
+    rate = 16000
+    ambient = (np.ones(4 * rate) * 60).astype("<i2")  # constant amplitude -> RMS == 60.0
+    mic_path, sys_path = tmp_path / "mic.wav", tmp_path / "system.wav"
+    make_wav_from_samples(mic_path, ambient, rate, 1)
+    make_wav_from_samples(sys_path, ambient, rate, 1)
+    timeline = [(0.0, 4.0, "SPEAKER_00")]
+    label_map = {"SPEAKER_00": "Спикер 1"}
+    winner = pipe.detect_author_speaker(str(mic_path), str(sys_path), None, timeline, label_map)
+    assert winner == "Спикер 1"
 
 
 def test_detect_author_speaker_single_speaker_active_mic_returns_author(monkeypatch, tmp_path, pipe):
