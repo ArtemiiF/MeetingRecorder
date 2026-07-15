@@ -2854,17 +2854,21 @@ async function refreshParaInbox() {
     row.className = "para-row";
     row.dataset.idx = idx;
     row.innerHTML =
-      `<span class="para-row-spinner spinner hidden"></span>
-       <div class="para-note">${escapeHtml(it.title || it.name)}</div>
-       <select class="para-cat">
-         <option value="">— категория —</option>
-         <option value="projects">Projects</option>
-         <option value="areas">Areas</option>
-         <option value="resources">Resources</option>
-         <option value="archives">Archives</option>
-       </select>
-       <input class="para-proj" placeholder="проект / область" />
-       <button class="btn small para-file-btn">Разложить</button>`;
+      `<div class="para-row-top">
+         <span class="para-row-spinner spinner hidden"></span>
+         <div class="para-note">${escapeHtml(it.title || it.name)}</div>
+       </div>
+       <div class="para-row-controls">
+         <select class="para-cat">
+           <option value="">— категория —</option>
+           <option value="projects">Projects</option>
+           <option value="areas">Areas</option>
+           <option value="resources">Resources</option>
+           <option value="archives">Archives</option>
+         </select>
+         <input class="para-proj" placeholder="проект / область" />
+         <button class="btn small para-file-btn">Разложить</button>
+       </div>`;
     row.querySelector(".para-file-btn").addEventListener("click", () => fileParaRow(idx, row));
     box.appendChild(row);
   });

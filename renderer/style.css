@@ -100,13 +100,16 @@ main:has(> #view-prompts:not(.hidden)) { max-width: 1200px; }
 .para-names label { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
 .para-names input { flex: 1; }
 .para-inbox { display: flex; flex-direction: column; gap: 8px; }
-.para-row { display: flex; align-items: center; gap: 8px; padding: 8px; background: var(--card2);
+.para-row { display: flex; flex-direction: column; gap: 8px; padding: 8px; background: var(--card2);
   border: 1px solid var(--line); border-radius: 8px; }
 .para-row.filed { opacity: .55; border-color: var(--accent); }
 .para-row.filed .para-note { text-decoration: line-through; }
+/* top tier: full-width note name; bottom tier: category/project/action controls */
+.para-row-top { display: flex; align-items: center; gap: 8px; }
+.para-row-controls { display: flex; align-items: center; gap: 8px; }
 .para-note { flex: 1; min-width: 0; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.para-cat { flex: 0 0 130px; }
-.para-proj { flex: 0 0 180px; }
+.para-cat { flex: 0 0 160px; }
+.para-proj { flex: 0 0 220px; }
 .rail-date { font-size: 11px; color: var(--muted); }
 .rail-item.active .rail-date { color: #cdd9ee; }
 .rail-badge { font-size: 11px; }
