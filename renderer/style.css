@@ -22,6 +22,13 @@ header {
 header h1 { font-size: 18px; font-weight: 600; }
 .tag { color: var(--muted); font-size: 12px; }
 main { max-width: 860px; margin: 0 auto; padding: 20px 24px 60px; }
+/* wide two-panel views (rail + content, or subnav + content) get more breathing
+   room than the single-column Запись/Словарь views; Electron 33 bundles Chromium
+   130 (confirmed via `ELECTRON_RUN_AS_NODE=1 electron -e process.versions.chrome`),
+   well past :has() support (Chromium 105+), so this is plain CSS, no JS toggle. */
+main:has(> #view-history:not(.hidden)),
+main:has(> #view-para:not(.hidden)),
+main:has(> #view-prompts:not(.hidden)) { max-width: 1200px; }
 .hidden { display: none !important; }
 
 .topnav {
@@ -41,7 +48,7 @@ main { max-width: 860px; margin: 0 auto; padding: 20px 24px 60px; }
 /* history view: left rail + right note */
 .history-layout { display: flex; gap: 16px; align-items: flex-start; }
 .history-rail {
-  flex: 0 0 240px; max-height: calc(100vh - 160px); overflow-y: auto;
+  flex: 0 0 280px; max-height: calc(100vh - 160px); overflow-y: auto;
   background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 8px;
   position: sticky; top: 110px;
 }
