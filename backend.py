@@ -1129,20 +1129,20 @@ class Pipeline:
 
     # ── auto-«Я»: detect which diarized speaker is the recording author ────────
     def detect_author_speaker(self, mic_file, system_file, vad_chunks, timeline, label_map):
-        """Guess which diarization label is the author, from mic-vs-system RMS
-        dominance (the author's voice bleeds into mic but not into system audio).
-        Orchestration only (I/O + logging) — all decisions are delegated to the pure
-        helpers above. Returns a FRIENDLY label (via label_map) or None; never
-        mutates `speakers` itself — that merge happens in process()."""
+        """Guess which diarization label is the author, from the mic track's OWN
+        activity: whichever label claims most of the mic track's total energy is
+        the one wearing this mic (see compute_speaker_dominance's mic_share). Does
+        NOT compare against the system track — the system track can also carry the
+        author's voice (call echo/mix), which is why a mic-vs-system ratio fails on
+        real conferencing audio. Orchestration only (I/O + logging) — all decisions
+        are delegated to the pure helpers above. Returns a FRIENDLY label (via
+        label_map) or None; never mutates `speakers` itself — that merge happens in
+        process()."""
         def nonempty(p):
             return bool(p) and Path(p).exists() and Path(p).stat().st_size > 44  # WAV header alone is 44 bytes
 
         if not nonempty(mic_file) or not nonempty(system_file):
             log("Авто-«Я»: mic/system дорожка недоступна — пропуск")
-            return None
-        raw_labels = {spk for _, _, spk in timeline}
-        if len(raw_labels) < 2:
-            log("Авто-«Я»: меньше 2 спикеров в диаризации — пропуск")
             return None
 
         # Same call cmd_mix made at mix-time (mic_delay=sys_delay=0 defaults) —
@@ -1181,13 +1181,14 @@ class Pipeline:
 
         scores = compute_speaker_dominance(timeline, mic_collapsed, sys_collapsed, rate=16000)
         for label, s in scores.items():
-            log(f"Авто-«Я»: {label} mic_ratio={s['mic_ratio']:.2f} длительность={s['duration_s']:.1f}с")
+            log(f"Авто-«Я»: {label} mic_share={s['mic_share']:.2f} mic_level={s['mic_level']:.1f} "
+                f"mic_ratio={s['mic_ratio']:.2f} длительность={s['duration_s']:.1f}с")
         winner = pick_author_label(scores)
         if not winner:
             log("Авто-«Я»: неоднозначно/нет уверенного лидера — метка не проставлена")
             return None
         friendly = label_map.get(winner, winner)
-        log(f"Авто-«Я»: спикер «{friendly}» определён как автор (доминирование в mic)")
+        log(f"Авто-«Я»: спикер «{friendly}» определён как автор (доминирование по mic_share)")
         return friendly
 
     def add_timestamps(self, segments):
@@ -1898,10 +1899,28 @@ def _read_mono_decimated(path, max_seconds, target_rate):
 # Thresholds for auto-«Я» author-speaker detection below (§ pick_author_label).
 # HYPO defaults, not calibrated against real recordings — same documented status as
 # _XCORR_MIN_CONFIDENCE above. Every run (including no-ops) logs the computed
-# ratio/margin so real data exists to tune these later (see detect_author_speaker).
-_AUTHOR_MIN_RATIO = 0.65
-_AUTHOR_MIN_MARGIN = 0.15
-_AUTHOR_MIN_DURATION_S = 3.0
+# mic_share/mic_level/mic_ratio so real data exists to tune these later (see
+# detect_author_speaker).
+#
+# Scored by mic_share (this label's fraction of TOTAL mic-track energy), NOT the old
+# mic/system ratio: on real conferencing audio the system track ALSO carries the
+# author's own voice (call echo/mix), so the author's mic/system ratio caps out well
+# below any sane "dominant" cutoff — observed ~0.46 on a real 2-track recording
+# (headphones, recording 7ic8) — even though the author is the ONLY one present on
+# the mic track at all (everyone else's mic_rms ~0, they're not wearing this mic).
+# mic_share sidesteps that: it never looks at the system track, only asks "of all the
+# energy that hit THIS mic, how much happened during this label's segments" — the
+# author alone on mic approaches 1.0, everyone else ~0 (7ic8 observation, see report).
+_AUTHOR_MIN_MIC_SHARE = 0.5   # top label's share of total mic energy (multi-speaker path)
+_AUTHOR_MIN_MARGIN = 0.15     # top vs runner-up margin, now measured on mic_share
+_AUTHOR_MIN_DURATION_S = 3.0  # top label must have at least this much speech
+_AUTHOR_MIN_MIC_RMS = 50.0    # single-speaker path: absolute mic-activity floor, in the
+                              # RAW RMS scale _track_rms/_read_mono_decimated actually
+                              # return (native PCM units, e.g. int16 -32768..32767 — NOT
+                              # normalized to [-1,1]). Guards a silent-mic solo recording
+                              # (e.g. user only watched something on the system track)
+                              # from being labeled author just because a lone label
+                              # trivially "shares" 100% of ~zero mic energy.
 
 
 def _shift_chunks(chunks, delay_ms, rate, max_len):
@@ -1950,12 +1969,24 @@ def _track_rms(samples, start_s, end_s, rate):
 
 
 def compute_speaker_dominance(timeline, mic_collapsed, sys_collapsed, rate=16000):
-    """Per raw diarization label: duration-weighted mean of mic_rms/(mic_rms+sys_rms)
-    across that label's segments, plus total duration. A segment silent on both
-    tracks contributes a neutral 0.5 ratio (no divide-by-zero) but still counts
-    toward duration. Pure, no I/O.
-    Returns {raw_label: {"mic_ratio": float, "duration_s": float}}."""
-    scores = {}
+    """Per raw diarization label, three scores:
+    - mic_share: this label's fraction of TOTAL mic-track energy (sum of mic_rms*dur
+      over the label's own segments, divided by that same sum over ALL segments in the
+      timeline). Never looks at the system track — robust to the system track also
+      carrying the author's voice (call echo/mix), which is what makes the ratio-based
+      metric below fail on real conferencing audio.
+    - mic_level: duration-weighted mean mic_rms during the label's segments (absolute
+      mic loudness, not relative to anyone else) — used to gate the single-speaker case
+      where mic_share is trivially 1.0.
+    - mic_ratio: duration-weighted mean of mic_rms/(mic_rms+sys_rms) — the old metric,
+      kept for calibration/back-compat logging only, no longer used to pick a winner.
+    Plus total duration. A segment silent on both tracks contributes a neutral 0.5
+    mic_ratio (no divide-by-zero) and zero energy (doesn't move mic_share) but still
+    counts toward duration. Pure, no I/O.
+    Returns {raw_label: {"mic_share": float, "mic_level": float, "mic_ratio": float,
+    "duration_s": float}}."""
+    raw = {}
+    total_energy = 0.0
     for start, end, label in timeline:
         dur = end - start
         if dur <= 0:
@@ -1964,26 +1995,45 @@ def compute_speaker_dominance(timeline, mic_collapsed, sys_collapsed, rate=16000
         sys_rms = _track_rms(sys_collapsed, start, end, rate)
         total = mic_rms + sys_rms
         ratio = 0.5 if total <= 0.0 else mic_rms / total
-        entry = scores.setdefault(label, {"mic_ratio": 0.0, "duration_s": 0.0})
+        energy = mic_rms * dur
+        entry = raw.setdefault(label, {"mic_ratio": 0.0, "mic_level": 0.0, "duration_s": 0.0, "energy": 0.0})
         new_duration = entry["duration_s"] + dur
         entry["mic_ratio"] = (entry["mic_ratio"] * entry["duration_s"] + ratio * dur) / new_duration
+        entry["mic_level"] = (entry["mic_level"] * entry["duration_s"] + mic_rms * dur) / new_duration
         entry["duration_s"] = new_duration
+        entry["energy"] += energy
+        total_energy += energy
+    scores = {}
+    for label, entry in raw.items():
+        share = 0.0 if total_energy <= 0.0 else entry["energy"] / total_energy
+        scores[label] = {"mic_share": share, "mic_level": entry["mic_level"],
+                          "mic_ratio": entry["mic_ratio"], "duration_s": entry["duration_s"]}
     return scores
 
 
-def pick_author_label(scores, min_ratio=_AUTHOR_MIN_RATIO, min_margin=_AUTHOR_MIN_MARGIN,
-                       min_duration_s=_AUTHOR_MIN_DURATION_S):
-    """Winner-take-all with a confidence AND a margin gate: top scorer must clear
-    min_ratio, beat the runner-up by min_margin, and have >= min_duration_s of speech.
+def pick_author_label(scores, min_mic_share=_AUTHOR_MIN_MIC_SHARE, min_margin=_AUTHOR_MIN_MARGIN,
+                       min_duration_s=_AUTHOR_MIN_DURATION_S, min_mic_rms=_AUTHOR_MIN_MIC_RMS):
+    """Winner-take-all over mic_share (this label's fraction of total mic-track energy).
+    Multi-speaker (>=2 labels in scores): top scorer must clear min_mic_share, beat the
+    runner-up by min_margin, and have >= min_duration_s of speech.
+    Single-speaker (1 label in scores): mic_share is trivially 1.0 (nothing to share
+    with) — share/margin gates would be meaningless, so instead require mic_level (the
+    label's own absolute mic loudness) >= min_mic_rms, so a silent-mic solo recording
+    (e.g. the user only watched something on the system track, mic never picked up
+    anything) isn't mislabeled author just for being alone.
     Any failure -> None (ambiguous / no signal). Pure, no I/O — caller logs the
     outcome (see detect_author_speaker)."""
     if not scores:
         return None
-    ranked = sorted(scores.items(), key=lambda kv: kv[1]["mic_ratio"], reverse=True)
+    ranked = sorted(scores.items(), key=lambda kv: kv[1]["mic_share"], reverse=True)
     top_label, top = ranked[0]
-    if top["duration_s"] < min_duration_s or top["mic_ratio"] < min_ratio:
+    if top["duration_s"] < min_duration_s:
         return None
-    if len(ranked) > 1 and (top["mic_ratio"] - ranked[1][1]["mic_ratio"]) < min_margin:
+    if len(ranked) == 1:
+        return top_label if top["mic_level"] >= min_mic_rms else None
+    if top["mic_share"] < min_mic_share:
+        return None
+    if (top["mic_share"] - ranked[1][1]["mic_share"]) < min_margin:
         return None
     return top_label
 
