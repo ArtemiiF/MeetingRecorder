@@ -2215,22 +2215,95 @@ def _parse_frontmatter(text):
     return out
 
 
-def _find_audio(note_name, files):
+def _base_stamp(stem):
+    """Canonical recording identity: strip a reprocess `-r<seq>` revision suffix (Pipeline.
+    process's versioning), then a language suffix (_NOTE_LANGS), recovering the stem the
+    physical audio was actually saved under. Every language variant and every reprocess
+    version of one recording collapses to the same base_stamp. Prefix-agnostic — the regexes
+    only anchor on the trailing end, so `stem` may still carry a leading "meeting-" (as
+    _find_audio feeds it, matching on-disk filenames) or not (as cmd_history's prefix-free
+    `stamp`/audio-inventory stems feed it) with identical stripping behaviour."""
     import re
-    stem = note_name[:-3]  # strip .md
-    # A versioned reprocess note (Pipeline.process's `-r<seq>` revision suffix) still
-    # shares its audio with the original recording — strip that suffix first (it's
-    # always the last component of the filename), then the language suffix, to
-    # recover the base "meeting-<timestamp>" stem the audio was actually saved under.
     rev_m = re.match(r"^(.*)-r\d+$", stem)
     if rev_m:
         stem = rev_m.group(1)
     m = re.match(r"^(.*)-([a-z]{2,4})$", stem)
-    astem = m.group(1) if (m and m.group(2) in _NOTE_LANGS) else stem
+    return m.group(1) if (m and m.group(2) in _NOTE_LANGS) else stem
+
+
+def _find_audio(note_name, files):
+    stem = note_name[:-3]  # strip .md
+    # A versioned reprocess note still shares its audio with the original recording —
+    # _base_stamp strips the `-r<seq>`/language suffixes to recover the base
+    # "meeting-<timestamp>" stem the audio was actually saved under.
+    astem = _base_stamp(stem)
     for f in files:
         if f != note_name and f.startswith(astem + ".") and Path(f).suffix.lower() in _AUDIO_EXT:
             return f
     return None
+
+
+def _wav_duration_s(path):
+    """Best-effort WAV duration in seconds via the stdlib `wave` module header only — no
+    ffprobe dependency, no full-file read (wave.open reads just the RIFF/fmt/data header).
+    None on any parse failure (corrupt/truncated file, or non-WAV content despite the
+    extension)."""
+    import wave as wavemod
+    try:
+        with wavemod.open(path, "rb") as w:
+            rate = w.getframerate()
+            if not rate:
+                return None
+            return w.getnframes() / rate
+    except Exception:
+        return None
+
+
+def _scan_audio_inventory(out_dir):
+    """Single os.scandir pass over out_dir (the same dir notes/audio land in) building an
+    inventory of every audio file physically present, regardless of whether any surviving
+    note still references it — an audio file whose last note was deleted (orphan) is
+    otherwise completely invisible to _reconcile, which only ever globs `.md` files (see
+    histmap4x analyzer report, Q5/constraint (a)). Each entry's base_stamp uses the same
+    _base_stamp() helper _find_audio/_reconcile use, so a renderer can pair an orphan (or
+    any) audio entry with its note row(s) by equality on base_stamp."""
+    import os
+    out = Path(out_dir)
+    if not out.exists():
+        return []
+    audios = []
+    try:
+        entries = list(os.scandir(out))
+    except OSError:
+        return []
+    for entry in entries:
+        name = entry.name
+        if name.startswith("."):  # .obsidian/.trash-style dotfiles/dotdirs — never audio
+            continue
+        try:
+            if not entry.is_file():
+                continue
+        except OSError:
+            continue  # vanished mid-scan
+        suffix = Path(name).suffix.lower()
+        if suffix not in _AUDIO_EXT:
+            continue
+        stem = name[:-len(suffix)]
+        if stem.startswith("meeting-"):
+            stem = stem[len("meeting-"):]
+        try:
+            st = entry.stat()
+        except OSError:
+            continue  # vanished mid-scan
+        path = str(out / name)
+        audios.append({
+            "base_stamp": _base_stamp(stem),
+            "path": path,
+            "size": st.st_size,
+            "mtime": st.st_mtime,
+            "duration_s": _wav_duration_s(path) if suffix == ".wav" else None,
+        })
+    return audios
 
 
 def _iter_vault_notes(vault_root, skip_dir=None):
@@ -2358,6 +2431,11 @@ def cmd_history(out_dir, db_path, pending_file=None, vault_root=None):
     _reconcile(conn, out_dir, vault_root)
     items = _db_list(conn)
     conn.close()
+    # Additive field, note rows only (pending rows use a different stamp namespace — see
+    # _parse_any_stamp — and aren't part of the audio-pairing identity yet).
+    for it in items:
+        it["base_stamp"] = _base_stamp(it["stamp"])
+    audios = _scan_audio_inventory(out_dir)
     if pending_file:
         pending_items = []
         for r in _load_pending_manifest(pending_file):
@@ -2370,7 +2448,7 @@ def cmd_history(out_dir, db_path, pending_file=None, vault_root=None):
         # chronological merge (recording time), not just an append — an unparseable
         # stamp sorts last rather than crashing the whole history list.
         items.sort(key=lambda it: _parse_any_stamp(it.get("stamp")) or datetime.min, reverse=True)
-    emit("history", items=items)
+    emit("history", items=items, audios=audios)
 
 
 def cmd_classify(note_path, existing_json="", main_model=""):
