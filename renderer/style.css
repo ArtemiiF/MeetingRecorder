@@ -196,7 +196,7 @@ main:has(> #view-prompts:not(.hidden)) { max-width: 1200px; }
 .topbtn:hover { background: var(--card2); }
 .topbtn.active { background: var(--selection); color: var(--selection-text); }
 .rec-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
-  background: var(--rec); animation: pulse 1s ease-in-out infinite; }
+  background: var(--rec); box-shadow: var(--rec-glow); animation: pulse 1s ease-in-out infinite; }
 /* recording status block, pinned to the bottom of the sidebar via margin-top:auto
    (pushes itself + the settings button below it down together) — the only DOM
    region visible from every view, see setRecIndicator() in renderer.js. Hidden
@@ -219,7 +219,7 @@ main:has(> #view-prompts:not(.hidden)) { max-width: 1200px; }
      (which top:110px / calc(100vh-160px) accounted for) is gone — main now only
      has its own small padding-top + .content-header above the rail. */
   flex: 0 0 280px; max-height: calc(100vh - 70px); overflow-y: auto;
-  background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 8px;
+  background: var(--grad-card); box-shadow: var(--shadow-card); border: 1px solid var(--line); border-radius: 12px; padding: 8px;
   position: sticky; top: 16px;
 }
 .rail-head { display: flex; justify-content: space-between; align-items: center;
@@ -336,7 +336,7 @@ main:has(> #view-prompts:not(.hidden)) { max-width: 1200px; }
 .rail-latest { color: var(--muted); font-size: 11px; font-weight: 400; }
 
 .note-view {
-  flex: 1; min-width: 0; background: var(--card); border: 1px solid var(--line);
+  flex: 1; min-width: 0; background: var(--grad-card); box-shadow: var(--shadow-card); border: 1px solid var(--line);
   border-radius: 12px; padding: 20px 24px; min-height: 300px;
 }
 .note-actions { display: flex; gap: 8px; margin-bottom: 8px; }
@@ -358,8 +358,9 @@ main:has(> #view-prompts:not(.hidden)) { max-width: 1200px; }
 .note-body summary { cursor: pointer; color: var(--accent); }
 
 .card {
-  background: var(--card); border: 1px solid var(--line);
+  background: var(--grad-card); box-shadow: var(--shadow-card); border: 1px solid var(--line);
   border-radius: 12px; padding: 16px 20px; margin-bottom: 16px;
+  transition: box-shadow .14s, border-color .14s;
 }
 /* card h2: 13->11px/500 per concept B; letter-spacing widened .04em->.08em to keep
    the all-caps label legible at the smaller Unbounded size. */
@@ -370,7 +371,7 @@ label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 6px
 select, input[type=text], input[type=date], textarea {
   width: 100%; background: var(--card2); color: var(--fg);
   border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px;
-  font-size: 14px; font-family: inherit;
+  font-size: 14px; font-family: inherit; box-shadow: var(--shadow-inset);
 }
 textarea { resize: vertical; line-height: 1.5; }
 select:focus, input:focus, textarea:focus { outline: none; border-color: var(--accent); }
@@ -387,17 +388,18 @@ select:focus, input:focus, textarea:focus { outline: none; border-color: var(--a
 .btn {
   background: var(--card2); color: var(--fg); border: 1px solid var(--line);
   border-radius: 8px; padding: 8px 16px; cursor: pointer; font-size: 14px;
-  font-family: inherit; transition: background .12s, border-color .12s;
+  font-family: inherit; box-shadow: var(--shadow-btn);
+  transition: background .12s, border-color .12s, box-shadow .14s;
 }
 .btn:hover { border-color: var(--accent); }
-.btn.primary { background: var(--accent-fill); border-color: var(--accent-fill); color: var(--accent-fill-text); }
+.btn.primary { background: var(--grad-primary); border-color: var(--accent-fill); color: var(--accent-fill-text); box-shadow: var(--shadow-primary); }
 .btn.primary:hover { background: var(--accent-fill-hover); border-color: var(--accent-fill-hover); }
 .btn.primary:disabled { opacity: .4; cursor: not-allowed; }
 .btn:disabled { opacity: .4; cursor: not-allowed; }
 .btn.big { padding: 12px 28px; font-size: 16px; font-weight: 600; }
 .btn.small { padding: 8px 12px; font-size: 13px; }
 .btn.ghost { background: transparent; }
-.btn.recording { background: var(--rec-fill); border-color: var(--rec-fill); color: #fff; }
+.btn.recording { background: var(--rec-fill); border-color: var(--rec-fill); color: #fff; box-shadow: var(--rec-glow); }
 .btn.danger { border-color: var(--danger); color: var(--danger); }
 .btn.danger:hover { background: var(--danger-fill); border-color: var(--danger-fill); color: #fff; }
 
@@ -416,7 +418,7 @@ select:focus, input:focus, textarea:focus { outline: none; border-color: var(--a
 .sys-status.warn { color: var(--warn); border-color: var(--warn); }
 .vu { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
 .vu-label { width: 20px; font-size: 14px; }
-.vu-track { flex: 1; height: 8px; background: var(--card2); border-radius: 4px; overflow: hidden; }
+.vu-track { flex: 1; height: 8px; background: var(--card2); border-radius: 4px; overflow: hidden; box-shadow: var(--shadow-inset); }
 .vu-fill { height: 100%; width: 0%; background: var(--ok); transition: width .08s linear; }
 .opts-row { display: flex; gap: 14px; margin-bottom: 4px; }
 .opts-row label { flex: 0 0 auto; }
@@ -444,7 +446,7 @@ select:focus, input:focus, textarea:focus { outline: none; border-color: var(--a
 .settings-btn:hover { color: var(--fg); background: var(--card2); }
 .overlay { position: fixed; inset: 0; background: var(--overlay); z-index: 20;
   display: flex; align-items: flex-start; justify-content: center; padding: 48px 16px; overflow: auto; }
-.modal { background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+.modal { background: var(--grad-card); box-shadow: var(--shadow-card); border: 1px solid var(--line); border-radius: 12px;
   width: 100%; max-width: 560px; padding: 20px 24px; }
 .modal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
 /* h1-level: 18->15px/500 per concept B, same bucket as .content-header #contentTitle */
@@ -586,7 +588,7 @@ body.processing .queue-item button { opacity: .4; pointer-events: none; }
 }
 .stage:hover { transform: translateY(-1px); }
 .stage.active { color: var(--accent-fill-text); border-color: var(--accent); background: var(--accent-fill);
-  animation: pulse 1s ease-in-out infinite; }
+  box-shadow: var(--act-glow); animation: pulse 1s ease-in-out infinite; }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .5; } }
 .spinner {
   width: 18px; height: 18px; border-radius: 50%; display: inline-block;
@@ -605,6 +607,7 @@ pre {
   padding: 12px 16px; font-size: 13px; line-height: 1.5;
   font-family: "SF Mono", ui-monospace, Menlo, monospace;
   white-space: pre-wrap; word-break: break-word; max-height: 340px; overflow: auto;
+  box-shadow: var(--shadow-inset);
 }
 #logs, #histLogs { color: var(--muted); max-height: 200px; }
 .result-pane { color: var(--fg); max-height: 460px; }
