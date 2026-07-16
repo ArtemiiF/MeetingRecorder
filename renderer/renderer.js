@@ -56,6 +56,11 @@ document.querySelectorAll(".tab").forEach((t) =>
     // row is exclusively an import-mode affordance; hide it on the record tab so the record
     // card only shows mic-select/status/VU/recBtn/timer.
     document.querySelector(".run-row").classList.toggle("hidden", state.mode !== "import");
+    // #processLatestBtn used to be nested inside #pane-record, so switching tabs hid it
+    // for free via that pane's own .hidden toggle just above; now that it lives in the
+    // record-action-bar alongside .run-row (both co-located, not nested under either
+    // tabpane), it needs the same explicit mode-based toggle, inverted.
+    $("processLatestBtn").classList.toggle("hidden", state.mode !== "record");
     refreshRunBtn();
   })
 );
@@ -695,14 +700,16 @@ async function init() {
   updateTokenWarn();
   renderPresets();
   if (state.presets.length) selectPreset(0);
-  refreshHistory();
 
   // Restore the persistent pending-recordings queue (survives an app restart —
   // main.js reads it back from pending.json). Rendered inline in the История rail
-  // (renderRail) — there is no separate control strip.
+  // (renderRail) — there is no separate control strip. Awaited BEFORE refreshHistory()
+  // so its updateNoteViewDefault() sees the real pending count on its very first pass,
+  // not a not-yet-populated state.pendingRecordings (which would misjudge "no notes yet
+  // but a pending recording exists" as fully empty).
   const pending = await window.api.listPendingRecordings();
   state.pendingRecordings = (pending || []).map((r) => ({ ...r, status: "pending" }));
-  renderRail();
+  refreshHistory();
 }
 
 // Record-card #presetSelect stays index-based (option value = array index) — the
@@ -1954,10 +1961,16 @@ $("historyRefresh").addEventListener("click", refreshHistory);
 
 // ── history (rail + note viewer) ─────────────────────────────────────────────
 let historyItems = [];
+// idx (into historyItems) of the note currently shown in #noteView, or null — renderRail()
+// rebuilds the whole rail from scratch on every call (filters, refresh, auto-open included),
+// which would otherwise silently drop the .active highlight on every re-render even though
+// the same note stays open; re-applied at the end of renderRail() via applyActiveHighlight().
+let openNoteIdx = null;
 async function refreshHistory() {
   historyItems = await window.api.listHistory(state.outDir);
   populateTemplateFilter();
   renderRail();
+  updateNoteViewDefault();
 }
 
 // fill the template <select> from distinct templates in the data (keep current choice)
@@ -2158,6 +2171,7 @@ function renderRail() {
   const tmpl = $("historyTemplate").value;
   const from = $("historyFrom").value; // YYYY-MM-DD or ""
   const to = $("historyTo").value;
+  updateFiltersToggle();
   const rail = $("historyList");
   rail.innerHTML = "";
   const pending = state.pendingRecordings || [];
@@ -2223,14 +2237,73 @@ function renderRail() {
       ? buildHistoryVersionGroup(base, groupNotes)
       : buildHistoryRow(groupNotes[0]));
   });
+  applyActiveHighlight(); // re-mark whichever note is currently open — rebuilt rows start unmarked
 }
 ["historySearch"].forEach((id) => $(id).addEventListener("input", renderRail));
 ["historyLang", "historyTemplate", "historyFrom", "historyTo"].forEach((id) =>
   $(id).addEventListener("change", renderRail));
 
+// Filters collapse (rail-filters-body starts collapsed, in-memory only — no persistence).
+// The search input stays outside the collapsible; lang/template/date-range live inside it.
+$("historyFiltersToggle").addEventListener("click", () => {
+  const collapsed = $("historyFiltersBody").classList.toggle("hidden");
+  $("historyFiltersCaret").textContent = collapsed ? "▸" : "▾";
+});
+// Badge = count of non-default filter values among lang/template/from/to (search excluded —
+// it's always visible, not part of the collapsible group). Recomputed on every renderRail()
+// so it always matches the four fields' actual current values.
+function updateFiltersToggle() {
+  const activeCount = ["historyLang", "historyTemplate", "historyFrom", "historyTo"]
+    .filter((id) => $(id).value).length;
+  const badge = $("historyFiltersBadge");
+  if (activeCount) {
+    badge.textContent = String(activeCount);
+    badge.classList.remove("hidden");
+  } else {
+    badge.classList.add("hidden");
+  }
+}
+
 function selectNote(idx) {
-  document.querySelectorAll(".rail-item").forEach((e) => e.classList.toggle("active", +e.dataset.idx === idx));
+  openNoteIdx = idx;
+  applyActiveHighlight();
   openHistoryNote(historyItems[idx]);
+}
+
+// Scoped to the История rail: ".rail-item" is shared with Промпты's #promptsList rows
+// (which carry no dataset.idx), and this now runs on every renderRail() rebuild (filters,
+// refresh, auto-open) — an unscoped query would strip Промпты's own active-preset
+// highlight the moment it runs, before that tab is ever opened.
+function applyActiveHighlight() {
+  $("historyList").querySelectorAll(".rail-item").forEach((e) => e.classList.toggle("active", +e.dataset.idx === openNoteIdx));
+}
+
+// Decides #noteView's content when nothing has been explicitly opened yet — runs after every
+// renderRail() rebuild (via refreshHistory). ".history-placeholder" marks "nothing shown yet"
+// (the static initial hint, or this function's own empty state); a real opened note never
+// carries it, so once a note is open this becomes a permanent no-op for that note.
+function updateNoteViewDefault() {
+  const view = $("noteView");
+  if (!view.querySelector(".history-placeholder")) return; // a note (or read-error) already showing
+  const notes = historyItems.filter((it) => it.kind !== "pending");
+  const pendingCount = (state.pendingRecordings || []).length;
+  if (!notes.length && !pendingCount) {
+    view.innerHTML =
+      `<div class="note-view-empty history-placeholder">
+         <div class="note-view-empty-icon">🎙</div>
+         <p class="note-view-empty-title">Пока нет заметок</p>
+         <p class="hint">Запиши первую встречу — заметка появится здесь</p>
+         <button id="nvEmptyGoRecord" class="btn primary">● Начать запись</button>
+       </div>`;
+    $("nvEmptyGoRecord").onclick = () => switchView("record");
+    return;
+  }
+  // "Most recent note" reuses the rail's own already-computed order (stamp-DESC across
+  // recordings, version-DESC — "(latest)" first — within a multi-version group) instead of
+  // re-deriving that sort here: whichever .rail-item renders topmost is, by construction,
+  // the one renderRail()/groupByBaseStamp already decided sorts first.
+  const topRow = $("historyList").querySelector(".rail-item:not(.pending)");
+  if (topRow) selectNote(+topRow.dataset.idx);
 }
 
 // Backend pairing gap (backend.py _reconcile/_find_audio) only resolves `audio` for
@@ -2441,6 +2514,13 @@ function reprocessHistory(audio, presetId, version) {
   document.querySelectorAll(".tab").forEach((x) => x.classList.toggle("active", x.dataset.tab === "import"));
   $("pane-record").classList.add("hidden");
   $("pane-import").classList.remove("hidden");
+  // #processLatestBtn used to live inside #pane-record, so hiding that pane (above) hid
+  // it for free. It now lives in the record-action-bar, a sibling of both tabpanes — left
+  // untouched here it would stay visible (and, once refreshProcessLatestBtn() re-enables it
+  // after this run ends, clickable) while the rest of the UI shows import mode; a later
+  // click would process the latest RECORDING, not this reprocess. Mirrors the tab handler's
+  // own toggle (the only other site that flips state.mode/pane visibility — see its comment).
+  $("processLatestBtn").classList.add("hidden");
   reprocessTargetsHistory = true;
   buildHistoryProgressPanel();
   setImportQueue([audio]); // queue-of-1 — same path as an N-file batch
@@ -2848,23 +2928,27 @@ async function refreshParaInbox() {
   paraInboxLoaded = true;
   const box = $("paraInbox");
   box.innerHTML = "";
-  if (!paraInboxItems.length) { box.innerHTML = '<p class="hint">Все заметки разобраны.</p>'; return; }
+  if (!paraInboxItems.length) { box.innerHTML = '<p class="hint">📥 Всё разобрано</p>'; return; }
   paraInboxItems.forEach((it, idx) => {
     const row = document.createElement("div");
     row.className = "para-row";
     row.dataset.idx = idx;
     row.innerHTML =
-      `<span class="para-row-spinner spinner hidden"></span>
-       <div class="para-note">${escapeHtml(it.title || it.name)}</div>
-       <select class="para-cat">
-         <option value="">— категория —</option>
-         <option value="projects">Projects</option>
-         <option value="areas">Areas</option>
-         <option value="resources">Resources</option>
-         <option value="archives">Archives</option>
-       </select>
-       <input class="para-proj" placeholder="проект / область" />
-       <button class="btn small para-file-btn">Разложить</button>`;
+      `<div class="para-row-top">
+         <span class="para-row-spinner spinner hidden"></span>
+         <div class="para-note">${escapeHtml(it.title || it.name)}</div>
+       </div>
+       <div class="para-row-controls">
+         <select class="para-cat">
+           <option value="">— категория —</option>
+           <option value="projects">Projects</option>
+           <option value="areas">Areas</option>
+           <option value="resources">Resources</option>
+           <option value="archives">Archives</option>
+         </select>
+         <input class="para-proj" placeholder="проект / область" />
+         <button class="btn small para-file-btn">Разложить</button>
+       </div>`;
     row.querySelector(".para-file-btn").addEventListener("click", () => fileParaRow(idx, row));
     box.appendChild(row);
   });

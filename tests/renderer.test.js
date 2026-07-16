@@ -262,6 +262,36 @@ test("nvReprocess is disabled with a visible reason when audio is genuinely unre
   assert.match(btn.title, /Аудио не найдено/);
 });
 
+// ── reprocessHistory must hide #processLatestBtn too (design-layout fix) ─────
+// #processLatestBtn used to live inside #pane-record, so reprocessHistory() hiding that
+// pane hid it "for free". Since the record-action-bar relocation it's a sibling of both
+// tabpanes — left unfixed, it would stay visible (and, once the run ends and
+// refreshProcessLatestBtn() re-enables it, clickable) even though state.mode is now
+// "import" and the rest of the UI shows the import pane; a click would then process the
+// latest RECORDING, not this reprocess.
+test("reprocessHistory hides #processLatestBtn (not just #pane-record) and it stays hidden through and after the run", async () => {
+  const { window, $, handlers } = await boot({
+    listHistory: async () => [{ name: "2026-01-01", title: "Синк", note: "/o/a.md", audio: "/o/a.wav" }],
+  });
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  $("historyList").querySelector(".rail-item:not(.pending)").click(); await tick(window);
+  assert.equal($("processLatestBtn").classList.contains("hidden"), false, "record mode by default — visible before any reprocess");
+  $("noteView").querySelector("#nvReprocess").click(); await tick(window);
+  $("noteView").querySelector("#reprocessConfirm").click(); await tick(window);
+  assert.equal($("processLatestBtn").classList.contains("hidden"), true,
+    "reprocessHistory() flips state.mode to import — the bar's record-mode button must hide");
+  // refreshProcessLatestBtn() (called on the run's terminal event) only ever toggles
+  // .disabled, never .hidden — the run finishing must not un-hide it.
+  handlers.process({ event: "done", note: "/o/a.md", audio: "/o/a.wav", transcript: "t", summary: "s" });
+  await tick(window);
+  assert.equal($("processLatestBtn").classList.contains("hidden"), true, "still hidden after the reprocess run ends");
+  // "back to Запись" in the reported bug means the top-level Запись VIEW nav button, not
+  // the record/import tab inside the Источник card — switchView() never touches state.mode.
+  window.document.querySelector('.topbtn[data-view="record"]').click(); await tick(window);
+  assert.equal($("processLatestBtn").classList.contains("hidden"), true,
+    "still hidden after navigating back to the Запись view — only an explicit record-tab click restores record mode");
+});
+
 // ── jump-to-recording button in note headers (Task 3) ────────────────────────
 test("nvGoRecord (История note header) switches to the Запись view", async () => {
   const { window, $ } = await boot();
@@ -308,8 +338,9 @@ test("clicking a pending row's body in the История rail does not open a n
   const { window, $, handlers } = await boot({ readNote: async () => { readNoteCalls++; return "x"; } });
   handlers.record({ event: "recorded", id: "r1", name: "Запись 1", file: "/tmp/mixed.wav", mic: "/tmp/m.wav", system: null, tracks: 1 });
   window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  const before = readNoteCalls; // auto-open may already have read the boot-mock's real note on entry
   $("historyList").querySelector(".rail-item.pending").click(); await tick(window);
-  assert.equal(readNoteCalls, 0);
+  assert.equal(readNoteCalls, before);
 });
 
 test("▶ on the rail's inline pending row starts processing (reuses processPendingRecording)", async () => {
@@ -826,6 +857,72 @@ test("note view shows the title as a heading", async () => {
   await tick(window);
   const t = $("noteView").querySelector(".note-title");
   assert.ok(t && t.textContent === "Синк по релизу");
+});
+
+// ── history filters collapse (Фильтры ▾/▸ toggle + active-count badge) ──────────
+test("history filters: collapsed by default, toggle flips the caret, and the badge counts only non-default values", async () => {
+  const { window, $ } = await boot();
+  window.document.querySelector('.topbtn[data-view="history"]').click();
+  await tick(window);
+  assert.ok($("historyFiltersBody").classList.contains("hidden"), "collapsed by default");
+  assert.ok($("historyFiltersBadge").classList.contains("hidden"), "no active filters yet — badge hidden");
+  $("historyFiltersToggle").click();
+  assert.ok(!$("historyFiltersBody").classList.contains("hidden"), "toggle expands the body");
+  assert.equal($("historyFiltersCaret").textContent, "▾");
+  $("historyLang").value = "en";
+  $("historyLang").dispatchEvent(new window.Event("change"));
+  assert.ok(!$("historyFiltersBadge").classList.contains("hidden"));
+  assert.equal($("historyFiltersBadge").textContent, "1");
+  $("historyFrom").value = "2026-01-01";
+  $("historyFrom").dispatchEvent(new window.Event("change"));
+  assert.equal($("historyFiltersBadge").textContent, "2", "lang + from both count toward the badge");
+  $("historyFiltersToggle").click();
+  assert.ok($("historyFiltersBody").classList.contains("hidden"), "toggle collapses again");
+  assert.equal($("historyFiltersCaret").textContent, "▸");
+});
+
+// ── История empty states ─────────────────────────────────────────────────────
+test("История: no notes and no pending → centered empty state with a button back to Запись", async () => {
+  const { window, $ } = await boot({ listHistory: async () => [] });
+  window.document.querySelector('.topbtn[data-view="history"]').click();
+  await tick(window);
+  const empty = $("noteView").querySelector(".note-view-empty");
+  assert.ok(empty, "empty state must render when История has nothing at all");
+  assert.ok($("noteView").textContent.includes("Пока нет заметок"));
+  assert.ok($("noteView").textContent.includes("Запиши первую встречу"));
+  $("noteView").querySelector("#nvEmptyGoRecord").click();
+  assert.ok($("view-history").classList.contains("hidden"));
+  assert.ok(!$("view-record").classList.contains("hidden"), "empty-state button switches back to Запись");
+});
+
+test("История: no finished notes yet but a restart-era pending recording exists → not the empty state", async () => {
+  const { window, $ } = await boot({
+    listHistory: async () => [],
+    listPendingRecordings: async () => ([
+      { id: "r1", name: "Запись 1", mixed: "/rec/r1/mixed.wav", mic: "/rec/r1/mic.wav", system: null, tracks: 1 },
+    ]),
+  });
+  window.document.querySelector('.topbtn[data-view="history"]').click();
+  await tick(window);
+  assert.ok(!$("noteView").querySelector(".note-view-empty"),
+    "a pending recording means История isn't truly empty — no CTA to record when one's already queued");
+  assert.equal($("historyList").querySelectorAll(".rail-item.pending").length, 1);
+});
+
+test("История: notes exist but none clicked yet → auto-opens the most recent note instead of the old hint", async () => {
+  const { window, $ } = await boot({
+    listHistory: async () => [
+      { name: "2026-07-08-190000", title: "Newest", language: "ru", note: "/c.md", audio: null },
+      { name: "2026-01-01-100000", title: "Oldest", language: "ru", note: "/a.md", audio: null },
+    ],
+  });
+  window.document.querySelector('.topbtn[data-view="history"]').click();
+  await tick(window);
+  const t = $("noteView").querySelector(".note-title");
+  assert.ok(t, "a note must be auto-opened, not the static hint");
+  assert.equal(t.textContent, "Newest", "the most recent note (stamp-DESC first) is the one auto-opened");
+  assert.ok($("historyList").querySelector('.rail-item[data-idx="0"]').classList.contains("active"),
+    "the auto-opened row is also highlighted active, same as a manual click");
 });
 
 test("PARA: setup shown until vault created, then workspace", async () => {
@@ -2623,16 +2720,17 @@ test("'это я' button fills speaker row input with authorName; Apply sends it
 
 test("История note view exposes a speaker editor; apply calls renameSpeakers and refreshes the note", async () => {
   let readCount = 0;
+  let renamed = false; // content-keyed, not call-count-keyed — auto-open now reads the note once extra on entry
   let renamedArg = null;
   const { window, $ } = await boot({
     listHistory: async () => [{ name: "2026-01-01", title: "Синк", note: "/o/meeting-x.md", audio: "/o/meeting-x.wav" }],
     readNote: async () => {
       readCount++;
-      return readCount === 1
-        ? '---\ntitle: "T"\n---\n\n**[Спикер 1]**: привет\n\n**[Спикер 2]**: пока'
-        : '---\ntitle: "T"\n---\n\n**[Алёна]**: привет\n\n**[Спикер 2]**: пока';
+      return renamed
+        ? '---\ntitle: "T"\n---\n\n**[Алёна]**: привет\n\n**[Спикер 2]**: пока'
+        : '---\ntitle: "T"\n---\n\n**[Спикер 1]**: привет\n\n**[Спикер 2]**: пока';
     },
-    renameSpeakers: async (notePath, map) => { renamedArg = { notePath, map }; return { ok: true }; },
+    renameSpeakers: async (notePath, map) => { renamedArg = { notePath, map }; renamed = true; return { ok: true }; },
   });
   window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
   $("historyList").querySelector(".rail-item").click(); await tick(window);
@@ -2640,13 +2738,14 @@ test("История note view exposes a speaker editor; apply calls renameSpeak
   const box = $("nvSpeakerInputs");
   const inputs = box.querySelectorAll("input");
   assert.equal(inputs.length, 2, "expected one input per detected speaker label");
+  const readsBeforeRename = readCount;
   inputs[0].value = "Алёна";
   $("nvApplySpeakers").click();
   await tick(window); await tick(window);
   assert.ok(renamedArg, "renameSpeakers was not called");
   assert.equal(renamedArg.notePath, "/o/meeting-x.md");
   assert.equal(renamedArg.map["Спикер 1"], "Алёна");
-  assert.equal(readCount, 2, "note must be re-read after rename to refresh the view");
+  assert.equal(readCount, readsBeforeRename + 1, "note must be re-read after rename to refresh the view");
   assert.ok($("noteView").textContent.includes("Алёна"), "refreshed note view should show the new label");
 });
 
@@ -3561,6 +3660,22 @@ test("main.js: pick-audio dialog allows multiSelections and returns the full fil
 function goImportTab(window) {
   window.document.querySelector('.tab[data-tab="import"]').click();
 }
+
+// #processLatestBtn and .run-row are co-located in .record-action-bar (design-layout
+// commit "Запись: two-column layout + sticky action bar") — #processLatestBtn no longer
+// sits inside #pane-record, so it no longer gets hidden "for free" by that tabpane's own
+// toggle; the tab-click handler now toggles it explicitly, inverted from .run-row.
+test("record-action-bar: switching tabs shows exactly one of #processLatestBtn / .run-row at a time", async () => {
+  const { window, $ } = await boot();
+  assert.equal($("processLatestBtn").classList.contains("hidden"), false, "record tab (default): visible");
+  assert.equal(window.document.querySelector(".run-row").classList.contains("hidden"), true, "record tab (default): hidden");
+  goImportTab(window);
+  assert.equal($("processLatestBtn").classList.contains("hidden"), true, "import tab: hidden");
+  assert.equal(window.document.querySelector(".run-row").classList.contains("hidden"), false, "import tab: visible");
+  window.document.querySelector('.tab[data-tab="record"]').click();
+  assert.equal($("processLatestBtn").classList.contains("hidden"), false, "back to record tab: visible again");
+  assert.equal(window.document.querySelector(".run-row").classList.contains("hidden"), true, "back to record tab: hidden again");
+});
 
 test("multi-file pick renders one queue row per file", async () => {
   const { window, $ } = await boot({
@@ -5086,17 +5201,20 @@ test("clicking a version row inside a История group highlights it with .a
   window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
   const rows = Array.from($("historyList").querySelectorAll(".rail-version-row"));
   assert.equal(rows.length, 2);
-  assert.ok(rows.every((r) => !r.classList.contains("active")), "nothing selected yet");
-
-  rows[0].click(); // "Митинг · v2 (latest)" — rendered first (highest version)
-  await tick(window);
-  assert.ok(rows[0].classList.contains("active"), "clicked version row must get .active");
-  assert.ok(!rows[1].classList.contains("active"), "only the clicked row is active");
+  // История auto-opens the topmost rendered note on entry (see the auto-open/empty-state
+  // commit) — that's rows[0] ("Митинг · v2 (latest)", rendered first), already active.
+  assert.ok(rows[0].classList.contains("active"), "auto-open marks the topmost (latest) version active");
+  assert.ok(!rows[1].classList.contains("active"));
 
   rows[1].click(); // "Митинг · v1"
   await tick(window);
   assert.ok(!rows[0].classList.contains("active"), "active must move off the previously-selected row");
   assert.ok(rows[1].classList.contains("active"), "clicking a different version row selects it instead");
+
+  rows[0].click(); // back to "Митинг · v2 (latest)"
+  await tick(window);
+  assert.ok(rows[0].classList.contains("active"), "clicking a different version row selects it instead");
+  assert.ok(!rows[1].classList.contains("active"), "only the clicked row is active");
 });
 
 test("История: a single-version recording still renders as a plain row, not wrapped in a group", async () => {

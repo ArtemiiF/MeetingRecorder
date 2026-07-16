@@ -22,6 +22,15 @@ header {
 header h1 { font-size: 18px; font-weight: 600; }
 .tag { color: var(--muted); font-size: 12px; }
 main { max-width: 860px; margin: 0 auto; padding: 20px 24px 60px; }
+/* wide two-panel views (rail + content, or subnav + content) get more breathing
+   room than the single-column Словарь view (and Запись below 1100px — see the
+   record-layout media query further down for its own conditional widening);
+   Electron 33 bundles Chromium 130 (confirmed via `ELECTRON_RUN_AS_NODE=1 electron
+   -e process.versions.chrome`), well past :has() support (Chromium 105+), so this
+   is plain CSS, no JS toggle. */
+main:has(> #view-history:not(.hidden)),
+main:has(> #view-para:not(.hidden)),
+main:has(> #view-prompts:not(.hidden)) { max-width: 1200px; }
 .hidden { display: none !important; }
 
 .topnav {
@@ -41,7 +50,7 @@ main { max-width: 860px; margin: 0 auto; padding: 20px 24px 60px; }
 /* history view: left rail + right note */
 .history-layout { display: flex; gap: 16px; align-items: flex-start; }
 .history-rail {
-  flex: 0 0 240px; max-height: calc(100vh - 160px); overflow-y: auto;
+  flex: 0 0 280px; max-height: calc(100vh - 160px); overflow-y: auto;
   background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 8px;
   position: sticky; top: 110px;
 }
@@ -60,9 +69,29 @@ main { max-width: 860px; margin: 0 auto; padding: 20px 24px 60px; }
   overflow: hidden; text-overflow: ellipsis; }
 .rail-filters { display: flex; flex-direction: column; gap: 6px; padding: 0 6px 8px; }
 .rail-filters input, .rail-filters select { font-size: 12px; padding: 6px 8px; }
+.rail-filters-toggle {
+  display: flex; align-items: center; gap: 6px; width: 100%; text-align: left;
+  background: transparent; border: none; color: var(--muted); font-size: 12px;
+  font-family: inherit; cursor: pointer; padding: 4px 6px; border-radius: 6px;
+}
+.rail-filters-toggle:hover { background: var(--card2); color: var(--fg); }
+.rail-filters-body { display: flex; flex-direction: column; gap: 6px; }
+.filters-badge {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 16px; height: 16px; padding: 0 4px; border-radius: 999px;
+  background: var(--accent-fill); color: #fff; font-size: 10px; font-weight: 600;
+}
 .rail-dates { display: flex; gap: 6px; }
 .rail-dates input { flex: 1; min-width: 0; }
 .note-title { font-size: 20px; margin-bottom: 12px; }
+/* История empty states: nothing recorded yet (centered, mirrors the record-view CTA), or
+   auto-opened most-recent note replacing the old static "Выбери заметку слева" hint. */
+.note-view-empty {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  text-align: center; gap: 8px; min-height: 260px; padding: 40px 20px;
+}
+.note-view-empty-icon { font-size: 40px; }
+.note-view-empty-title { font-size: 16px; font-weight: 600; color: var(--fg); }
 .para-layout { display: flex; gap: 16px; align-items: flex-start; }
 .para-subnav { flex: 0 0 160px; display: flex; flex-direction: column; gap: 4px;
   position: sticky; top: 110px; }
@@ -93,13 +122,16 @@ main { max-width: 860px; margin: 0 auto; padding: 20px 24px 60px; }
 .para-names label { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
 .para-names input { flex: 1; }
 .para-inbox { display: flex; flex-direction: column; gap: 8px; }
-.para-row { display: flex; align-items: center; gap: 8px; padding: 8px; background: var(--card2);
+.para-row { display: flex; flex-direction: column; gap: 8px; padding: 8px; background: var(--card2);
   border: 1px solid var(--line); border-radius: 8px; }
 .para-row.filed { opacity: .55; border-color: var(--accent); }
 .para-row.filed .para-note { text-decoration: line-through; }
+/* top tier: full-width note name; bottom tier: category/project/action controls */
+.para-row-top { display: flex; align-items: center; gap: 8px; }
+.para-row-controls { display: flex; align-items: center; gap: 8px; }
 .para-note { flex: 1; min-width: 0; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.para-cat { flex: 0 0 130px; }
-.para-proj { flex: 0 0 180px; }
+.para-cat { flex: 0 0 160px; }
+.para-proj { flex: 0 0 220px; }
 .rail-date { font-size: 11px; color: var(--muted); }
 .rail-item.active .rail-date { color: #cdd9ee; }
 .rail-badge { font-size: 11px; }
@@ -250,7 +282,44 @@ body.processing .history-row button { opacity: .4; pointer-events: none; }
 .rec-row { display: flex; align-items: center; gap: 16px; margin-top: 14px; }
 .timer { font-variant-numeric: tabular-nums; font-size: 22px; color: var(--muted); }
 .timer.live { color: var(--rec); }
-#processLatestBtn { margin-top: 14px; }
+
+/* Запись: two-column layout at ≥1100px (source+prompt cards left, live progress/
+   result right) with a sticky action bar pinned to the bottom of the left column.
+   Below 1100px, .record-layout/.record-col-left/.record-col-right are plain unstyled
+   block wrappers — no columns, no sticky — so the CARD-level flow (Источник → Промпт
+   → action bar → Прогресс → Результат) reads exactly as it did before this feature.
+   The action bar's own grouping (co-locating #processLatestBtn/.run-row/#timer into one
+   row) is NOT width-gated — it applies at every width; only the 2-column split and the
+   sticky pinning are ≥1100px-only. #processLatestBtn and .run-row (import mode) are
+   co-located here rather than unified into one button — see design-layout commit history
+   for why (unifying would require changing which flow shows a stop/spinner, a behaviour
+   change, not just a placement one). */
+.record-action-bar {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line);
+}
+/* .run-row's generic rule (used standalone elsewhere — PARA's "Разобрать все"/"Спросить"
+   rows) centers itself with a 20px bottom margin, meant for sitting alone between cards;
+   nested here as one flex item among others it would sit visually offset from
+   #processLatestBtn/#timer. Neutralized only in this context. */
+.record-action-bar .run-row { margin: 0; justify-content: flex-start; }
+@media (min-width: 1100px) {
+  main:has(> #view-record:not(.hidden)) { max-width: 1200px; }
+  .record-layout { display: flex; gap: 20px; align-items: flex-start; }
+  /* align-self: stretch (against the row's own default flex-start) + display:flex column
+     is what actually makes the sticky bar work: with flex-start, .record-col-left's height
+     is only its own content (source+prompt cards+bar) — shorter than the taller
+     .record-col-right (progress/result) — so the sticky bar never has any distance to
+     travel while the page scrolls and just sits inert where it would anyway. Stretched to
+     match .record-col-right's height, plus margin-top:auto pushing the bar to the bottom
+     of that now-tall column, gives it real scroll distance to pin against. */
+  .record-col-left {
+    flex: 0 0 420px; min-width: 0;
+    align-self: stretch; display: flex; flex-direction: column;
+  }
+  .record-col-right { flex: 1; min-width: 0; }
+  .record-action-bar { position: sticky; bottom: 0; background: var(--bg); margin-top: auto; z-index: 3; }
+}
 
 /* glossary: chip list */
 .glossary-toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
