@@ -1550,9 +1550,10 @@ function setSysStatus(text, kind) {
   el.className = "sys-status" + (kind ? " " + kind : "");
 }
 
-// Topnav badge — the only DOM region visible across all tabs (switchView()
-// only hides #view-*, not the sibling <nav>), so this is where a recording
-// stays visible even while the user is on История/PARA/Словарь.
+// Sidebar rec-status block — the only DOM region visible across all tabs
+// (switchView() only hides #view-*, not the sibling <aside id="sidebar">), so
+// this is where a recording stays visible even while the user is on
+// История/PARA/Словарь.
 function setRecIndicator(on) {
   $("recIndicator").classList.toggle("hidden", !on);
 }
@@ -1573,7 +1574,7 @@ async function toggleRecording() {
     state.recording = true;
     window.api.notifyRecordingState(true); // syncs the tray menu label + REC title
     setRecIndicator(true);
-    $("timer").textContent = "00:00";
+    document.querySelectorAll(".timer").forEach((el) => el.textContent = "00:00"); // #timer + sidebar #sidebarTimer
     $("vuMic").style.width = "0%";
     $("vuSys").style.width = "0%";
     $("recBtn").textContent = "■ Остановить";
@@ -1624,7 +1625,7 @@ window.api.onRecordEvent((ev) => {
     const bar = ev.source === "mic" ? $("vuMic") : $("vuSys");
     if (bar) bar.style.width = Math.round(ev.level * 100) + "%";
   } else if (ev.event === "elapsed") {
-    $("timer").textContent = fmtTime(ev.seconds);
+    document.querySelectorAll(".timer").forEach((el) => el.textContent = fmtTime(ev.seconds)); // #timer + sidebar #sidebarTimer
   } else if (ev.event === "log") {
     appendLog(ev.msg);
   } else if (ev.event === "system-audio-started") {
@@ -1950,9 +1951,15 @@ window.api.onProcessEvent((ev) => {
 });
 
 // ── top-level view switching ─────────────────────────────────────────────────
+// Per-view slim content-header title; the "локально · MLX Whisper · pyannote ·
+// LM Studio" subtitle (#contentTag) only makes sense on Запись — every other
+// view hides it.
+const VIEW_TITLES = { record: "Запись", history: "История", para: "PARA", glossary: "Словарь", prompts: "Промпты" };
 function switchView(v) {
   document.querySelectorAll(".topbtn").forEach((b) => b.classList.toggle("active", b.dataset.view === v));
   ["record", "history", "para", "glossary", "prompts"].forEach((id) => $("view-" + id).classList.toggle("hidden", id !== v));
+  $("contentTitle").textContent = VIEW_TITLES[v] || "";
+  $("contentTag").classList.toggle("hidden", v !== "record");
   if (v === "history") refreshHistory();
   if (v === "para") renderPara();
 }
