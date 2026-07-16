@@ -288,6 +288,9 @@ test("isNoteDeletable: non-string notePath is refused", () => {
   assert.equal(isNoteDeletable(null, "/out/meeting.md", ["/out"]), false);
   assert.equal(isNoteDeletable(undefined, "/out/meeting.md", ["/out"]), false);
 });
+test("isNoteDeletable: notePath ends in .md but resolves to a non-.md target (symlink case) is refused", () => {
+  assert.equal(isNoteDeletable("/out/x.md", "/out/config.json", ["/out"]), false);
+});
 
 // ── out-dir auto-follow (settings "Куда сохранять", Variant A) ──────────────
 test("resolveOutDirOnVaultChange: custom=false follows the vault's Meetings subfolder", () => {
