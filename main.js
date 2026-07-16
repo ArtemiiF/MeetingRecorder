@@ -12,7 +12,7 @@ const readline = require("readline");
 const {
   WavWriter, rmsLevel, cacheKey, pairHistory,
   encodeTokenBlob, decodeTokenBlob, isStale,
-  rewriteNoteSpeakers, isOutsideRoot, indexRunReducer, upsertById, diskGuardVerdict,
+  rewriteNoteSpeakers, isOutsideRoot, isNoteDeletable, indexRunReducer, upsertById, diskGuardVerdict,
   resolveOutDirOnVaultChange, trayMenuTemplate,
   resolvePythonBin, resolveFfmpegBin, resolveResourcePath, resolveAudioTeeBin, resolveAssetPath, backendInstallStatus,
   parseFfmpegVersion,
@@ -1694,6 +1694,35 @@ ipcMain.handle("rename-speakers", async (_e, { notePath, map }) => {
 
 ipcMain.handle("read-note", async (_e, notePath) => {
   try { return fs.readFileSync(notePath, "utf-8"); } catch { return null; }
+});
+
+// Delete ONE История note (single .md version file) from disk. The audio (.wav)
+// is never touched — it stays so the recording can be reprocessed later. No
+// separate index/db mutation is needed: cmd_history's reconcile (backend.py)
+// drops any row whose file has vanished on the next scan, so deleting the file
+// is the whole mutation.
+// Guarded the same way process-audio/redownload-model/download-and-install-update
+// are ("Дождитесь окончания обработки") — a reprocess run may be about to write a
+// new version of the same recording, so no note deletion is allowed to race it.
+// Validated via isNoteDeletable (lib/mainutil.js): must end in .md and resolve
+// (symlinks followed via fs.realpathSync) inside out_dir or the PARA vault root —
+// same out_dir/vault duality triggerAutoIndex already handles — so this can never
+// be pointed at an arbitrary path.
+ipcMain.handle("delete-history-note", async (_e, notePath) => {
+  if (procProc) return { ok: false, error: "Дождитесь окончания обработки" };
+  const presetsData = loadPresetsData();
+  const roots = [presetsData.defaultOutDir || DEFAULT_OUT, readParaRoot()].filter(Boolean);
+  let resolved = null;
+  try { resolved = fs.realpathSync(notePath); } catch { resolved = null; }
+  if (!isNoteDeletable(notePath, resolved, roots)) {
+    return { ok: false, error: "Заметка не найдена или находится вне рабочей папки" };
+  }
+  try {
+    fs.unlinkSync(resolved);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: String((e && e.message) || e) };
+  }
 });
 
 // ── PARA ───────────────────────────────────────────────────────────────────
