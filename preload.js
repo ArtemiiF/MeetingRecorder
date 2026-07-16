@@ -34,6 +34,7 @@ contextBridge.exposeInMainWorld("api", {
   renameSpeakers: (notePath, map) => ipcRenderer.invoke("rename-speakers", { notePath, map }),
   listHistory: (outDir) => ipcRenderer.invoke("list-history", outDir),
   readNote: (notePath) => ipcRenderer.invoke("read-note", notePath),
+  deleteHistoryNote: (notePath) => ipcRenderer.invoke("delete-history-note", notePath),
   paraCreateVault: (cfg) => ipcRenderer.invoke("para-create-vault", cfg),
   paraTree: (root) => ipcRenderer.invoke("para-tree", root),
   // arg is either a bare note path (legacy) or { note, root, folders, mainModel } — passed
