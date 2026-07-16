@@ -1,14 +1,51 @@
 * { box-sizing: border-box; margin: 0; padding: 0; }
 :root {
   color-scheme: dark;
+  /* CLASSIC — the default theme (no data-theme attribute). Neutral+accent+selection
+     tokens below are overridden per-theme further down; semantic tokens (--rec/
+     --rec-fill/--ok/--warn/--danger/--danger-fill/--inactive/--overlay/tints) stay
+     global — recording/status colors mean the same thing in every theme. */
   --bg: #111418; --card: #1a1f26; --card2: #232a33;
   --fg: #e6e9ed; --muted: #8a93a0; --line: #2c343f;
   --accent: #4c8bf5; --danger: #e5484d; --ok: #3fb950;
-  --accent-fill: #3a6fd0; --accent-fill-hover: #3160b8; --danger-fill: #d3363b;
+  --accent-fill: #3a6fd0; --accent-fill-hover: #3160b8; --accent-fill-text: #fff;
+  --danger-fill: #d3363b;
   --warn: #f5a623; --pre-bg: #0c0f13; --overlay: rgba(0,0,0,.55);
   --ok-tint: rgba(63,185,80,.1); --danger-tint: rgba(229,72,77,.1);
   --rec: #f06a3c; --rec-fill: #c94318; --selection: #2b4a86;
+  --selection-text: #fff; --selection-muted: #cdd9ee;
   --inactive: #6b7480; --sidebar: #161b22;
+}
+
+/* Theme overrides — neutral+accent+selection tokens only (see comment above).
+   --accent-fill-hover: OKLCH L reduced ~8% from --accent-fill (classic's own
+   fill→hover pair is a ~9.4% L reduction, so 8% keeps parity); verified in the
+   commit report that contrast(hover, accent-fill-text) stays ≥4.5:1 for all three.
+   --sidebar: OKLCH midpoint (t=0.5) between --bg and --card, same method used to
+   describe (not re-derive) classic's own pre-existing --sidebar. */
+[data-theme="pervanche"] {
+  --bg: #15141A; --card: #1C1B23; --card2: #24222C;
+  --fg: #E9E7F0; --muted: #9A95A8; --line: #363341;
+  --accent: #C3B8F7; --accent-fill: #AB9FF2; --accent-fill-hover: #998cde;
+  --accent-fill-text: #171233;
+  --selection: #2D2650; --selection-text: #C3B8F7; --selection-muted: #9A95A8;
+  --pre-bg: #0F0E13; --sidebar: #18171e;
+}
+[data-theme="teal"] {
+  --bg: #121517; --card: #191D20; --card2: #212629;
+  --fg: #E5EAEC; --muted: #8FA0A7; --line: #333D42;
+  --accent: #7FD4E6; --accent-fill: #62C3D6; --accent-fill-hover: #4dafc2;
+  --accent-fill-text: #06232B;
+  --selection: #163541; --selection-text: #7FD4E6; --selection-muted: #8FA0A7;
+  --pre-bg: #0C0F11; --sidebar: #15191b;
+}
+[data-theme="orchid"] {
+  --bg: #171316; --card: #1E191D; --card2: #272025;
+  --fg: #EDE6EA; --muted: #A2929C; --line: #3C313A;
+  --accent: #F3AECB; --accent-fill: #EF9CC0; --accent-fill-hover: #da89ac;
+  --accent-fill-text: #33081D;
+  --selection: #3D2032; --selection-text: #F3AECB; --selection-muted: #A2929C;
+  --pre-bg: #100C0F; --sidebar: #1a1619;
 }
 html, body { height: 100%; }
 body {
@@ -56,7 +93,7 @@ main:has(> #view-prompts:not(.hidden)) { max-width: 1200px; }
   padding: 10px 12px; cursor: pointer; font-size: 14px; font-family: inherit;
 }
 .topbtn:hover { background: var(--card2); }
-.topbtn.active { background: var(--selection); color: #fff; }
+.topbtn.active { background: var(--selection); color: var(--selection-text); }
 .rec-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
   background: var(--rec); animation: pulse 1s ease-in-out infinite; }
 /* recording status block, pinned to the bottom of the sidebar via margin-top:auto
@@ -93,7 +130,7 @@ main:has(> #view-prompts:not(.hidden)) { max-width: 1200px; }
   cursor: pointer; color: var(--fg); font-family: inherit;
 }
 .rail-item:hover { background: var(--card2); }
-.rail-item.active { background: var(--selection); color: #fff; }
+.rail-item.active { background: var(--selection); color: var(--selection-text); }
 .rail-title { font-size: 13px; font-weight: 500;
   display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
   overflow: hidden; text-overflow: ellipsis; }
@@ -109,7 +146,11 @@ main:has(> #view-prompts:not(.hidden)) { max-width: 1200px; }
 .filters-badge {
   display: inline-flex; align-items: center; justify-content: center;
   min-width: 16px; height: 16px; padding: 0 4px; border-radius: 999px;
-  background: var(--accent-fill); color: #fff; font-size: 10px; font-weight: 600;
+  /* not in the coordinator's literal list, but the same accent-fill+#fff pairing as
+     .btn.primary/.stage.active below — the 3 new themes' accent-fill is a light
+     pastel, so hardcoded white here would be near-invisible; fixed for consistency,
+     flagged in the commit report. */
+  background: var(--accent-fill); color: var(--accent-fill-text); font-size: 10px; font-weight: 600;
 }
 .rail-dates { display: flex; gap: 6px; }
 .rail-dates input { flex: 1; min-width: 0; }
@@ -129,7 +170,7 @@ main:has(> #view-prompts:not(.hidden)) { max-width: 1200px; }
 .subbtn { text-align: left; background: transparent; color: var(--muted); border: none;
   border-radius: 8px; padding: 8px 12px; cursor: pointer; font-size: 13px; font-family: inherit; }
 .subbtn:hover:not(:disabled) { background: var(--card2); color: var(--fg); }
-.subbtn.active { background: var(--selection); color: #fff; }
+.subbtn.active { background: var(--selection); color: var(--selection-text); }
 .subbtn:disabled { opacity: .4; cursor: default; }
 .para-main { flex: 1; min-width: 0; }
 .para-tree-split { display: flex; gap: 16px; align-items: flex-start; }
@@ -164,7 +205,7 @@ main:has(> #view-prompts:not(.hidden)) { max-width: 1200px; }
 .para-cat { flex: 0 0 160px; }
 .para-proj { flex: 0 0 220px; }
 .rail-date { font-size: 11px; color: var(--muted); }
-.rail-item.active .rail-date { color: #cdd9ee; }
+.rail-item.active .rail-date { color: var(--selection-muted); }
 .rail-badge { font-size: 11px; }
 /* date-group divider ("8 июля · 5") — non-interactive, no hover/active state; separates
    История into day buckets so the calendar isn't needed to see "how much happened when". */
@@ -242,7 +283,7 @@ select:focus, input:focus, textarea:focus { outline: none; border-color: var(--a
   font-family: inherit; transition: background .12s, border-color .12s;
 }
 .btn:hover { border-color: var(--accent); }
-.btn.primary { background: var(--accent-fill); border-color: var(--accent-fill); color: #fff; }
+.btn.primary { background: var(--accent-fill); border-color: var(--accent-fill); color: var(--accent-fill-text); }
 .btn.primary:hover { background: var(--accent-fill-hover); border-color: var(--accent-fill-hover); }
 .btn.primary:disabled { opacity: .4; cursor: not-allowed; }
 .btn:disabled { opacity: .4; cursor: not-allowed; }
@@ -436,7 +477,7 @@ body.processing .queue-item button { opacity: .4; pointer-events: none; }
   user-select: none; transition: transform .08s;
 }
 .stage:hover { transform: translateY(-1px); }
-.stage.active { color: #fff; border-color: var(--accent); background: var(--accent-fill);
+.stage.active { color: var(--accent-fill-text); border-color: var(--accent); background: var(--accent-fill);
   animation: pulse 1s ease-in-out infinite; }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .5; } }
 .spinner {
@@ -482,7 +523,7 @@ pre {
 }
 .chat-bubble-user {
   align-self: flex-end;
-  background: var(--selection); color: #fff;
+  background: var(--selection); color: var(--selection-text);
   border-bottom-right-radius: 4px;
 }
 .chat-bubble-assistant {
@@ -498,7 +539,7 @@ pre {
 }
 .chat-cites li { font-size: 12px; color: var(--muted); }
 .chat-degraded { margin-top: 8px; font-size: 12px; color: var(--warn); }
-.chat-canceled-tag { margin-top: 6px; font-size: 12px; color: rgba(255, 255, 255, 0.75); }
+.chat-canceled-tag { margin-top: 6px; font-size: 12px; color: var(--selection-muted); }
 .chat-copy-row { margin-top: 6px; text-align: right; }
 .chat-copy-btn {
   background: transparent; border: none; color: var(--muted);
