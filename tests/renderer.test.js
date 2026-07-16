@@ -1631,6 +1631,48 @@ test("changing authorName input persists with authorName in savePresets payload"
   assert.equal(saved.authorName, "Наталья");
 });
 
+// ── theme setting (design-sidebar B-2) ──────────────────────────────────────────
+
+test("theme loads from presets into the settings select and applies data-theme on the document root", async () => {
+  const { $, window } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru", theme: "teal",
+    }),
+  });
+  await tick(window);
+  assert.equal($("themeSelect").value, "teal");
+  assert.equal(window.document.documentElement.dataset.theme, "teal");
+});
+
+test("theme defaults to 'classic' when absent from presets, and data-theme is not set on the document root", async () => {
+  const { $, window } = await boot({
+    getPresets: async () => ({ presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru" }),
+  });
+  await tick(window);
+  assert.equal($("themeSelect").value, "classic");
+  assert.equal(window.document.documentElement.hasAttribute("data-theme"), false);
+});
+
+test("changing the theme select applies data-theme immediately and persists it in savePresets payload", async () => {
+  let saved = null;
+  const { $, window } = await boot({ savePresets: async (data) => { saved = data; return true; } });
+  await tick(window);
+  $("themeSelect").value = "orchid";
+  $("themeSelect").dispatchEvent(new window.Event("change"));
+  await tick(window);
+  assert.equal(window.document.documentElement.dataset.theme, "orchid", "applies immediately, not just on next boot");
+  assert.ok(saved, "savePresets was not called");
+  assert.equal(saved.theme, "orchid");
+
+  // switching back to classic must remove the attribute entirely, not set it to "" —
+  // see applyTheme()'s comment in renderer.js for why that distinction matters.
+  $("themeSelect").value = "classic";
+  $("themeSelect").dispatchEvent(new window.Event("change"));
+  await tick(window);
+  assert.equal(window.document.documentElement.hasAttribute("data-theme"), false);
+  assert.equal(saved.theme, "classic");
+});
+
 // ── fastModel setting ──────────────────────────────────────────────────────────
 
 test("fastModel loads from presets into state and the settings input", async () => {
@@ -3912,7 +3954,7 @@ test("recording is allowed while a batch import is running (0a79d98 gate reverte
   assert.equal($("recBtn").disabled, false, "recBtn stays enabled through the rest of the batch too");
 });
 
-// ── recording indicator (topnav badge, visible from any tab) ────────────────
+// ── recording indicator (sidebar rec-status block, visible from any tab) ────
 test("recording indicator appears on start, disappears on stop, and survives tab switches", async () => {
   const { window, $ } = await boot();
   assert.ok($("recIndicator").classList.contains("hidden"));
@@ -3936,6 +3978,37 @@ test("recording indicator turns off on the mic-error path too", async () => {
   handlers.record({ event: "error", msg: "mic disconnected" });
   await tick(window);
   assert.ok($("recIndicator").classList.contains("hidden"));
+});
+
+// Design-sidebar (PR-1): #recIndicator is no longer a tiny dot inside the old
+// topnav "🎙 Запись" button — it's the whole sidebar rec-status block (dot +
+// label + its own timer readout), pinned to #sidebar so it stays put while the
+// content column switches views.
+test("sidebar rec-status block: lives in #sidebar, fully hidden when idle, shows dot+label+timer while recording", async () => {
+  const { window, $, handlers } = await boot();
+  const block = $("recIndicator");
+  assert.equal(block.closest("#sidebar"), $("sidebar"), "the rec-status block must be inside #sidebar, not the content column");
+  assert.ok(block.classList.contains("hidden"), "hidden entirely when not recording");
+  assert.ok(block.querySelector(".rec-dot"), "pulsing dot present");
+  assert.equal(block.querySelector(".sidebar-rec-label").textContent, "Идёт запись");
+
+  $("recBtn").click(); await tick(window); // start recording
+  assert.ok(!block.classList.contains("hidden"));
+  assert.equal($("sidebarTimer").textContent, "00:00");
+
+  handlers.record({ event: "elapsed", seconds: 65 });
+  await tick(window);
+  // both readouts (action-bar #timer and sidebar #sidebarTimer) must move together —
+  // they share the .timer class broadcast in renderer.js's onRecordEvent handler.
+  assert.equal($("sidebarTimer").textContent, "01:05");
+  assert.equal($("timer").textContent, "01:05");
+
+  window.document.querySelector('.topbtn[data-view="para"]').click(); await tick(window);
+  assert.ok(!block.classList.contains("hidden"), "stays visible across a view switch");
+
+  window.document.querySelector('.topbtn[data-view="record"]').click(); await tick(window);
+  $("recBtn").click(); await tick(window); // stop
+  assert.ok(block.classList.contains("hidden"));
 });
 
 // ── tray record-state sync (menu-bar icon, all 3 state.recording sites) ─────

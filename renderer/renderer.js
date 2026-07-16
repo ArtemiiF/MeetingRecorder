@@ -26,6 +26,7 @@ const state = {
   outDirCustom: false, // true once the user explicitly picked outDir — breaks vault auto-follow
   hfToken: "",
   language: "ru",
+  theme: "classic",    // 'classic'|'pervanche'|'teal'|'orchid' — see applyTheme()
   authorName: "Автор",
   fastModel: "",
   mainModel: "",
@@ -678,6 +679,7 @@ async function init() {
   // "auto" was removed from the #language <select> options (no matching <option> left
   // to select) but old presets/settings files may still carry it — coerce to the default.
   state.language = (data.language === "auto" ? "" : data.language) || "ru";
+  state.theme = data.theme || "classic";
   state.authorName = data.authorName || "Автор";
   state.fastModel = data.fastModel || "";
   state.mainModel = data.mainModel || "";
@@ -691,6 +693,8 @@ async function init() {
   $("outDir").value = state.outDir;
   $("hfToken").value = state.hfToken;
   $("language").value = state.language;
+  $("themeSelect").value = state.theme;
+  applyTheme();
   $("authorName").value = state.authorName;
   $("fastModel").value = state.fastModel;
   $("mainModel").value = state.mainModel;
@@ -789,6 +793,15 @@ $("promptsDelBtn").addEventListener("click", async () => {
   else { state.currentPreset = -1; $("promptsName").value = ""; $("promptsPrompt").value = ""; }
   await persistPresets();
 });
+// Applies state.theme to the document root: [data-theme] drives the theme override
+// blocks in style.css; classic has no override block, so the attribute is removed
+// entirely rather than set to an empty string (matters for [data-theme="classic"]-
+// style selectors never existing, and keeps the DOM clean for the default theme).
+function applyTheme() {
+  if (state.theme === "classic") delete document.documentElement.dataset.theme;
+  else document.documentElement.dataset.theme = state.theme;
+}
+
 async function persistPresets() {
   await window.api.savePresets({
     presets: state.presets,
@@ -796,6 +809,7 @@ async function persistPresets() {
     outDirCustom: state.outDirCustom,
     hfToken: state.hfToken,
     language: state.language,
+    theme: state.theme,
     authorName: state.authorName,
     fastModel: state.fastModel,
     mainModel: state.mainModel,
@@ -810,6 +824,12 @@ async function persistPresets() {
 
 $("language").addEventListener("change", (e) => {
   state.language = e.target.value;
+  persistPresets();
+});
+
+$("themeSelect").addEventListener("change", (e) => {
+  state.theme = e.target.value;
+  applyTheme();
   persistPresets();
 });
 
@@ -1550,9 +1570,10 @@ function setSysStatus(text, kind) {
   el.className = "sys-status" + (kind ? " " + kind : "");
 }
 
-// Topnav badge — the only DOM region visible across all tabs (switchView()
-// only hides #view-*, not the sibling <nav>), so this is where a recording
-// stays visible even while the user is on История/PARA/Словарь.
+// Sidebar rec-status block — the only DOM region visible across all tabs
+// (switchView() only hides #view-*, not the sibling <aside id="sidebar">), so
+// this is where a recording stays visible even while the user is on
+// История/PARA/Словарь.
 function setRecIndicator(on) {
   $("recIndicator").classList.toggle("hidden", !on);
 }
@@ -1573,7 +1594,7 @@ async function toggleRecording() {
     state.recording = true;
     window.api.notifyRecordingState(true); // syncs the tray menu label + REC title
     setRecIndicator(true);
-    $("timer").textContent = "00:00";
+    document.querySelectorAll(".timer").forEach((el) => el.textContent = "00:00"); // #timer + sidebar #sidebarTimer
     $("vuMic").style.width = "0%";
     $("vuSys").style.width = "0%";
     $("recBtn").textContent = "■ Остановить";
@@ -1624,7 +1645,7 @@ window.api.onRecordEvent((ev) => {
     const bar = ev.source === "mic" ? $("vuMic") : $("vuSys");
     if (bar) bar.style.width = Math.round(ev.level * 100) + "%";
   } else if (ev.event === "elapsed") {
-    $("timer").textContent = fmtTime(ev.seconds);
+    document.querySelectorAll(".timer").forEach((el) => el.textContent = fmtTime(ev.seconds)); // #timer + sidebar #sidebarTimer
   } else if (ev.event === "log") {
     appendLog(ev.msg);
   } else if (ev.event === "system-audio-started") {
@@ -1950,9 +1971,15 @@ window.api.onProcessEvent((ev) => {
 });
 
 // ── top-level view switching ─────────────────────────────────────────────────
+// Per-view slim content-header title; the "локально · MLX Whisper · pyannote ·
+// LM Studio" subtitle (#contentTag) only makes sense on Запись — every other
+// view hides it.
+const VIEW_TITLES = { record: "Запись", history: "История", para: "PARA", glossary: "Словарь", prompts: "Промпты" };
 function switchView(v) {
   document.querySelectorAll(".topbtn").forEach((b) => b.classList.toggle("active", b.dataset.view === v));
   ["record", "history", "para", "glossary", "prompts"].forEach((id) => $("view-" + id).classList.toggle("hidden", id !== v));
+  $("contentTitle").textContent = VIEW_TITLES[v] || "";
+  $("contentTag").classList.toggle("hidden", v !== "record");
   if (v === "history") refreshHistory();
   if (v === "para") renderPara();
 }

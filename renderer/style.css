@@ -1,27 +1,164 @@
 * { box-sizing: border-box; margin: 0; padding: 0; }
 :root {
   color-scheme: dark;
+  /* CLASSIC — the default theme (no data-theme attribute). Neutral+accent+selection
+     tokens below are overridden per-theme further down; semantic tokens (--rec/
+     --rec-fill/--ok/--warn/--danger/--danger-fill/--inactive/--overlay/tints) stay
+     global — recording/status colors mean the same thing in every theme. */
   --bg: #111418; --card: #1a1f26; --card2: #232a33;
   --fg: #e6e9ed; --muted: #8a93a0; --line: #2c343f;
   --accent: #4c8bf5; --danger: #e5484d; --ok: #3fb950;
-  --accent-fill: #3a6fd0; --accent-fill-hover: #3160b8; --danger-fill: #d3363b;
+  --accent-fill: #3a6fd0; --accent-fill-hover: #3160b8; --accent-fill-text: #fff;
+  --danger-fill: #d3363b;
   --warn: #f5a623; --pre-bg: #0c0f13; --overlay: rgba(0,0,0,.55);
   --ok-tint: rgba(63,185,80,.1); --danger-tint: rgba(229,72,77,.1);
   --rec: #f06a3c; --rec-fill: #c94318; --selection: #2b4a86;
-  --inactive: #6b7480;
+  --selection-text: #fff; --selection-muted: #cdd9ee;
+  --inactive: #6b7480; --sidebar: #161b22;
+  /* typography — same in every theme, not part of the theme override blocks below */
+  --font-heading: 'Unbounded', -apple-system, "SF Pro Text", system-ui, sans-serif;
+  --font-body: 'Onest', -apple-system, "SF Pro Text", system-ui, sans-serif;
+  /* decorative (A-1): --grad-card/--grad-primary/--shadow-primary/--act-glow depend
+     on --card/--accent-fill/--accent, so they're re-declared per theme below (OKLCH-
+     derived, see the commit report for the exact numbers). --shadow-card/
+     --shadow-inset/--shadow-btn/--rec-glow use fixed black/white overlay alphas (or
+     the global --rec) and are theme-agnostic — declared once, here only. */
+  --shadow-card: inset 0 1px 0 rgba(255,255,255,.045), 0 2px 6px rgba(0,0,0,.35), 0 12px 30px rgba(0,0,0,.28);
+  --shadow-inset: inset 0 1px 3px rgba(0,0,0,.4);
+  --shadow-btn: inset 0 1px 0 rgba(255,255,255,.06), 0 1px 3px rgba(0,0,0,.3);
+  --rec-glow: 0 0 10px 2px rgba(240,106,60,.5);
+  --grad-card: linear-gradient(180deg, #1f242b 0%, #171b22 100%);
+  --grad-primary: linear-gradient(180deg, #4378da 0%, #3166c6 100%);
+  --shadow-primary: 0 4px 16px 0 rgba(58,111,208,.4);
+  --act-glow: 0 0 12px rgba(76,139,245,.35);
 }
+
+/* Vendored locally (offline app, no network font loading) — Unbounded + Onest,
+   OFL-licensed (see renderer/fonts/OFL-Unbounded.txt / OFL-Onest.txt). Cyrillic+
+   latin subsets only — matches the app's RU/EN-only UI, skips latin-ext/
+   cyrillic-ext/vietnamese. Both families are variable fonts; Google's own CSS2 API
+   serves ONE physical file per subset covering the whole weight axis rather than a
+   separate static file per weight, so these discrete-weight @font-face blocks
+   intentionally share a src per subset — this mirrors the CSS Google's own
+   fonts.googleapis.com/css2 endpoint would have produced for a modern browser, just
+   self-hosted. See the B-3 commit report for the exact vendored gstatic.com URLs. */
+@font-face {
+  font-family: 'Onest'; font-style: normal; font-weight: 400; font-display: swap;
+  src: url('fonts/onest-cyrillic.woff2') format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+@font-face {
+  font-family: 'Onest'; font-style: normal; font-weight: 500; font-display: swap;
+  src: url('fonts/onest-cyrillic.woff2') format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+@font-face {
+  font-family: 'Onest'; font-style: normal; font-weight: 600; font-display: swap;
+  src: url('fonts/onest-cyrillic.woff2') format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+@font-face {
+  font-family: 'Onest'; font-style: normal; font-weight: 400; font-display: swap;
+  src: url('fonts/onest-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Onest'; font-style: normal; font-weight: 500; font-display: swap;
+  src: url('fonts/onest-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Onest'; font-style: normal; font-weight: 600; font-display: swap;
+  src: url('fonts/onest-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Unbounded'; font-style: normal; font-weight: 400; font-display: swap;
+  src: url('fonts/unbounded-cyrillic.woff2') format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+@font-face {
+  font-family: 'Unbounded'; font-style: normal; font-weight: 500; font-display: swap;
+  src: url('fonts/unbounded-cyrillic.woff2') format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+@font-face {
+  font-family: 'Unbounded'; font-style: normal; font-weight: 600; font-display: swap;
+  src: url('fonts/unbounded-cyrillic.woff2') format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+@font-face {
+  font-family: 'Unbounded'; font-style: normal; font-weight: 400; font-display: swap;
+  src: url('fonts/unbounded-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Unbounded'; font-style: normal; font-weight: 500; font-display: swap;
+  src: url('fonts/unbounded-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Unbounded'; font-style: normal; font-weight: 600; font-display: swap;
+  src: url('fonts/unbounded-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+/* Theme overrides — neutral+accent+selection tokens only (see comment above).
+   --accent-fill-hover: OKLCH L reduced ~8% from --accent-fill (classic's own
+   fill→hover pair is a ~9.4% L reduction, so 8% keeps parity); verified in the
+   commit report that contrast(hover, accent-fill-text) stays ≥4.5:1 for all three.
+   --sidebar: OKLCH midpoint (t=0.5) between --bg and --card, same method used to
+   describe (not re-derive) classic's own pre-existing --sidebar. */
+[data-theme="pervanche"] {
+  --bg: #15141A; --card: #1C1B23; --card2: #24222C;
+  --fg: #E9E7F0; --muted: #9A95A8; --line: #363341;
+  --accent: #C3B8F7; --accent-fill: #AB9FF2; --accent-fill-hover: #998cde;
+  --accent-fill-text: #171233;
+  --selection: #2D2650; --selection-text: #C3B8F7; --selection-muted: #9A95A8;
+  --pre-bg: #0F0E13; --sidebar: #18171e;
+  /* decorative (A-1), OKLCH-derived from this theme's own --card/--accent-fill/--accent —
+     see the commit report for the exact deltas and the muted-on-card contrast check. */
+  --grad-card: linear-gradient(180deg, #212028 0%, #19181f 100%);
+  --grad-primary: linear-gradient(180deg, #b4a8fc 0%, #a296e8 100%);
+  --shadow-primary: 0 4px 16px 0 rgba(171,159,242,.4);
+  --act-glow: 0 0 12px rgba(195,184,247,.35);
+}
+[data-theme="teal"] {
+  --bg: #121517; --card: #191D20; --card2: #212629;
+  --fg: #E5EAEC; --muted: #8FA0A7; --line: #333D42;
+  --accent: #7FD4E6; --accent-fill: #62C3D6; --accent-fill-hover: #4dafc2;
+  --accent-fill-text: #06232B;
+  --selection: #163541; --selection-text: #7FD4E6; --selection-muted: #8FA0A7;
+  --pre-bg: #0C0F11; --sidebar: #15191b;
+  --grad-card: linear-gradient(180deg, #1e2225 0%, #161a1c 100%);
+  --grad-primary: linear-gradient(180deg, #6ccde0 0%, #58b9cc 100%);
+  --shadow-primary: 0 4px 16px 0 rgba(98,195,214,.4);
+  --act-glow: 0 0 12px rgba(127,212,230,.35);
+}
+[data-theme="orchid"] {
+  --bg: #171316; --card: #1E191D; --card2: #272025;
+  --fg: #EDE6EA; --muted: #A2929C; --line: #3C313A;
+  --accent: #F3AECB; --accent-fill: #EF9CC0; --accent-fill-hover: #da89ac;
+  --accent-fill-text: #33081D;
+  --selection: #3D2032; --selection-text: #F3AECB; --selection-muted: #A2929C;
+  --pre-bg: #100C0F; --sidebar: #1a1619;
+  --grad-card: linear-gradient(180deg, #231e22 0%, #1b161a 100%);
+  --grad-primary: linear-gradient(180deg, #f9a5ca 0%, #e593b6 100%);
+  --shadow-primary: 0 4px 16px 0 rgba(239,156,192,.4);
+  --act-glow: 0 0 12px rgba(243,174,203,.35);
+}
+html, body { height: 100%; }
 body {
-  font-family: -apple-system, "SF Pro Text", system-ui, sans-serif;
+  display: flex;
+  font-family: var(--font-body);
   background: var(--bg); color: var(--fg); font-size: 14px; line-height: 1.45;
 }
-header {
-  display: flex; align-items: baseline; gap: 12px;
-  padding: 16px 24px; border-bottom: 1px solid var(--line);
-  position: sticky; top: 0; background: var(--bg); z-index: 5;
-}
-header h1 { font-size: 18px; font-weight: 600; }
 .tag { color: var(--muted); font-size: 12px; }
-main { max-width: 860px; margin: 0 auto; padding: 20px 24px 60px; }
+/* main IS the scrollable content column (flex-row sibling of #sidebar below) —
+   html/body height:100% + body's default align-items:stretch gives it the full
+   viewport height for free, so its own overflow-y:auto scrolls independently of
+   #sidebar, which never scrolls. */
+main { flex: 1; min-width: 0; overflow-y: auto; max-width: 860px; margin: 0 auto; padding: 20px 24px 60px; }
 /* wide two-panel views (rail + content, or subnav + content) get more breathing
    room than the single-column Словарь view (and Запись below 1100px — see the
    record-layout media query further down for its own conditional widening);
@@ -33,26 +170,57 @@ main:has(> #view-para:not(.hidden)),
 main:has(> #view-prompts:not(.hidden)) { max-width: 1200px; }
 .hidden { display: none !important; }
 
-.topnav {
-  display: flex; gap: 4px; padding: 8px 24px 0;
-  border-bottom: 1px solid var(--line); position: sticky; top: 52px;
-  background: var(--bg); z-index: 4;
+/* slim per-view title line at the top of the content column, replacing the old
+   shared <header>; text/tag visibility are set by switchView() in renderer.js. */
+.content-header {
+  display: flex; align-items: baseline; gap: 12px;
+  padding-bottom: 12px; margin-bottom: 16px; border-bottom: 1px solid var(--line);
 }
+/* h1-level: 18->15px/500 per concept B (Unbounded renders wide at the old size/weight) */
+.content-header #contentTitle { font-family: var(--font-heading); font-size: 15px; font-weight: 500; }
+
+/* left sidebar — logo, view nav, recording status, settings gear. Fixed width,
+   never scrolls; stretched to full viewport height by body's flex row. */
+#sidebar {
+  flex: 0 0 196px; display: flex; flex-direction: column;
+  background: var(--sidebar); border-right: 1px solid var(--line);
+  padding: 16px 12px; gap: 4px;
+}
+.sidebar-logo { font-family: var(--font-heading); font-size: 15px; font-weight: 600; padding: 4px 8px 16px; }
+.sidebar-nav { display: flex; flex-direction: column; gap: 2px; }
 .topbtn {
-  background: transparent; color: var(--muted); border: none; border-bottom: 2px solid transparent;
-  padding: 12px 16px; cursor: pointer; font-size: 14px; font-family: inherit;
+  display: block; width: 100%; text-align: left;
+  background: transparent; color: var(--muted); border: none; border-radius: 8px;
+  padding: 10px 12px; cursor: pointer; font-size: 14px; font-family: inherit;
 }
-.topbtn.active { color: var(--fg); border-bottom-color: var(--accent); }
+.topbtn:hover { background: var(--card2); }
+.topbtn.active { background: var(--selection); color: var(--selection-text); }
 .rec-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
-  background: var(--rec); margin-left: 6px; animation: pulse 1s ease-in-out infinite; }
-.rec-dot.hidden { display: none; }
+  background: var(--rec); box-shadow: var(--rec-glow); animation: pulse 1s ease-in-out infinite; }
+/* recording status block, pinned to the bottom of the sidebar via margin-top:auto
+   (pushes itself + the settings button below it down together) — the only DOM
+   region visible from every view, see setRecIndicator() in renderer.js. Hidden
+   entirely (via the shared .hidden rule above) when not recording. */
+.sidebar-rec {
+  margin-top: auto; display: flex; align-items: center; gap: 8px;
+  padding: 10px 12px; border-radius: 8px; background: var(--card2);
+}
+.sidebar-rec-label { font-size: 12px; color: var(--fg); flex: 1; }
+/* .settings-btn's shared margin-left:auto (below) is a cross-axis auto-margin in
+   THIS column-flex context — it would override align-self:center and shove the
+   gear flush against the right edge, so neutralize it only here; #settingsClose
+   in the modal-head row still needs the shared rule as-is. */
+#sidebar .settings-btn { margin-left: 0; margin-top: 8px; align-self: center; }
 
 /* history view: left rail + right note */
 .history-layout { display: flex; gap: 16px; align-items: flex-start; }
 .history-rail {
-  flex: 0 0 280px; max-height: calc(100vh - 160px); overflow-y: auto;
-  background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 8px;
-  position: sticky; top: 110px;
+  /* top/max-height rebased for the sidebar redesign: the old header+topnav chrome
+     (which top:110px / calc(100vh-160px) accounted for) is gone — main now only
+     has its own small padding-top + .content-header above the rail. */
+  flex: 0 0 280px; max-height: calc(100vh - 70px); overflow-y: auto;
+  background: var(--grad-card); box-shadow: var(--shadow-card); border: 1px solid var(--line); border-radius: 12px; padding: 8px;
+  position: sticky; top: 16px;
 }
 .rail-head { display: flex; justify-content: space-between; align-items: center;
   color: var(--muted); font-size: 12px; padding: 4px 6px 8px; }
@@ -63,7 +231,7 @@ main:has(> #view-prompts:not(.hidden)) { max-width: 1200px; }
   cursor: pointer; color: var(--fg); font-family: inherit;
 }
 .rail-item:hover { background: var(--card2); }
-.rail-item.active { background: var(--selection); color: #fff; }
+.rail-item.active { background: var(--selection); color: var(--selection-text); }
 .rail-title { font-size: 13px; font-weight: 500;
   display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
   overflow: hidden; text-overflow: ellipsis; }
@@ -79,11 +247,16 @@ main:has(> #view-prompts:not(.hidden)) { max-width: 1200px; }
 .filters-badge {
   display: inline-flex; align-items: center; justify-content: center;
   min-width: 16px; height: 16px; padding: 0 4px; border-radius: 999px;
-  background: var(--accent-fill); color: #fff; font-size: 10px; font-weight: 600;
+  /* not in the coordinator's literal list, but the same accent-fill+#fff pairing as
+     .btn.primary/.stage.active below — the 3 new themes' accent-fill is a light
+     pastel, so hardcoded white here would be near-invisible; fixed for consistency,
+     flagged in the commit report. */
+  background: var(--accent-fill); color: var(--accent-fill-text); font-size: 10px; font-weight: 600;
 }
 .rail-dates { display: flex; gap: 6px; }
 .rail-dates input { flex: 1; min-width: 0; }
-.note-title { font-size: 20px; margin-bottom: 12px; }
+/* note-title: 20->17px, explicit 500 weight (was inheriting normal/400) per concept B */
+.note-title { font-family: var(--font-heading); font-size: 17px; font-weight: 500; margin-bottom: 12px; }
 /* История empty states: nothing recorded yet (centered, mirrors the record-view CTA), or
    auto-opened most-recent note replacing the old static "Выбери заметку слева" hint. */
 .note-view-empty {
@@ -93,12 +266,13 @@ main:has(> #view-prompts:not(.hidden)) { max-width: 1200px; }
 .note-view-empty-icon { font-size: 40px; }
 .note-view-empty-title { font-size: 16px; font-weight: 600; color: var(--fg); }
 .para-layout { display: flex; gap: 16px; align-items: flex-start; }
+/* top rebased alongside .history-rail above — same reasoning (old chrome gone). */
 .para-subnav { flex: 0 0 160px; display: flex; flex-direction: column; gap: 4px;
-  position: sticky; top: 110px; }
+  position: sticky; top: 16px; }
 .subbtn { text-align: left; background: transparent; color: var(--muted); border: none;
   border-radius: 8px; padding: 8px 12px; cursor: pointer; font-size: 13px; font-family: inherit; }
 .subbtn:hover:not(:disabled) { background: var(--card2); color: var(--fg); }
-.subbtn.active { background: var(--selection); color: #fff; }
+.subbtn.active { background: var(--selection); color: var(--selection-text); }
 .subbtn:disabled { opacity: .4; cursor: default; }
 .para-main { flex: 1; min-width: 0; }
 .para-tree-split { display: flex; gap: 16px; align-items: flex-start; }
@@ -133,7 +307,7 @@ main:has(> #view-prompts:not(.hidden)) { max-width: 1200px; }
 .para-cat { flex: 0 0 160px; }
 .para-proj { flex: 0 0 220px; }
 .rail-date { font-size: 11px; color: var(--muted); }
-.rail-item.active .rail-date { color: #cdd9ee; }
+.rail-item.active .rail-date { color: var(--selection-muted); }
 .rail-badge { font-size: 11px; }
 /* date-group divider ("8 июля · 5") — non-interactive, no hover/active state; separates
    История into day buckets so the calendar isn't needed to see "how much happened when". */
@@ -162,7 +336,7 @@ main:has(> #view-prompts:not(.hidden)) { max-width: 1200px; }
 .rail-latest { color: var(--muted); font-size: 11px; font-weight: 400; }
 
 .note-view {
-  flex: 1; min-width: 0; background: var(--card); border: 1px solid var(--line);
+  flex: 1; min-width: 0; background: var(--grad-card); box-shadow: var(--shadow-card); border: 1px solid var(--line);
   border-radius: 12px; padding: 20px 24px; min-height: 300px;
 }
 .note-actions { display: flex; gap: 8px; margin-bottom: 8px; }
@@ -171,8 +345,11 @@ main:has(> #view-prompts:not(.hidden)) { max-width: 1200px; }
 .reprocess-picker label { margin-bottom: 10px; }
 .reprocess-picker .run-row { margin: 4px 0 0; }
 .note-body { font-size: 14px; line-height: 1.6; word-wrap: break-word; }
-.note-body h1 { font-size: 20px; margin: 14px 0 8px; }
-.note-body h2 { font-size: 16px; margin: 14px 0 6px; color: var(--fg); }
+.note-body h1 { font-family: var(--font-heading); font-size: 20px; margin: 14px 0 8px; }
+/* note-body h2: 16->13px, explicit 500 weight (was inheriting the UA-bold <h2>
+   default) per concept B; h1 above isn't in the concept's resize list — font swapped,
+   size/weight left as-is. */
+.note-body h2 { font-family: var(--font-heading); font-size: 13px; font-weight: 500; margin: 14px 0 6px; color: var(--fg); }
 .note-body h3 { font-size: 14px; margin: 12px 0 4px; color: var(--muted); }
 .note-body li { margin-left: 18px; }
 .note-body hr { border: none; border-top: 1px solid var(--line); margin: 14px 0; }
@@ -181,17 +358,20 @@ main:has(> #view-prompts:not(.hidden)) { max-width: 1200px; }
 .note-body summary { cursor: pointer; color: var(--accent); }
 
 .card {
-  background: var(--card); border: 1px solid var(--line);
+  background: var(--grad-card); box-shadow: var(--shadow-card); border: 1px solid var(--line);
   border-radius: 12px; padding: 16px 20px; margin-bottom: 16px;
+  transition: box-shadow .14s, border-color .14s;
 }
-.card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em;
-  color: var(--muted); margin-bottom: 14px; font-weight: 600; }
+/* card h2: 13->11px/500 per concept B; letter-spacing widened .04em->.08em to keep
+   the all-caps label legible at the smaller Unbounded size. */
+.card h2 { font-family: var(--font-heading); font-size: 11px; text-transform: uppercase; letter-spacing: .08em;
+  color: var(--muted); margin-bottom: 14px; font-weight: 500; }
 
 label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 6px; }
 select, input[type=text], input[type=date], textarea {
   width: 100%; background: var(--card2); color: var(--fg);
   border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px;
-  font-size: 14px; font-family: inherit;
+  font-size: 14px; font-family: inherit; box-shadow: var(--shadow-inset);
 }
 textarea { resize: vertical; line-height: 1.5; }
 select:focus, input:focus, textarea:focus { outline: none; border-color: var(--accent); }
@@ -208,17 +388,18 @@ select:focus, input:focus, textarea:focus { outline: none; border-color: var(--a
 .btn {
   background: var(--card2); color: var(--fg); border: 1px solid var(--line);
   border-radius: 8px; padding: 8px 16px; cursor: pointer; font-size: 14px;
-  font-family: inherit; transition: background .12s, border-color .12s;
+  font-family: inherit; box-shadow: var(--shadow-btn);
+  transition: background .12s, border-color .12s, box-shadow .14s;
 }
 .btn:hover { border-color: var(--accent); }
-.btn.primary { background: var(--accent-fill); border-color: var(--accent-fill); color: #fff; }
+.btn.primary { background: var(--grad-primary); border-color: var(--accent-fill); color: var(--accent-fill-text); box-shadow: var(--shadow-primary); }
 .btn.primary:hover { background: var(--accent-fill-hover); border-color: var(--accent-fill-hover); }
 .btn.primary:disabled { opacity: .4; cursor: not-allowed; }
 .btn:disabled { opacity: .4; cursor: not-allowed; }
 .btn.big { padding: 12px 28px; font-size: 16px; font-weight: 600; }
 .btn.small { padding: 8px 12px; font-size: 13px; }
 .btn.ghost { background: transparent; }
-.btn.recording { background: var(--rec-fill); border-color: var(--rec-fill); color: #fff; }
+.btn.recording { background: var(--rec-fill); border-color: var(--rec-fill); color: #fff; box-shadow: var(--rec-glow); }
 .btn.danger { border-color: var(--danger); color: var(--danger); }
 .btn.danger:hover { background: var(--danger-fill); border-color: var(--danger-fill); color: #fff; }
 
@@ -237,7 +418,7 @@ select:focus, input:focus, textarea:focus { outline: none; border-color: var(--a
 .sys-status.warn { color: var(--warn); border-color: var(--warn); }
 .vu { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
 .vu-label { width: 20px; font-size: 14px; }
-.vu-track { flex: 1; height: 8px; background: var(--card2); border-radius: 4px; overflow: hidden; }
+.vu-track { flex: 1; height: 8px; background: var(--card2); border-radius: 4px; overflow: hidden; box-shadow: var(--shadow-inset); }
 .vu-fill { height: 100%; width: 0%; background: var(--ok); transition: width .08s linear; }
 .opts-row { display: flex; gap: 14px; margin-bottom: 4px; }
 .opts-row label { flex: 0 0 auto; }
@@ -265,10 +446,11 @@ select:focus, input:focus, textarea:focus { outline: none; border-color: var(--a
 .settings-btn:hover { color: var(--fg); background: var(--card2); }
 .overlay { position: fixed; inset: 0; background: var(--overlay); z-index: 20;
   display: flex; align-items: flex-start; justify-content: center; padding: 48px 16px; overflow: auto; }
-.modal { background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+.modal { background: var(--grad-card); box-shadow: var(--shadow-card); border: 1px solid var(--line); border-radius: 12px;
   width: 100%; max-width: 560px; padding: 20px 24px; }
 .modal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
-.modal-head h2 { font-size: 18px; font-weight: 600; }
+/* h1-level: 18->15px/500 per concept B, same bucket as .content-header #contentTitle */
+.modal-head h2 { font-family: var(--font-heading); font-size: 15px; font-weight: 500; }
 .modal-sec { margin-top: 18px; }
 .modal-sec h3 { font-size: 14px; font-weight: 600; margin-bottom: 10px;
   display: flex; align-items: center; justify-content: space-between; }
@@ -405,8 +587,8 @@ body.processing .queue-item button { opacity: .4; pointer-events: none; }
   user-select: none; transition: transform .08s;
 }
 .stage:hover { transform: translateY(-1px); }
-.stage.active { color: #fff; border-color: var(--accent); background: var(--accent-fill);
-  animation: pulse 1s ease-in-out infinite; }
+.stage.active { color: var(--accent-fill-text); border-color: var(--accent); background: var(--accent-fill);
+  box-shadow: var(--act-glow); animation: pulse 1s ease-in-out infinite; }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .5; } }
 .spinner {
   width: 18px; height: 18px; border-radius: 50%; display: inline-block;
@@ -425,6 +607,7 @@ pre {
   padding: 12px 16px; font-size: 13px; line-height: 1.5;
   font-family: "SF Mono", ui-monospace, Menlo, monospace;
   white-space: pre-wrap; word-break: break-word; max-height: 340px; overflow: auto;
+  box-shadow: var(--shadow-inset);
 }
 #logs, #histLogs { color: var(--muted); max-height: 200px; }
 .result-pane { color: var(--fg); max-height: 460px; }
@@ -451,7 +634,7 @@ pre {
 }
 .chat-bubble-user {
   align-self: flex-end;
-  background: var(--selection); color: #fff;
+  background: var(--selection); color: var(--selection-text);
   border-bottom-right-radius: 4px;
 }
 .chat-bubble-assistant {
@@ -467,7 +650,7 @@ pre {
 }
 .chat-cites li { font-size: 12px; color: var(--muted); }
 .chat-degraded { margin-top: 8px; font-size: 12px; color: var(--warn); }
-.chat-canceled-tag { margin-top: 6px; font-size: 12px; color: rgba(255, 255, 255, 0.75); }
+.chat-canceled-tag { margin-top: 6px; font-size: 12px; color: var(--selection-muted); }
 .chat-copy-row { margin-top: 6px; text-align: right; }
 .chat-copy-btn {
   background: transparent; border: none; color: var(--muted);
