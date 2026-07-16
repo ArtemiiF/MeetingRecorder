@@ -26,6 +26,7 @@ const state = {
   outDirCustom: false, // true once the user explicitly picked outDir — breaks vault auto-follow
   hfToken: "",
   language: "ru",
+  theme: "classic",    // 'classic'|'pervanche'|'teal'|'orchid' — see applyTheme()
   authorName: "Автор",
   fastModel: "",
   mainModel: "",
@@ -678,6 +679,7 @@ async function init() {
   // "auto" was removed from the #language <select> options (no matching <option> left
   // to select) but old presets/settings files may still carry it — coerce to the default.
   state.language = (data.language === "auto" ? "" : data.language) || "ru";
+  state.theme = data.theme || "classic";
   state.authorName = data.authorName || "Автор";
   state.fastModel = data.fastModel || "";
   state.mainModel = data.mainModel || "";
@@ -691,6 +693,8 @@ async function init() {
   $("outDir").value = state.outDir;
   $("hfToken").value = state.hfToken;
   $("language").value = state.language;
+  $("themeSelect").value = state.theme;
+  applyTheme();
   $("authorName").value = state.authorName;
   $("fastModel").value = state.fastModel;
   $("mainModel").value = state.mainModel;
@@ -789,6 +793,15 @@ $("promptsDelBtn").addEventListener("click", async () => {
   else { state.currentPreset = -1; $("promptsName").value = ""; $("promptsPrompt").value = ""; }
   await persistPresets();
 });
+// Applies state.theme to the document root: [data-theme] drives the theme override
+// blocks in style.css; classic has no override block, so the attribute is removed
+// entirely rather than set to an empty string (matters for [data-theme="classic"]-
+// style selectors never existing, and keeps the DOM clean for the default theme).
+function applyTheme() {
+  if (state.theme === "classic") delete document.documentElement.dataset.theme;
+  else document.documentElement.dataset.theme = state.theme;
+}
+
 async function persistPresets() {
   await window.api.savePresets({
     presets: state.presets,
@@ -796,6 +809,7 @@ async function persistPresets() {
     outDirCustom: state.outDirCustom,
     hfToken: state.hfToken,
     language: state.language,
+    theme: state.theme,
     authorName: state.authorName,
     fastModel: state.fastModel,
     mainModel: state.mainModel,
@@ -810,6 +824,12 @@ async function persistPresets() {
 
 $("language").addEventListener("change", (e) => {
   state.language = e.target.value;
+  persistPresets();
+});
+
+$("themeSelect").addEventListener("change", (e) => {
+  state.theme = e.target.value;
+  applyTheme();
   persistPresets();
 });
 

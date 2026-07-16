@@ -1631,6 +1631,48 @@ test("changing authorName input persists with authorName in savePresets payload"
   assert.equal(saved.authorName, "Наталья");
 });
 
+// ── theme setting (design-sidebar B-2) ──────────────────────────────────────────
+
+test("theme loads from presets into the settings select and applies data-theme on the document root", async () => {
+  const { $, window } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru", theme: "teal",
+    }),
+  });
+  await tick(window);
+  assert.equal($("themeSelect").value, "teal");
+  assert.equal(window.document.documentElement.dataset.theme, "teal");
+});
+
+test("theme defaults to 'classic' when absent from presets, and data-theme is not set on the document root", async () => {
+  const { $, window } = await boot({
+    getPresets: async () => ({ presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru" }),
+  });
+  await tick(window);
+  assert.equal($("themeSelect").value, "classic");
+  assert.equal(window.document.documentElement.hasAttribute("data-theme"), false);
+});
+
+test("changing the theme select applies data-theme immediately and persists it in savePresets payload", async () => {
+  let saved = null;
+  const { $, window } = await boot({ savePresets: async (data) => { saved = data; return true; } });
+  await tick(window);
+  $("themeSelect").value = "orchid";
+  $("themeSelect").dispatchEvent(new window.Event("change"));
+  await tick(window);
+  assert.equal(window.document.documentElement.dataset.theme, "orchid", "applies immediately, not just on next boot");
+  assert.ok(saved, "savePresets was not called");
+  assert.equal(saved.theme, "orchid");
+
+  // switching back to classic must remove the attribute entirely, not set it to "" —
+  // see applyTheme()'s comment in renderer.js for why that distinction matters.
+  $("themeSelect").value = "classic";
+  $("themeSelect").dispatchEvent(new window.Event("change"));
+  await tick(window);
+  assert.equal(window.document.documentElement.hasAttribute("data-theme"), false);
+  assert.equal(saved.theme, "classic");
+});
+
 // ── fastModel setting ──────────────────────────────────────────────────────────
 
 test("fastModel loads from presets into state and the settings input", async () => {
