@@ -8,20 +8,20 @@
   --warn: #f5a623; --pre-bg: #0c0f13; --overlay: rgba(0,0,0,.55);
   --ok-tint: rgba(63,185,80,.1); --danger-tint: rgba(229,72,77,.1);
   --rec: #f06a3c; --rec-fill: #c94318; --selection: #2b4a86;
-  --inactive: #6b7480;
+  --inactive: #6b7480; --sidebar: #161b22;
 }
+html, body { height: 100%; }
 body {
+  display: flex;
   font-family: -apple-system, "SF Pro Text", system-ui, sans-serif;
   background: var(--bg); color: var(--fg); font-size: 14px; line-height: 1.45;
 }
-header {
-  display: flex; align-items: baseline; gap: 12px;
-  padding: 16px 24px; border-bottom: 1px solid var(--line);
-  position: sticky; top: 0; background: var(--bg); z-index: 5;
-}
-header h1 { font-size: 18px; font-weight: 600; }
 .tag { color: var(--muted); font-size: 12px; }
-main { max-width: 860px; margin: 0 auto; padding: 20px 24px 60px; }
+/* main IS the scrollable content column (flex-row sibling of #sidebar below) —
+   html/body height:100% + body's default align-items:stretch gives it the full
+   viewport height for free, so its own overflow-y:auto scrolls independently of
+   #sidebar, which never scrolls. */
+main { flex: 1; min-width: 0; overflow-y: auto; max-width: 860px; margin: 0 auto; padding: 20px 24px 60px; }
 /* wide two-panel views (rail + content, or subnav + content) get more breathing
    room than the single-column Словарь view (and Запись below 1100px — see the
    record-layout media query further down for its own conditional widening);
@@ -33,26 +33,56 @@ main:has(> #view-para:not(.hidden)),
 main:has(> #view-prompts:not(.hidden)) { max-width: 1200px; }
 .hidden { display: none !important; }
 
-.topnav {
-  display: flex; gap: 4px; padding: 8px 24px 0;
-  border-bottom: 1px solid var(--line); position: sticky; top: 52px;
-  background: var(--bg); z-index: 4;
+/* slim per-view title line at the top of the content column, replacing the old
+   shared <header>; text/tag visibility are set by switchView() in renderer.js. */
+.content-header {
+  display: flex; align-items: baseline; gap: 12px;
+  padding-bottom: 12px; margin-bottom: 16px; border-bottom: 1px solid var(--line);
 }
+.content-header #contentTitle { font-size: 18px; font-weight: 600; }
+
+/* left sidebar — logo, view nav, recording status, settings gear. Fixed width,
+   never scrolls; stretched to full viewport height by body's flex row. */
+#sidebar {
+  flex: 0 0 196px; display: flex; flex-direction: column;
+  background: var(--sidebar); border-right: 1px solid var(--line);
+  padding: 16px 12px; gap: 4px;
+}
+.sidebar-logo { font-size: 15px; font-weight: 600; padding: 4px 8px 16px; }
+.sidebar-nav { display: flex; flex-direction: column; gap: 2px; }
 .topbtn {
-  background: transparent; color: var(--muted); border: none; border-bottom: 2px solid transparent;
-  padding: 12px 16px; cursor: pointer; font-size: 14px; font-family: inherit;
+  display: block; width: 100%; text-align: left;
+  background: transparent; color: var(--muted); border: none; border-radius: 8px;
+  padding: 10px 12px; cursor: pointer; font-size: 14px; font-family: inherit;
 }
-.topbtn.active { color: var(--fg); border-bottom-color: var(--accent); }
+.topbtn:hover { background: var(--card2); }
+.topbtn.active { background: var(--selection); color: #fff; }
 .rec-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
-  background: var(--rec); margin-left: 6px; animation: pulse 1s ease-in-out infinite; }
-.rec-dot.hidden { display: none; }
+  background: var(--rec); animation: pulse 1s ease-in-out infinite; }
+/* recording status block, pinned to the bottom of the sidebar via margin-top:auto
+   (pushes itself + the settings button below it down together) — the only DOM
+   region visible from every view, see setRecIndicator() in renderer.js. Hidden
+   entirely (via the shared .hidden rule above) when not recording. */
+.sidebar-rec {
+  margin-top: auto; display: flex; align-items: center; gap: 8px;
+  padding: 10px 12px; border-radius: 8px; background: var(--card2);
+}
+.sidebar-rec-label { font-size: 12px; color: var(--fg); flex: 1; }
+/* .settings-btn's shared margin-left:auto (below) is a cross-axis auto-margin in
+   THIS column-flex context — it would override align-self:center and shove the
+   gear flush against the right edge, so neutralize it only here; #settingsClose
+   in the modal-head row still needs the shared rule as-is. */
+#sidebar .settings-btn { margin-left: 0; margin-top: 8px; align-self: center; }
 
 /* history view: left rail + right note */
 .history-layout { display: flex; gap: 16px; align-items: flex-start; }
 .history-rail {
-  flex: 0 0 280px; max-height: calc(100vh - 160px); overflow-y: auto;
+  /* top/max-height rebased for the sidebar redesign: the old header+topnav chrome
+     (which top:110px / calc(100vh-160px) accounted for) is gone — main now only
+     has its own small padding-top + .content-header above the rail. */
+  flex: 0 0 280px; max-height: calc(100vh - 70px); overflow-y: auto;
   background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 8px;
-  position: sticky; top: 110px;
+  position: sticky; top: 16px;
 }
 .rail-head { display: flex; justify-content: space-between; align-items: center;
   color: var(--muted); font-size: 12px; padding: 4px 6px 8px; }
@@ -93,8 +123,9 @@ main:has(> #view-prompts:not(.hidden)) { max-width: 1200px; }
 .note-view-empty-icon { font-size: 40px; }
 .note-view-empty-title { font-size: 16px; font-weight: 600; color: var(--fg); }
 .para-layout { display: flex; gap: 16px; align-items: flex-start; }
+/* top rebased alongside .history-rail above — same reasoning (old chrome gone). */
 .para-subnav { flex: 0 0 160px; display: flex; flex-direction: column; gap: 4px;
-  position: sticky; top: 110px; }
+  position: sticky; top: 16px; }
 .subbtn { text-align: left; background: transparent; color: var(--muted); border: none;
   border-radius: 8px; padding: 8px 12px; cursor: pointer; font-size: 13px; font-family: inherit; }
 .subbtn:hover:not(:disabled) { background: var(--card2); color: var(--fg); }

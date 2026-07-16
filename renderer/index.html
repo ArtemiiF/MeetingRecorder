@@ -7,21 +7,28 @@
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <header>
-    <h1>🎙 Meeting Recorder</h1>
-    <span class="tag">локально · MLX Whisper · pyannote · LM Studio</span>
+  <aside id="sidebar">
+    <div class="sidebar-logo">🎙 Meeting Recorder</div>
+    <nav class="sidebar-nav">
+      <button class="topbtn active" data-view="record">🎙 Запись</button>
+      <button class="topbtn" data-view="history">📚 История</button>
+      <button class="topbtn" data-view="para">🗂 PARA</button>
+      <button class="topbtn" data-view="glossary">📖 Словарь</button>
+      <button class="topbtn" data-view="prompts">📝 Промпты</button>
+    </nav>
+    <div id="recIndicator" class="sidebar-rec hidden">
+      <span class="rec-dot"></span>
+      <span class="sidebar-rec-label">Идёт запись</span>
+      <span id="sidebarTimer" class="timer live">00:00</span>
+    </div>
     <button id="settingsOpen" class="settings-btn" title="Настройки и готовность">⚙</button>
-  </header>
-
-  <nav class="topnav">
-    <button class="topbtn active" data-view="record">🎙 Запись<span id="recIndicator" class="rec-dot hidden"></span></button>
-    <button class="topbtn" data-view="history">📚 История</button>
-    <button class="topbtn" data-view="para">🗂 PARA</button>
-    <button class="topbtn" data-view="glossary">📖 Словарь</button>
-    <button class="topbtn" data-view="prompts">📝 Промпты</button>
-  </nav>
+  </aside>
 
   <main>
+    <div class="content-header">
+      <span id="contentTitle">Запись</span>
+      <span id="contentTag" class="tag">локально · MLX Whisper · pyannote · LM Studio</span>
+    </div>
     <div id="view-record">
     <div class="record-layout">
     <div class="record-col-left">
