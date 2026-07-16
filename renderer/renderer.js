@@ -2514,6 +2514,13 @@ function reprocessHistory(audio, presetId, version) {
   document.querySelectorAll(".tab").forEach((x) => x.classList.toggle("active", x.dataset.tab === "import"));
   $("pane-record").classList.add("hidden");
   $("pane-import").classList.remove("hidden");
+  // #processLatestBtn used to live inside #pane-record, so hiding that pane (above) hid
+  // it for free. It now lives in the record-action-bar, a sibling of both tabpanes — left
+  // untouched here it would stay visible (and, once refreshProcessLatestBtn() re-enables it
+  // after this run ends, clickable) while the rest of the UI shows import mode; a later
+  // click would process the latest RECORDING, not this reprocess. Mirrors the tab handler's
+  // own toggle (the only other site that flips state.mode/pane visibility — see its comment).
+  $("processLatestBtn").classList.add("hidden");
   reprocessTargetsHistory = true;
   buildHistoryProgressPanel();
   setImportQueue([audio]); // queue-of-1 — same path as an N-file batch

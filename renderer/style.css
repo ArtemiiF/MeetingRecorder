@@ -284,11 +284,15 @@ body.processing .history-row button { opacity: .4; pointer-events: none; }
 .timer.live { color: var(--rec); }
 
 /* Запись: two-column layout at ≥1100px (source+prompt cards left, live progress/
-   result right) with a sticky action bar pinned to the bottom of the left column —
-   below 1100px these are plain unstyled block wrappers, i.e. today's single-column
-   flow, unchanged. #processLatestBtn and .run-row (import mode) are co-located here
-   rather than unified into one button — see design-layout commit history for why
-   (unifying would require changing which flow shows a stop/spinner, a behaviour
+   result right) with a sticky action bar pinned to the bottom of the left column.
+   Below 1100px, .record-layout/.record-col-left/.record-col-right are plain unstyled
+   block wrappers — no columns, no sticky — so the CARD-level flow (Источник → Промпт
+   → action bar → Прогресс → Результат) reads exactly as it did before this feature.
+   The action bar's own grouping (co-locating #processLatestBtn/.run-row/#timer into one
+   row) is NOT width-gated — it applies at every width; only the 2-column split and the
+   sticky pinning are ≥1100px-only. #processLatestBtn and .run-row (import mode) are
+   co-located here rather than unified into one button — see design-layout commit history
+   for why (unifying would require changing which flow shows a stop/spinner, a behaviour
    change, not just a placement one). */
 .record-action-bar {
   display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
@@ -302,9 +306,19 @@ body.processing .history-row button { opacity: .4; pointer-events: none; }
 @media (min-width: 1100px) {
   main:has(> #view-record:not(.hidden)) { max-width: 1200px; }
   .record-layout { display: flex; gap: 20px; align-items: flex-start; }
-  .record-col-left { flex: 0 0 420px; min-width: 0; }
+  /* align-self: stretch (against the row's own default flex-start) + display:flex column
+     is what actually makes the sticky bar work: with flex-start, .record-col-left's height
+     is only its own content (source+prompt cards+bar) — shorter than the taller
+     .record-col-right (progress/result) — so the sticky bar never has any distance to
+     travel while the page scrolls and just sits inert where it would anyway. Stretched to
+     match .record-col-right's height, plus margin-top:auto pushing the bar to the bottom
+     of that now-tall column, gives it real scroll distance to pin against. */
+  .record-col-left {
+    flex: 0 0 420px; min-width: 0;
+    align-self: stretch; display: flex; flex-direction: column;
+  }
   .record-col-right { flex: 1; min-width: 0; }
-  .record-action-bar { position: sticky; bottom: 0; background: var(--bg); }
+  .record-action-bar { position: sticky; bottom: 0; background: var(--bg); margin-top: auto; z-index: 3; }
 }
 
 /* glossary: chip list */

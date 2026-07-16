@@ -262,6 +262,36 @@ test("nvReprocess is disabled with a visible reason when audio is genuinely unre
   assert.match(btn.title, /Аудио не найдено/);
 });
 
+// ── reprocessHistory must hide #processLatestBtn too (design-layout fix) ─────
+// #processLatestBtn used to live inside #pane-record, so reprocessHistory() hiding that
+// pane hid it "for free". Since the record-action-bar relocation it's a sibling of both
+// tabpanes — left unfixed, it would stay visible (and, once the run ends and
+// refreshProcessLatestBtn() re-enables it, clickable) even though state.mode is now
+// "import" and the rest of the UI shows the import pane; a click would then process the
+// latest RECORDING, not this reprocess.
+test("reprocessHistory hides #processLatestBtn (not just #pane-record) and it stays hidden through and after the run", async () => {
+  const { window, $, handlers } = await boot({
+    listHistory: async () => [{ name: "2026-01-01", title: "Синк", note: "/o/a.md", audio: "/o/a.wav" }],
+  });
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  $("historyList").querySelector(".rail-item:not(.pending)").click(); await tick(window);
+  assert.equal($("processLatestBtn").classList.contains("hidden"), false, "record mode by default — visible before any reprocess");
+  $("noteView").querySelector("#nvReprocess").click(); await tick(window);
+  $("noteView").querySelector("#reprocessConfirm").click(); await tick(window);
+  assert.equal($("processLatestBtn").classList.contains("hidden"), true,
+    "reprocessHistory() flips state.mode to import — the bar's record-mode button must hide");
+  // refreshProcessLatestBtn() (called on the run's terminal event) only ever toggles
+  // .disabled, never .hidden — the run finishing must not un-hide it.
+  handlers.process({ event: "done", note: "/o/a.md", audio: "/o/a.wav", transcript: "t", summary: "s" });
+  await tick(window);
+  assert.equal($("processLatestBtn").classList.contains("hidden"), true, "still hidden after the reprocess run ends");
+  // "back to Запись" in the reported bug means the top-level Запись VIEW nav button, not
+  // the record/import tab inside the Источник card — switchView() never touches state.mode.
+  window.document.querySelector('.topbtn[data-view="record"]').click(); await tick(window);
+  assert.equal($("processLatestBtn").classList.contains("hidden"), true,
+    "still hidden after navigating back to the Запись view — only an explicit record-tab click restores record mode");
+});
+
 // ── jump-to-recording button in note headers (Task 3) ────────────────────────
 test("nvGoRecord (История note header) switches to the Запись view", async () => {
   const { window, $ } = await boot();
