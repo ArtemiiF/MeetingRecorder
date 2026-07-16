@@ -23,6 +23,8 @@
 
   <main>
     <div id="view-record">
+    <div class="record-layout">
+    <div class="record-col-left">
     <!-- SOURCE -->
     <section class="card">
       <h2>1 · Источник аудио</h2>
@@ -41,9 +43,7 @@
         <div class="vu"><span class="vu-label">🔊</span><div class="vu-track"><div id="vuSys" class="vu-fill"></div></div></div>
         <div class="rec-row">
           <button id="recBtn" class="btn primary">● Начать запись</button>
-          <span id="timer" class="timer">00:00</span>
         </div>
-        <button id="processLatestBtn" class="btn primary big" disabled>▶ Обработать</button>
       </div>
 
       <div class="tabpane hidden" id="pane-import">
@@ -76,14 +76,22 @@
       </label>
     </section>
 
-    <div class="run-row hidden">
-      <button id="runBtn" class="btn primary big" disabled>▶ Обработать</button>
-      <button id="stopBtn" class="btn big" style="display:none">■ Остановить</button>
-      <span id="procSpinner" class="spinner" style="display:none"></span>
-      <button id="retryBtn" class="btn" style="display:none" title="Повтор с сохранённого прогресса — транскрипция/диаризация из кеша">↻ Повторить</button>
-      <button id="freshBtn" class="btn ghost" style="display:none" title="Сбросить кеш и пересчитать все этапы">Заново</button>
+    <!-- ACTION BAR: co-located record-mode/import-mode process triggers + timer.
+         Not unified into one button — see the .record-action-bar CSS comment. -->
+    <div class="record-action-bar">
+      <button id="processLatestBtn" class="btn primary big" disabled>▶ Обработать</button>
+      <div class="run-row hidden">
+        <button id="runBtn" class="btn primary big" disabled>▶ Обработать</button>
+        <button id="stopBtn" class="btn big" style="display:none">■ Остановить</button>
+        <span id="procSpinner" class="spinner" style="display:none"></span>
+        <button id="retryBtn" class="btn" style="display:none" title="Повтор с сохранённого прогресса — транскрипция/диаризация из кеша">↻ Повторить</button>
+        <button id="freshBtn" class="btn ghost" style="display:none" title="Сбросить кеш и пересчитать все этапы">Заново</button>
+      </div>
+      <span id="timer" class="timer">00:00</span>
     </div>
+    </div><!-- /record-col-left -->
 
+    <div class="record-col-right">
     <!-- PROGRESS -->
     <section class="card" id="progressCard" style="display:none">
       <h2>Прогресс</h2>
@@ -114,7 +122,8 @@
       <pre id="resTranscript" class="result-pane hidden"></pre>
       <pre id="resActions" class="result-pane hidden"></pre>
     </section>
-
+    </div><!-- /record-col-right -->
+    </div><!-- /record-layout -->
     </div><!-- /view-record -->
 
     <!-- HISTORY VIEW -->

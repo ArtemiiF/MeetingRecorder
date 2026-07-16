@@ -23,9 +23,11 @@ header h1 { font-size: 18px; font-weight: 600; }
 .tag { color: var(--muted); font-size: 12px; }
 main { max-width: 860px; margin: 0 auto; padding: 20px 24px 60px; }
 /* wide two-panel views (rail + content, or subnav + content) get more breathing
-   room than the single-column Запись/Словарь views; Electron 33 bundles Chromium
-   130 (confirmed via `ELECTRON_RUN_AS_NODE=1 electron -e process.versions.chrome`),
-   well past :has() support (Chromium 105+), so this is plain CSS, no JS toggle. */
+   room than the single-column Словарь view (and Запись below 1100px — see the
+   record-layout media query further down for its own conditional widening);
+   Electron 33 bundles Chromium 130 (confirmed via `ELECTRON_RUN_AS_NODE=1 electron
+   -e process.versions.chrome`), well past :has() support (Chromium 105+), so this
+   is plain CSS, no JS toggle. */
 main:has(> #view-history:not(.hidden)),
 main:has(> #view-para:not(.hidden)),
 main:has(> #view-prompts:not(.hidden)) { max-width: 1200px; }
@@ -280,7 +282,30 @@ body.processing .history-row button { opacity: .4; pointer-events: none; }
 .rec-row { display: flex; align-items: center; gap: 16px; margin-top: 14px; }
 .timer { font-variant-numeric: tabular-nums; font-size: 22px; color: var(--muted); }
 .timer.live { color: var(--rec); }
-#processLatestBtn { margin-top: 14px; }
+
+/* Запись: two-column layout at ≥1100px (source+prompt cards left, live progress/
+   result right) with a sticky action bar pinned to the bottom of the left column —
+   below 1100px these are plain unstyled block wrappers, i.e. today's single-column
+   flow, unchanged. #processLatestBtn and .run-row (import mode) are co-located here
+   rather than unified into one button — see design-layout commit history for why
+   (unifying would require changing which flow shows a stop/spinner, a behaviour
+   change, not just a placement one). */
+.record-action-bar {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line);
+}
+/* .run-row's generic rule (used standalone elsewhere — PARA's "Разобрать все"/"Спросить"
+   rows) centers itself with a 20px bottom margin, meant for sitting alone between cards;
+   nested here as one flex item among others it would sit visually offset from
+   #processLatestBtn/#timer. Neutralized only in this context. */
+.record-action-bar .run-row { margin: 0; justify-content: flex-start; }
+@media (min-width: 1100px) {
+  main:has(> #view-record:not(.hidden)) { max-width: 1200px; }
+  .record-layout { display: flex; gap: 20px; align-items: flex-start; }
+  .record-col-left { flex: 0 0 420px; min-width: 0; }
+  .record-col-right { flex: 1; min-width: 0; }
+  .record-action-bar { position: sticky; bottom: 0; background: var(--bg); }
+}
 
 /* glossary: chip list */
 .glossary-toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }

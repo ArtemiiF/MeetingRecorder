@@ -3631,6 +3631,22 @@ function goImportTab(window) {
   window.document.querySelector('.tab[data-tab="import"]').click();
 }
 
+// #processLatestBtn and .run-row are co-located in .record-action-bar (design-layout
+// commit "Запись: two-column layout + sticky action bar") — #processLatestBtn no longer
+// sits inside #pane-record, so it no longer gets hidden "for free" by that tabpane's own
+// toggle; the tab-click handler now toggles it explicitly, inverted from .run-row.
+test("record-action-bar: switching tabs shows exactly one of #processLatestBtn / .run-row at a time", async () => {
+  const { window, $ } = await boot();
+  assert.equal($("processLatestBtn").classList.contains("hidden"), false, "record tab (default): visible");
+  assert.equal(window.document.querySelector(".run-row").classList.contains("hidden"), true, "record tab (default): hidden");
+  goImportTab(window);
+  assert.equal($("processLatestBtn").classList.contains("hidden"), true, "import tab: hidden");
+  assert.equal(window.document.querySelector(".run-row").classList.contains("hidden"), false, "import tab: visible");
+  window.document.querySelector('.tab[data-tab="record"]').click();
+  assert.equal($("processLatestBtn").classList.contains("hidden"), false, "back to record tab: visible again");
+  assert.equal(window.document.querySelector(".run-row").classList.contains("hidden"), true, "back to record tab: hidden again");
+});
+
 test("multi-file pick renders one queue row per file", async () => {
   const { window, $ } = await boot({
     pickAudio: async () => ["/tmp/a.wav", "/tmp/b.wav", "/tmp/c.wav"],

@@ -56,6 +56,11 @@ document.querySelectorAll(".tab").forEach((t) =>
     // row is exclusively an import-mode affordance; hide it on the record tab so the record
     // card only shows mic-select/status/VU/recBtn/timer.
     document.querySelector(".run-row").classList.toggle("hidden", state.mode !== "import");
+    // #processLatestBtn used to be nested inside #pane-record, so switching tabs hid it
+    // for free via that pane's own .hidden toggle just above; now that it lives in the
+    // record-action-bar alongside .run-row (both co-located, not nested under either
+    // tabpane), it needs the same explicit mode-based toggle, inverted.
+    $("processLatestBtn").classList.toggle("hidden", state.mode !== "record");
     refreshRunBtn();
   })
 );
