@@ -18,6 +18,19 @@
   /* typography — same in every theme, not part of the theme override blocks below */
   --font-heading: 'Unbounded', -apple-system, "SF Pro Text", system-ui, sans-serif;
   --font-body: 'Onest', -apple-system, "SF Pro Text", system-ui, sans-serif;
+  /* decorative (A-1): --grad-card/--grad-primary/--shadow-primary/--act-glow depend
+     on --card/--accent-fill/--accent, so they're re-declared per theme below (OKLCH-
+     derived, see the commit report for the exact numbers). --shadow-card/
+     --shadow-inset/--shadow-btn/--rec-glow use fixed black/white overlay alphas (or
+     the global --rec) and are theme-agnostic — declared once, here only. */
+  --shadow-card: inset 0 1px 0 rgba(255,255,255,.045), 0 2px 6px rgba(0,0,0,.35), 0 12px 30px rgba(0,0,0,.28);
+  --shadow-inset: inset 0 1px 3px rgba(0,0,0,.4);
+  --shadow-btn: inset 0 1px 0 rgba(255,255,255,.06), 0 1px 3px rgba(0,0,0,.3);
+  --rec-glow: 0 0 10px 2px rgba(240,106,60,.5);
+  --grad-card: linear-gradient(180deg, #1f242b 0%, #171b22 100%);
+  --grad-primary: linear-gradient(180deg, #4378da 0%, #3166c6 100%);
+  --shadow-primary: 0 4px 16px 0 rgba(58,111,208,.4);
+  --act-glow: 0 0 12px rgba(76,139,245,.35);
 }
 
 /* Vendored locally (offline app, no network font loading) — Unbounded + Onest,
@@ -103,6 +116,12 @@
   --accent-fill-text: #171233;
   --selection: #2D2650; --selection-text: #C3B8F7; --selection-muted: #9A95A8;
   --pre-bg: #0F0E13; --sidebar: #18171e;
+  /* decorative (A-1), OKLCH-derived from this theme's own --card/--accent-fill/--accent —
+     see the commit report for the exact deltas and the muted-on-card contrast check. */
+  --grad-card: linear-gradient(180deg, #212028 0%, #19181f 100%);
+  --grad-primary: linear-gradient(180deg, #b4a8fc 0%, #a296e8 100%);
+  --shadow-primary: 0 4px 16px 0 rgba(171,159,242,.4);
+  --act-glow: 0 0 12px rgba(195,184,247,.35);
 }
 [data-theme="teal"] {
   --bg: #121517; --card: #191D20; --card2: #212629;
@@ -111,6 +130,10 @@
   --accent-fill-text: #06232B;
   --selection: #163541; --selection-text: #7FD4E6; --selection-muted: #8FA0A7;
   --pre-bg: #0C0F11; --sidebar: #15191b;
+  --grad-card: linear-gradient(180deg, #1e2225 0%, #161a1c 100%);
+  --grad-primary: linear-gradient(180deg, #6ccde0 0%, #58b9cc 100%);
+  --shadow-primary: 0 4px 16px 0 rgba(98,195,214,.4);
+  --act-glow: 0 0 12px rgba(127,212,230,.35);
 }
 [data-theme="orchid"] {
   --bg: #171316; --card: #1E191D; --card2: #272025;
@@ -119,6 +142,10 @@
   --accent-fill-text: #33081D;
   --selection: #3D2032; --selection-text: #F3AECB; --selection-muted: #A2929C;
   --pre-bg: #100C0F; --sidebar: #1a1619;
+  --grad-card: linear-gradient(180deg, #231e22 0%, #1b161a 100%);
+  --grad-primary: linear-gradient(180deg, #f9a5ca 0%, #e593b6 100%);
+  --shadow-primary: 0 4px 16px 0 rgba(239,156,192,.4);
+  --act-glow: 0 0 12px rgba(243,174,203,.35);
 }
 html, body { height: 100%; }
 body {
