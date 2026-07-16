@@ -4526,6 +4526,22 @@ def test_cmd_history_audios_skips_hidden_files_and_dirs(tmp_path):
     assert audios[0]["base_stamp"] == "2026-01-01-100000"
 
 
+def test_cmd_history_audios_does_not_recurse_into_non_hidden_subdir(tmp_path):
+    # A NON-hidden subdir (e.g. an old export folder, not .trash/.obsidian) must still be
+    # excluded — the inventory is a single-level out_dir scan, not a recursive walk. The
+    # hidden-dir test above only exercises the dotfile-name skip; this locks the separate
+    # is_file() guard (entry.is_file() is False for any directory, hidden or not).
+    out = tmp_path / "vault"; out.mkdir()
+    db = str(tmp_path / "i.db")
+    subdir = out / "exported"; subdir.mkdir()  # ordinary, non-hidden subdirectory
+    make_wav(subdir / "meeting-2026-01-01-999999.wav")
+    make_wav(out / "meeting-2026-01-01-100000.wav")
+    events = capture(backend.cmd_history, str(out), db)
+    audios = [e for e in events if e["event"] == "history"][0]["audios"]
+    assert len(audios) == 1
+    assert audios[0]["base_stamp"] == "2026-01-01-100000"
+
+
 def test_cmd_history_audios_duration_s_parsed_for_valid_wav(tmp_path):
     out = tmp_path / "vault"; out.mkdir()
     db = str(tmp_path / "i.db")

@@ -2248,9 +2248,8 @@ def _wav_duration_s(path):
     ffprobe dependency, no full-file read (wave.open reads just the RIFF/fmt/data header).
     None on any parse failure (corrupt/truncated file, or non-WAV content despite the
     extension)."""
-    import wave as wavemod
     try:
-        with wavemod.open(path, "rb") as w:
+        with wave.open(path, "rb") as w:
             rate = w.getframerate()
             if not rate:
                 return None
@@ -2267,7 +2266,6 @@ def _scan_audio_inventory(out_dir):
     histmap4x analyzer report, Q5/constraint (a)). Each entry's base_stamp uses the same
     _base_stamp() helper _find_audio/_reconcile use, so a renderer can pair an orphan (or
     any) audio entry with its note row(s) by equality on base_stamp."""
-    import os
     out = Path(out_dir)
     if not out.exists():
         return []
