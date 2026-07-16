@@ -7,7 +7,7 @@ const path = require("path");
 const {
   buildWavHeader, WavWriter, rmsLevel, cacheKey,
   pairHistory, encodeTokenBlob, decodeTokenBlob, isStale,
-  rewriteNoteSpeakers, isOutsideRoot, indexRunReducer, upsertById, diskGuardVerdict,
+  rewriteNoteSpeakers, isOutsideRoot, isNoteDeletable, indexRunReducer, upsertById, diskGuardVerdict,
   resolveOutDirOnVaultChange, trayMenuTemplate,
   resolvePythonBin, resolveFfmpegBin, resolveResourcePath, resolveAudioTeeBin, resolveAssetPath, backendInstallStatus,
   parseFfmpegVersion,
@@ -255,6 +255,38 @@ test("isOutsideRoot: no root configured → false (nothing to compare)", () => {
 });
 test("isOutsideRoot: no dir → false", () => {
   assert.equal(isOutsideRoot("", "/vault"), false);
+});
+
+// ── История note deletion (path validation before unlink) ───────────────────
+test("isNoteDeletable: .md inside out_dir (single root) is deletable", () => {
+  assert.equal(isNoteDeletable("/out/meeting.md", "/out/meeting.md", ["/out"]), true);
+});
+test("isNoteDeletable: .md inside the PARA vault root (2nd root) is deletable", () => {
+  assert.equal(isNoteDeletable("/vault/Projects/meeting.md", "/vault/Projects/meeting.md", ["/out", "/vault"]), true);
+});
+test("isNoteDeletable: resolved path outside every allowed root is refused", () => {
+  assert.equal(isNoteDeletable("/elsewhere/meeting.md", "/elsewhere/meeting.md", ["/out", "/vault"]), false);
+});
+test("isNoteDeletable: traversal ('..') resolving outside the root is refused", () => {
+  // Caller resolves notePath to an absolute real path before calling in (main.js uses
+  // fs.realpathSync) — a "../../etc/passwd.md"-style input collapses to whatever it
+  // actually points at on disk; here it lands outside every allowed root.
+  const resolved = path.resolve("/out", "../../etc/passwd.md");
+  assert.equal(isNoteDeletable("/out/../../etc/passwd.md", resolved, ["/out"]), false);
+});
+test("isNoteDeletable: non-.md path is refused even if it resolves inside a root", () => {
+  assert.equal(isNoteDeletable("/out/audio.wav", "/out/audio.wav", ["/out"]), false);
+});
+test("isNoteDeletable: missing/unresolvable file (resolvedPath null) is refused", () => {
+  assert.equal(isNoteDeletable("/out/gone.md", null, ["/out"]), false);
+});
+test("isNoteDeletable: no allowed roots configured is refused", () => {
+  assert.equal(isNoteDeletable("/out/meeting.md", "/out/meeting.md", []), false);
+  assert.equal(isNoteDeletable("/out/meeting.md", "/out/meeting.md", [null, ""]), false);
+});
+test("isNoteDeletable: non-string notePath is refused", () => {
+  assert.equal(isNoteDeletable(null, "/out/meeting.md", ["/out"]), false);
+  assert.equal(isNoteDeletable(undefined, "/out/meeting.md", ["/out"]), false);
 });
 
 // ── out-dir auto-follow (settings "Куда сохранять", Variant A) ──────────────

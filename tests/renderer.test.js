@@ -38,6 +38,7 @@ async function boot(apiOverrides = {}) {
     }),
     listHistory: async () => [{ name: "2026-01-01", title: "Синк", note: "/o/meeting-x.md", audio: "/o/meeting-x.wav" }],
     readNote: async () => '---\ntitle: "T"\n---\n\n## Резюме\n\nтекст\n\n**[Спикер 1]**: привет',
+    deleteHistoryNote: async () => ({ ok: true }),
     paraCreateVault: async () => ({ ok: true }),
     paraClassify: async () => ({ category: "projects", project: "P" }),
     classifyGlossaryTerms: async () => ({ categories: {} }),
@@ -5297,4 +5298,113 @@ test("История: a single-version recording still renders as a plain row, n
   window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
   assert.equal($("historyList").querySelectorAll(".rail-group").length, 0);
   assert.ok($("historyList").querySelector(".rail-item:not(.pending)"));
+});
+
+// ── История note deletion ────────────────────────────────────────────────────
+test("История note view: delete button lives in the note header, uses the shared .btn.danger style", async () => {
+  const { window, $ } = await boot({
+    listHistory: async () => [{ name: "2026-01-01", title: "Синк", note: "/o/meeting-x.md", audio: "/o/meeting-x.wav" }],
+  });
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  $("historyList").querySelector(".rail-item").click(); await tick(window);
+  const btn = $("noteView").querySelector("#nvDelete");
+  assert.ok(btn, "delete button not found in the open note's header");
+  assert.ok(btn.classList.contains("danger"), "must reuse the shared danger token, not a hardcoded color");
+  assert.equal(btn.getAttribute("style"), null, "no inline styling");
+});
+
+test("История note delete: confirm() cancel → deleteHistoryNote is never called, note stays open", async () => {
+  let called = false;
+  const { window, $ } = await boot({
+    listHistory: async () => [{ name: "2026-01-01", title: "Синк", note: "/o/meeting-x.md", audio: "/o/meeting-x.wav" }],
+    deleteHistoryNote: async () => { called = true; return { ok: true }; },
+  });
+  window.confirm = () => false;
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  $("historyList").querySelector(".rail-item").click(); await tick(window);
+  $("noteView").querySelector("#nvDelete").click(); await tick(window);
+  assert.equal(called, false, "deleteHistoryNote must not be called when confirm is declined");
+  assert.ok($("noteView").textContent.includes("Синк"), "note view must remain showing the note");
+  assert.equal($("historyList").querySelectorAll(".rail-item").length, 1, "rail entry must survive a cancelled delete");
+});
+
+test("История note delete: confirmed → deleteHistoryNote called with the note's path, rail entry removed", async () => {
+  let deletedPath = null;
+  let notes = [{ name: "2026-01-01", title: "Синк", note: "/o/meeting-x.md", audio: "/o/meeting-x.wav" }];
+  const { window, $ } = await boot({
+    listHistory: async () => notes,
+    deleteHistoryNote: async (notePath) => {
+      deletedPath = notePath;
+      notes = notes.filter((n) => n.note !== notePath);
+      return { ok: true };
+    },
+  });
+  window.confirm = () => true;
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  $("historyList").querySelector(".rail-item").click(); await tick(window);
+  $("noteView").querySelector("#nvDelete").click();
+  await tick(window); await tick(window);
+  assert.equal(deletedPath, "/o/meeting-x.md");
+  assert.equal($("historyList").querySelectorAll(".rail-item").length, 0, "deleted note's row must be gone");
+  assert.ok(!$("noteView").textContent.includes("Синк"), "deleted note's content must no longer show");
+  assert.ok($("noteView").textContent.includes("Пока нет заметок"), "empty state shown once no notes remain");
+});
+
+test("История note delete: with another note remaining, refresh auto-opens it instead of leaving stale content", async () => {
+  let notes = [
+    { name: "2026-01-02", title: "Встреча 2", note: "/o/meeting-2.md", audio: null },
+    { name: "2026-01-01", title: "Синк", note: "/o/meeting-x.md", audio: "/o/meeting-x.wav" },
+  ];
+  const { window, $ } = await boot({
+    listHistory: async () => notes,
+    readNote: async (p) => (p === "/o/meeting-2.md"
+      ? '---\ntitle: "Встреча 2"\n---\n\nвторая заметка'
+      : '---\ntitle: "Синк"\n---\n\nпервая заметка'),
+    deleteHistoryNote: async (notePath) => {
+      notes = notes.filter((n) => n.note !== notePath);
+      return { ok: true };
+    },
+  });
+  window.confirm = () => true;
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  const rows = $("historyList").querySelectorAll(".rail-item");
+  assert.equal(rows.length, 2);
+  rows[0].click(); await tick(window); // open whichever the rail put first
+  const openedTitle = $("noteView").querySelector(".note-title").textContent;
+  $("noteView").querySelector("#nvDelete").click();
+  await tick(window); await tick(window);
+  assert.equal($("historyList").querySelectorAll(".rail-item").length, 1, "one row removed from the rail");
+  assert.ok(!$("noteView").textContent.includes(openedTitle), "the deleted note's own title must no longer show");
+  assert.ok($("noteView").querySelector(".note-title"), "the remaining note auto-opens instead of leaving a placeholder");
+});
+
+test("История note delete: main refuses while busy (ok:false) → alert shown, note stays open, button re-enabled", async () => {
+  let alerted = null;
+  const { window, $ } = await boot({
+    listHistory: async () => [{ name: "2026-01-01", title: "Синк", note: "/o/meeting-x.md", audio: "/o/meeting-x.wav" }],
+    deleteHistoryNote: async () => ({ ok: false, error: "Дождитесь окончания обработки" }),
+  });
+  window.alert = (msg) => { alerted = msg; };
+  window.confirm = () => true;
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  $("historyList").querySelector(".rail-item").click(); await tick(window);
+  $("noteView").querySelector("#nvDelete").click();
+  await tick(window); await tick(window);
+  assert.equal(alerted, "Дождитесь окончания обработки");
+  assert.ok($("noteView").textContent.includes("Синк"), "note must remain open after a refused delete");
+  assert.equal($("noteView").querySelector("#nvDelete").disabled, false, "button re-enabled after refusal");
+});
+
+// main.js requires("electron") and can't be loaded headless under plain node --test
+// (same reason as the other main.js checks above) — source-text assertions cover the
+// handler's actual guard/validation/deletion logic that a jsdom renderer test can't reach.
+test("main.js: delete-history-note refuses while procProc is active, validates via isNoteDeletable, and never does a recursive delete", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const handler = mainSrc.match(/ipcMain\.handle\("delete-history-note"[\s\S]*?\n\}\);/);
+  assert.ok(handler, "delete-history-note handler not found");
+  assert.match(handler[0], /if \(procProc\) return \{ ok: false/);
+  assert.match(handler[0], /isNoteDeletable/);
+  assert.match(handler[0], /fs\.realpathSync/);
+  assert.match(handler[0], /fs\.unlinkSync/);
+  assert.ok(!/rmSync|rm\(/.test(handler[0]), "must never use a recursive/directory-capable delete");
 });

@@ -2368,6 +2368,7 @@ async function openHistoryNote(item) {
        ${item.audio ? '<button class="btn small" id="nvAudio">🎵 Аудио</button>' : ""}
        <button class="btn small" id="nvCopyPath" title="Скопировать путь до заметки">📋 Путь</button>
        <button class="btn small ghost" id="nvReprocess">↻ Переобработать</button>
+       <button class="btn small danger" id="nvDelete">🗑 Удалить</button>
      </div>
      ${meta ? `<div class="note-meta">${escapeHtml(meta)}</div>` : ""}
      <div id="nvSpeakerMap" class="speaker-map" style="display:none">
@@ -2392,6 +2393,7 @@ async function openHistoryNote(item) {
     reprocessBtn.title = "Аудио не найдено — переобработка недоступна";
     reprocessBtn.onclick = null;
   }
+  $("nvDelete").onclick = () => deleteHistoryNote(item);
   // Speaker reassignment for an already-saved История note — same rename-speakers IPC
   // the record card's #applySpeakers uses (rewriteNoteSpeakers works on any saved note,
   // no backend change needed), just targeting this note's own labels/container instead
@@ -2413,6 +2415,34 @@ async function openHistoryNote(item) {
       }
       await openHistoryNote(item); // re-read + re-render so the new labels show
     };
+  }
+}
+
+// Deletes ONE note (its .md file only — the audio stays on disk, versioned
+// siblings are untouched). item is always the note currently open in #noteView
+// (nvDelete only exists there — no per-row/rail delete affordance, by design).
+// Always confirms first (same native confirm() pattern as onResetApp above);
+// on success, marks #noteView back to the ".history-placeholder" state BEFORE
+// calling refreshHistory() so updateNoteViewDefault() picks the marker up and
+// auto-opens whatever note now sorts first (or renders the empty state if none
+// are left) — reusing the exact same reload path every other История mutation uses.
+async function deleteHistoryNote(item) {
+  const btn = $("nvDelete");
+  if (btn.disabled) return;
+  const ok = confirm(
+    `Вы точно хотите удалить заметку «${item.title || item.name}»? ` +
+    "Аудиозапись останется на диске, заметку можно будет восстановить только вручную."
+  );
+  if (!ok) return;
+  btn.disabled = true;
+  try {
+    const res = await window.api.deleteHistoryNote(item.note);
+    if (res && res.ok === false) { alert(res.error); return; }
+    openNoteIdx = null;
+    $("noteView").innerHTML = '<p class="hint history-placeholder">Заметка удалена.</p>';
+    await refreshHistory();
+  } finally {
+    btn.disabled = false;
   }
 }
 
