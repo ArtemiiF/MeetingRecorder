@@ -1997,11 +1997,13 @@ $("historyRefresh").addEventListener("click", refreshHistory);
 
 // ── history (rail + note viewer) ─────────────────────────────────────────────
 let historyItems = [];
-// Out-dir audio inventory (feat-history-audio-inventory / PR #29's cmd_history
-// addition): {base_stamp, path, size, mtime, duration_s}[] — every audio file
-// physically present, including ones with zero surviving notes ("без обработок").
-// Read off historyItems.audios (see main.js's list-history mapping) rather than a
-// second IPC round-trip; [] on a not-yet-updated backend (safety until #29 merges).
+// Out-dir audio inventory (feat-history-audio-inventory's cmd_history addition):
+// {base_stamp, path, size, mtime, duration_s}[] — every audio file physically
+// present, including ones with zero surviving notes ("без обработок"). Read off
+// historyItems.audios (an extra property main.js's list-history mapping attaches to
+// the returned array — see its comment) rather than a second IPC round-trip; []
+// whenever a fixture/test simply didn't populate it (that property is optional by
+// construction, not a backend-staleness fallback).
 let historyAudios = [];
 // idx (into historyItems) of the note currently shown in #noteView, or null — renderRail()
 // rebuilds the whole rail from scratch on every call (filters, refresh, auto-open included),
@@ -2078,30 +2080,15 @@ function formatGroupDate(isoDate) {
 }
 
 // ── note versioning by template on reprocess (История "Переобработать") ──────────
-// Strip a note's language suffix (-en/-auto — mirrors backend.py's _NOTE_LANGS) and/or
-// revision suffix (-r<seq> — backend.py Pipeline.process's versioned-reprocess
-// filenames) from its stamp, recovering the shared "meeting-<timestamp>" recording
-// identity. Mirrors backend.py's _find_audio stem-stripping (same order: revision
-// suffix first, then language) so a reprocessed note's version-group and its shared
-// audio agree on what "the same recording" means. Fallback only — recordingBaseStamp
-// below prefers the backend-provided base_stamp field when present.
-const NOTE_LANG_SUFFIXES = new Set(["en", "auto"]);
-function baseStampOf(stamp) {
-  let s = String(stamp || "");
-  const rev = /^(.*)-r\d+$/.exec(s);
-  if (rev) s = rev[1];
-  const lang = /^(.*)-([a-z]{2,4})$/.exec(s);
-  if (lang && NOTE_LANG_SUFFIXES.has(lang[2])) s = lang[1];
-  return s;
-}
-
-// Canonical recording identity for a note row: prefer the backend-provided base_stamp
-// (feat-history-audio-inventory / PR #29's cmd_history addition, pairs a note with the
-// out_dir audio inventory) and fall back to the renderer's own baseStampOf(it.name) when
-// absent — safety net until #29 merges into main (or for any payload from a
-// not-yet-updated backend).
+// Canonical recording identity for a note row: the backend-provided base_stamp
+// (feat-history-audio-inventory's cmd_history addition — every note row is tagged
+// with it, main.js passes it straight through — see list-history's mapping) pairs a
+// note with the out_dir audio inventory and collapses every language variant/
+// reprocess version of one recording to the same key. Named accessor (rather than
+// reading `.base_stamp` inline at every call site) so the one field this whole
+// feature keys off of has a single, greppable name.
 function recordingBaseStamp(it) {
-  return it.base_stamp || baseStampOf(it.name);
+  return it.base_stamp;
 }
 
 // Mirrors backend.py's _parse_any_stamp — parses either stamp namespace into a real
@@ -2297,8 +2284,7 @@ function buildNotesRecordingRow(rec) {
 // the row itself is a no-op), with a prominent «▶ Обработать» that reuses the SAME
 // reprocess entry point a note's own ▶ uses (openReprocessPicker/reprocessHistory) —
 // there is no note metadata (template/language) to seed the picker with, so a synthetic
-// item carrying only the base stamp stands in for a real one (recordingBaseStamp reads
-// it straight off .base_stamp, no baseStampOf guessing needed). Deliberately NO
+// item carrying only base_stamp stands in for a real one. Deliberately NO
 // recording-level ✕ (owner decision, item 5 — deferred to the trash PR; permanent audio
 // deletion isn't acceptable yet), unlike the design reference card.
 function buildOrphanRow(rec) {

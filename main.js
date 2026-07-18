@@ -1675,9 +1675,9 @@ ipcMain.handle("list-history", async (_e, outDir) => {
     // before its next mtime-triggered reconcile) has no version key; default 1
     // (mirrors backend.py's own _reconcile/process default for the same case).
     version: it.version || 1,
-    // Canonical recording identity (feat-history-audio-inventory / PR #29's
-    // cmd_history addition) — undefined on a not-yet-updated backend; the renderer
-    // falls back to its own baseStampOf(name) in that case (see recordingBaseStamp).
+    // Canonical recording identity (feat-history-audio-inventory's cmd_history
+    // addition — every note row is tagged with it) — pairs a note with the out_dir
+    // audio inventory (see the renderer's recordingBaseStamp/buildRecordings).
     base_stamp: it.base_stamp,
   });
   // audios[] (the out_dir audio inventory — same PR) rides along as a plain extra
