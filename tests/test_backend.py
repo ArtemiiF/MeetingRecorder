@@ -7,7 +7,6 @@ import signal
 import sys
 import threading
 import types
-from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -662,7 +661,7 @@ def test_cmd_history_passes_vault_root_through_to_reconcile(tmp_path):
     archive = vault / "Archives"; archive.mkdir()
     (archive / "meeting-2026-07-08-184655.md").write_text('---\ntitle: "Filed"\n---\n# x', encoding="utf-8")
     db = str(tmp_path / "i.db")
-    events = capture(backend.cmd_history, str(out), db, None, str(vault))
+    events = capture(backend.cmd_history, str(out), db, str(vault))
     items = [e for e in events if e["event"] == "history"][0]["items"]
     assert len(items) == 1 and items[0]["title"] == "Filed"
 
@@ -712,75 +711,6 @@ def test_db_connect_sets_busy_timeout(tmp_path):
     timeout_ms = conn.execute("PRAGMA busy_timeout").fetchone()[0]
     conn.close()
     assert timeout_ms == 10000
-
-
-# ── _load_pending_manifest (read-only mirror of main.js's loadPendingManifest) ──
-def test_load_pending_manifest_missing_file_returns_empty(tmp_path):
-    assert backend._load_pending_manifest(str(tmp_path / "nope.json")) == []
-
-
-def test_load_pending_manifest_corrupt_file_returns_empty(tmp_path):
-    f = tmp_path / "pending.json"; f.write_text("{not json", encoding="utf-8")
-    assert backend._load_pending_manifest(str(f)) == []
-
-
-def test_load_pending_manifest_reads_recordings_array(tmp_path):
-    f = tmp_path / "pending.json"
-    f.write_text(json.dumps({"recordings": [{"id": "r1", "name": "Запись 1"}]}), encoding="utf-8")
-    assert backend._load_pending_manifest(str(f)) == [{"id": "r1", "name": "Запись 1"}]
-
-
-def test_load_pending_manifest_non_list_recordings_returns_empty(tmp_path):
-    f = tmp_path / "pending.json"
-    f.write_text(json.dumps({"recordings": "oops"}), encoding="utf-8")
-    assert backend._load_pending_manifest(str(f)) == []
-
-
-# ── cmd_history merges pending recordings, sorted chronologically ──────────────
-def test_cmd_history_merges_pending_in_chronological_order(tmp_path):
-    out = tmp_path / "vault"; out.mkdir()
-    db = str(tmp_path / "i.db")
-    # a real note recorded at 12:00
-    (out / "meeting-2026-07-07-120000.md").write_text(
-        '---\ntitle: "Митинг"\n---\n# x', encoding="utf-8")
-    # a pending recording started at 13:00 (note stamp format vs pending's "T"-separated
-    # format with a random suffix — cmd_history must parse both to interleave correctly)
-    pending_file = tmp_path / "pending.json"
-    pending_file.write_text(json.dumps({"recordings": [
-        {"id": "2026-07-07T13-00-00-ab12", "name": "Запись 07.07 13:00",
-         "stamp": "2026-07-07T13-00-00-ab12", "mixed": "/rec/r1/mixed.wav"},
-    ]}), encoding="utf-8")
-    events = capture(backend.cmd_history, str(out), db, str(pending_file))
-    items = [e for e in events if e["event"] == "history"][0]["items"]
-    assert len(items) == 2
-    # newest first, same convention as _db_list's ORDER BY stamp DESC
-    assert items[0]["kind"] == "pending" and items[0]["name"] == "Запись 07.07 13:00"
-    assert items[1]["title"] == "Митинг"
-
-
-def test_cmd_history_without_pending_file_is_unaffected(tmp_path):
-    out = tmp_path / "vault"; out.mkdir()
-    db = str(tmp_path / "i.db")
-    (out / "meeting-2026-07-07-120000.md").write_text('---\ntitle: "A"\n---\n# x', encoding="utf-8")
-    events = capture(backend.cmd_history, str(out), db)
-    items = [e for e in events if e["event"] == "history"][0]["items"]
-    assert len(items) == 1 and "kind" not in items[0]
-
-
-def test_cmd_history_tolerates_missing_pending_file(tmp_path):
-    out = tmp_path / "vault"; out.mkdir()
-    db = str(tmp_path / "i.db")
-    (out / "meeting-2026-07-07-120000.md").write_text('---\ntitle: "A"\n---\n# x', encoding="utf-8")
-    events = capture(backend.cmd_history, str(out), db, str(tmp_path / "nope.json"))
-    items = [e for e in events if e["event"] == "history"][0]["items"]
-    assert len(items) == 1  # missing manifest → zero pending items merged, no crash
-
-
-def test_parse_any_stamp_handles_both_formats():
-    assert backend._parse_any_stamp("2026-07-07-120000") == datetime(2026, 7, 7, 12, 0, 0)
-    assert backend._parse_any_stamp("2026-07-07T13-00-00-ab12") == datetime(2026, 7, 7, 13, 0, 0)
-    assert backend._parse_any_stamp("garbage") is None
-    assert backend._parse_any_stamp(None) is None
 
 
 def test_process_records_template_in_index_and_frontmatter(monkeypatch, tmp_path):
@@ -4586,22 +4516,6 @@ def test_cmd_history_note_row_base_stamp_collapses_lang_and_revision_variants(tm
     items = [e for e in events if e["event"] == "history"][0]["items"]
     assert {it["base_stamp"] for it in items} == {"2026-01-01-100000"}
 
-
-def test_cmd_history_pending_row_has_no_base_stamp(tmp_path):
-    # base_stamp is a note-row concept (see cmd_history's comment) — pending rows use a
-    # different stamp namespace (_parse_any_stamp's "T"-separated format) and are not part
-    # of the audio-pairing identity yet (retiring the pending merge path is a separate PR).
-    out = tmp_path / "vault"; out.mkdir()
-    db = str(tmp_path / "i.db")
-    pending_file = tmp_path / "pending.json"
-    pending_file.write_text(json.dumps({"recordings": [
-        {"id": "2026-01-01T10-00-00-ab12", "name": "Запись", "stamp": "2026-01-01T10-00-00-ab12",
-         "mixed": "/rec/r1/mixed.wav"},
-    ]}), encoding="utf-8")
-    events = capture(backend.cmd_history, str(out), db, str(pending_file))
-    items = [e for e in events if e["event"] == "history"][0]["items"]
-    assert items[0]["kind"] == "pending"
-    assert "base_stamp" not in items[0]
 
 
 # ── cmd_history audios inventory — surfaces audio invisible to the .md-only _reconcile ─

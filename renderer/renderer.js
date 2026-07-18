@@ -2067,17 +2067,6 @@ function textMatchesQuery(haystack, query) {
   });
 }
 
-// Note-origin badge (item 7): recording/batch/file are set by the backend at save time
-// (backend.py Pipeline.process — see `source` frontmatter key); a legacy note saved before
-// this feature existed has no `source` key at all → explicit "unknown" badge, never inferred.
-const SOURCE_BADGE_ICON = { recording: "🎙", batch: "📦", file: "📄" };
-const SOURCE_BADGE_TITLE = { recording: "Запись", batch: "Пакетная обработка", file: "Загруженный файл" };
-function sourceBadge(source) {
-  const icon = SOURCE_BADGE_ICON[source] || "❓";
-  const title = SOURCE_BADGE_TITLE[source] || "Тип не определён (старая заметка)";
-  return ` <span class="rail-badge" title="${escapeHtml(title)}">${icon}</span>`;
-}
-
 // Date-group divider text (item: История groups by day so the calendar isn't needed).
 // ru-RU's "day + long month" CLDR pattern is genitive by design ("8 июля", not "8 июль") —
 // no manual month-name table needed.
@@ -2268,9 +2257,10 @@ function buildNotesRecordingRow(rec) {
       rowOrder.push(it);
       const v = it.version || 1;
       const latest = v === maxV ? ' <span class="rail-latest">(latest)</span>' : "";
-      // No sourceBadge here — matches the pre-existing group-row precedent (only the
-      // old solitary flat row, now retired, ever showed it); the design reference
-      // (history-audio-a.html) doesn't show a source icon on обработка rows either.
+      // No source-origin badge here — sourceBadge/SOURCE_BADGE_* were removed as dead
+      // code (L9 arch-audit): only the old solitary flat row, retired by the
+      // audio-first rail, ever called it. The design reference (history-audio-a.html)
+      // doesn't show a source icon on обработка rows either.
       return `<button type="button" class="rail-item rail-version-row">` +
         `<span class="rail-title">${escapeHtml(tmpl || "Без шаблона")} · v${v}${latest}</span></button>`;
     }).join("");

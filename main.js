@@ -1796,15 +1796,18 @@ function cleanupUpdateLeftovers() {
   rmNoAsar(UPDATES_DIR, { recursive: true, force: true }); // may still hold an unpacked .app under extract/
 }
 
-// Past recordings: query the backend's SQLite index (reconciled against the notes dir),
-// merged with still-pending recordings (--pending-file) so the История rail can show them
-// at their real chronological position (option c — see HANDOFF/analyzer notes).
+// Past recordings: query the backend's SQLite index (reconciled against the notes dir).
+// Still-pending recordings are tracked separately (state.pendingRecordings, sourced
+// from list-pending-recordings) and merged into the rail client-side by
+// buildRecordings() — backend.py's OWN --pending-file merge (kind:"pending" synthetic
+// rows) was retired as dead code (L9 arch-audit): the renderer already filtered those
+// rows out everywhere (buildRecordings/nextVersionFor), never rendering them.
 ipcMain.handle("list-history", async (_e, outDir) => {
   const dir = expandHome(outDir) || DEFAULT_OUT;
   // PARA vault root (if configured) so a note moved out of out_dir by filing still shows
   // up in История instead of disappearing on the next reconcile — see readParaRoot below.
   const vaultRoot = readParaRoot();
-  const histArgs = ["history", "--out-dir", dir, "--db", DB_PATH, "--pending-file", PENDING_FILE];
+  const histArgs = ["history", "--out-dir", dir, "--db", DB_PATH];
   if (vaultRoot) histArgs.push("--vault-root", vaultRoot);
   const { items, audios } = await new Promise((resolve) => {
     let out = [];
@@ -1813,12 +1816,7 @@ ipcMain.handle("list-history", async (_e, outDir) => {
       (ev) => { if (ev.event === EVENTS.HISTORY) { out = ev.items; auds = ev.audios || []; } },
       () => resolve({ items: out, audios: auds }));
   });
-  const mapped = items.map((it) => it.kind === "pending" ? {
-    kind: "pending",
-    id: it.id,
-    name: it.name,
-    audio: it.audio,
-  } : {
+  const mapped = items.map((it) => ({
     name: it.stamp,
     title: it.title,
     template: it.template,
@@ -1835,7 +1833,7 @@ ipcMain.handle("list-history", async (_e, outDir) => {
     // addition — every note row is tagged with it) — pairs a note with the out_dir
     // audio inventory (see the renderer's recordingBaseStamp/buildRecordings).
     base_stamp: it.base_stamp,
-  });
+  }));
   // audios[] (the out_dir audio inventory — same PR) rides along as a plain extra
   // property on the returned ARRAY rather than changing list-history's return shape
   // to {items, audios}: dozens of existing renderer tests (and refreshParaInbox,
