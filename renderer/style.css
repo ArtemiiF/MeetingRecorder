@@ -347,6 +347,9 @@ main:has(> #view-prompts:not(.hidden)) { max-width: 1200px; }
    hardcoded colors, mirrors the approved design card (history-audio-a.html). */
 .rail-rec-meta { display: flex; align-items: center; gap: 8px; padding: 0 12px 6px 34px;
   color: var(--muted); font-size: 11.5px; }
+/* Recording-level ✕ (История trash feature) — pinned to the right end of the meta row,
+   same "trailing button, margin-left:auto" pattern as .queue-retry-btn (pending rows). */
+.rec-trash-btn { margin-left: auto; }
 .rail-rec-badge { display: inline-flex; align-items: center; border-radius: 999px;
   padding: 1px 8px; font-size: 10.5px; font-weight: 600; line-height: 1.6; }
 .rail-rec-badge.wait { background: var(--rec-tint); color: var(--rec); }

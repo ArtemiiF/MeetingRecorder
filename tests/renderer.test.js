@@ -5375,7 +5375,7 @@ test("audio-first rail: an audios[] entry with no matching note renders as a «�
   assert.ok(orphan, "the unpaired audio entry must render as its own orphan row");
   assert.match(orphan.textContent, /meeting-2026-07-14-140300\.wav/);
   assert.match(orphan.textContent, /без обработок/);
-  assert.match(orphan.querySelector("button").textContent, /▶ Обработать/);
+  assert.match(orphan.querySelector(".btn.primary").textContent, /▶ Обработать/);
   assert.equal($("historyList").querySelectorAll(".rail-group").length, 1, "the PAIRED audio entry must not also render as an orphan");
 });
 
@@ -5393,7 +5393,7 @@ test("audio-first rail: an orphan row's ▶ Обработать opens the repro
   });
   window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
   const orphan = $("historyList").querySelector(".rail-item.orphan");
-  orphan.querySelector("button").click(); await tick(window);
+  orphan.querySelector(".btn.primary").click(); await tick(window);
   assert.ok($("noteView").querySelector("#reprocessPresetSelect"), "picker must open (reuses the same entry point a note's own ▶ uses)");
   $("noteView").querySelector("#reprocessConfirm").click(); await tick(window);
   assert.equal(sentAudioFile, "/out/meeting-2026-07-14-140300.wav", "reprocesses THIS orphan's own audio, not item.audio/currentAudio() leftovers");
@@ -5558,16 +5558,146 @@ test("История note delete: main refuses while busy (ok:false) → alert s
   assert.equal($("noteView").querySelector("#nvDelete").disabled, false, "button re-enabled after refusal");
 });
 
+test("История note delete: confirm text now uses корзина semantics (30-day retention), not permanent-delete wording", async () => {
+  let confirmMsg = null;
+  const { window, $ } = await boot({
+    listHistory: async () => [{ name: "2026-01-01", base_stamp: "2026-01-01", title: "Синк", note: "/o/meeting-x.md", audio: "/o/meeting-x.wav" }],
+  });
+  window.confirm = (msg) => { confirmMsg = msg; return false; }; // decline — this test only spies on the copy
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  $("historyList").querySelector(".rail-item").click(); await tick(window);
+  $("noteView").querySelector("#nvDelete").click(); await tick(window);
+  assert.match(confirmMsg, /корзин/i);
+  assert.match(confirmMsg, /30 дней/);
+});
+
+test("История note delete: deleteHistoryNote is called with the note's base_stamp as the 2nd arg (trash manifest correlation)", async () => {
+  let gotBaseStamp;
+  const { window, $ } = await boot({
+    listHistory: async () => [{ name: "2026-01-01", base_stamp: "2026-01-01-100000", title: "Синк", note: "/o/meeting-x.md", audio: "/o/meeting-x.wav" }],
+    deleteHistoryNote: async (notePath, baseStamp) => { gotBaseStamp = baseStamp; return { ok: true }; },
+  });
+  window.confirm = () => true;
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  $("historyList").querySelector(".rail-item").click(); await tick(window);
+  $("noteView").querySelector("#nvDelete").click(); await tick(window);
+  assert.equal(gotBaseStamp, "2026-01-01-100000");
+});
+
+// ── История recording-level trash (rail ✕ — corзина feature) ────────────────
+test("recording ✕ (notes-bearing): confirm() cancel → deleteHistoryRecording is never called, group stays", async () => {
+  let called = false;
+  const notes = [
+    { name: "2026-07-11-100000", base_stamp: "2026-07-11-100000", title: "Планёрка", template: "Митинг", version: 1, note: "/o/a.md", audio: "/o/a.wav" },
+  ];
+  const audios = [{ base_stamp: "2026-07-11-100000", path: "/o/meeting-2026-07-11-100000.wav", size: 100, mtime: 1, duration_s: 60 }];
+  const { window, $ } = await boot({
+    listHistory: async () => Object.assign([...notes], { audios }),
+    deleteHistoryRecording: async () => { called = true; return { ok: true }; },
+  });
+  window.confirm = () => false;
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  $("historyList").querySelector(".rec-trash-btn").click(); await tick(window);
+  assert.equal(called, false, "deleteHistoryRecording must not be called when confirm is declined");
+  assert.equal($("historyList").querySelectorAll(".rail-group").length, 1, "group must survive a cancelled trash");
+});
+
+test("recording ✕ (notes-bearing, multi-обработка): confirmed → deleteHistoryRecording called with baseStamp + ALL note paths + audio path, rail refreshed", async () => {
+  let payload = null;
+  let notes = [
+    { name: "2026-07-11-100000", base_stamp: "2026-07-11-100000", title: "Планёрка", template: "Митинг", version: 1, note: "/o/a.md", audio: "/o/a.wav" },
+    { name: "2026-07-11-100000-r1", base_stamp: "2026-07-11-100000", title: "Планёрка", template: "Саммари", version: 1, note: "/o/b.md", audio: "/o/a.wav" },
+  ];
+  let audios = [{ base_stamp: "2026-07-11-100000", path: "/o/meeting-2026-07-11-100000.wav", size: 100, mtime: 1, duration_s: 60 }];
+  const { window, $ } = await boot({
+    listHistory: async () => Object.assign([...notes], { audios }),
+    deleteHistoryRecording: async (p) => { payload = p; notes = []; audios = []; return { ok: true }; },
+  });
+  window.confirm = () => true;
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  $("historyList").querySelector(".rec-trash-btn").click();
+  await tick(window); await tick(window);
+  assert.equal(payload.baseStamp, "2026-07-11-100000");
+  assert.deepEqual(payload.notePaths.slice().sort(), ["/o/a.md", "/o/b.md"]);
+  assert.deepEqual(payload.audioPaths, ["/o/meeting-2026-07-11-100000.wav"]);
+  assert.equal($("historyList").querySelectorAll(".rail-group").length, 0, "the whole group must be gone after refresh");
+});
+
+test("recording ✕ (orphan): confirmed → deleteHistoryRecording called with the audio path only (no notes), orphan row disappears", async () => {
+  let payload = null;
+  let audios = [{ base_stamp: "2026-07-14-140300", path: "/out/meeting-2026-07-14-140300.wav", size: 100, mtime: 1, duration_s: 120 }];
+  const { window, $ } = await boot({
+    listHistory: async () => Object.assign([], { audios }),
+    deleteHistoryRecording: async (p) => { payload = p; audios = []; return { ok: true }; },
+  });
+  window.confirm = () => true;
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  $("historyList").querySelector(".rail-item.orphan .rec-trash-btn").click();
+  await tick(window); await tick(window);
+  assert.equal(payload.baseStamp, "2026-07-14-140300");
+  assert.deepEqual(payload.notePaths, []);
+  assert.deepEqual(payload.audioPaths, ["/out/meeting-2026-07-14-140300.wav"]);
+  assert.ok(!$("historyList").querySelector(".rail-item.orphan"), "orphan row must be gone after refresh");
+});
+
+test("recording ✕: main refuses while busy (ok:false) → alert shown, group stays", async () => {
+  let alerted = null;
+  const notes = [{ name: "2026-07-11-100000", base_stamp: "2026-07-11-100000", title: "Планёрка", note: "/o/a.md", audio: "/o/a.wav" }];
+  const { window, $ } = await boot({
+    listHistory: async () => Object.assign([...notes], { audios: [] }),
+    deleteHistoryRecording: async () => ({ ok: false, error: "Дождитесь окончания обработки" }),
+  });
+  window.alert = (msg) => { alerted = msg; };
+  window.confirm = () => true;
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  $("historyList").querySelector(".rec-trash-btn").click();
+  await tick(window); await tick(window);
+  assert.equal(alerted, "Дождитесь окончания обработки");
+  assert.equal($("historyList").querySelectorAll(".rail-group").length, 1, "group must survive a refused trash");
+});
+
+test("recording ✕: excluded on pending rows — no .rec-trash-btn, existing remove-pending-recording ✕ untouched", async () => {
+  const { window, $ } = await boot({
+    listHistory: async () => [],
+    listPendingRecordings: async () => ([
+      { id: "r1", name: "Запись 1", mixed: "/rec/r1/mixed.wav", mic: "/rec/r1/mic.wav", system: null, tracks: 1 },
+    ]),
+  });
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  const pendingRow = $("historyList").querySelector(".rail-item.pending");
+  assert.ok(pendingRow, "pending row must render");
+  assert.ok(!pendingRow.querySelector(".rec-trash-btn"), "pending keeps its own ✕ (remove-pending-recording) only — no trash button");
+  assert.ok(pendingRow.querySelector(".pending-del-btn"), "the existing pending ✕ must still be present");
+});
+
 // main.js requires("electron") and can't be loaded headless under plain node --test
 // (same reason as the other main.js checks above) — source-text assertions cover the
-// handler's actual guard/validation/deletion logic that a jsdom renderer test can't reach.
-test("main.js: delete-history-note refuses while procProc is active, validates via isNoteDeletable, and never does a recursive delete", () => {
+// handler's actual guard/validation/move-to-trash logic that a jsdom renderer test can't
+// reach. Post-trash-feature: the handler moves the note into .trash/ (moveToTrash) instead
+// of a permanent fs.unlinkSync — see lib/mainutil.js's trash helpers.
+test("main.js: delete-history-note refuses while procProc is active, validates via isNoteDeletable, and moves (never permanently deletes) the note", () => {
   const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
   const handler = mainSrc.match(/ipcMain\.handle\("delete-history-note"[\s\S]*?\n\}\);/);
   assert.ok(handler, "delete-history-note handler not found");
   assert.match(handler[0], /if \(procProc\) return \{ ok: false/);
   assert.match(handler[0], /isNoteDeletable/);
   assert.match(handler[0], /fs\.realpathSync/);
-  assert.match(handler[0], /fs\.unlinkSync/);
+  assert.match(handler[0], /moveToTrash/);
+  assert.match(handler[0], /kind: "note"/);
+  assert.ok(!/fs\.unlinkSync/.test(handler[0]), "must no longer permanently unlink — it moves to trash now");
+  assert.ok(!/rmSync|rm\(/.test(handler[0]), "must never use a recursive/directory-capable delete");
+});
+
+test("main.js: delete-history-recording validates EVERY note/audio path before moving any, refuses while procProc is active, and never does a recursive delete", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const handler = mainSrc.match(/ipcMain\.handle\("delete-history-recording"[\s\S]*?\n\}\);/);
+  assert.ok(handler, "delete-history-recording handler not found");
+  assert.match(handler[0], /if \(procProc\) return \{ ok: false/);
+  assert.match(handler[0], /isNoteDeletable/);
+  assert.match(handler[0], /isAudioDeletable/);
+  assert.match(handler[0], /fs\.realpathSync/);
+  assert.match(handler[0], /moveToTrash/);
+  assert.match(handler[0], /kind: "recording"/);
+  assert.ok(!/fs\.unlinkSync/.test(handler[0]), "must move to trash, not permanently unlink");
   assert.ok(!/rmSync|rm\(/.test(handler[0]), "must never use a recursive/directory-capable delete");
 });

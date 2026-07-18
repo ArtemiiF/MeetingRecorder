@@ -2214,6 +2214,17 @@ function buildRecordings() {
   return recordings;
 }
 
+// All out_dir audio inventory entries sharing a recording's base_stamp — normally
+// exactly one (backend.py's Pipeline.process only ever copies ONE file — the mixed/
+// imported source — into out_dir per recording, backend.py:1473-1500; mic.wav/system.wav
+// never leave the pending recordings/ session dir), plural-safe in case more than one
+// physical file ever shares a base_stamp. buildRecordings' own `.find(...)` above only
+// needs the first match for display; trash (deleteRecording below) needs ALL of them so
+// nothing physically tied to this recording is silently left behind.
+function audiosForBaseStamp(baseStamp) {
+  return historyAudios.filter((a) => a.base_stamp === baseStamp);
+}
+
 // One collapsible recording row for any base stamp with ≥1 (currently shown) note —
 // EVERY notes-bearing recording renders this way now (a solitary обработка is no
 // longer a special-cased flat row), organized by template (stable order = first-seen,
@@ -2263,7 +2274,8 @@ function buildNotesRecordingRow(rec) {
   wrap.innerHTML =
     `<button type="button" class="rail-group-header">` +
     `<span class="glossary-caret">${collapsed ? "▸" : "▾"}</span> 🎙 ${escapeHtml(title)}</button>` +
-    `<div class="rail-rec-meta">${escapeHtml(metaText)}${recordingBadge("notes", notes.length)}</div>` +
+    `<div class="rail-rec-meta">${escapeHtml(metaText)}${recordingBadge("notes", notes.length)}` +
+    `<button type="button" class="btn small ghost rec-trash-btn" title="Удалить (в корзину)">✕</button></div>` +
     `<div class="rail-group-versions${collapsed ? " hidden" : ""}">${rowsHtml}</div>`;
 
   wrap.querySelector(".rail-group-header").addEventListener("click", () => {
@@ -2276,6 +2288,8 @@ function buildNotesRecordingRow(rec) {
     btn.dataset.idx = idx; // selectNote's `.rail-item` active-highlight match relies on this
     btn.addEventListener("click", () => selectNote(idx));
   });
+  const trashBtn = wrap.querySelector(".rec-trash-btn");
+  trashBtn.addEventListener("click", () => deleteRecording(rec, trashBtn));
   return wrap;
 }
 
@@ -2284,9 +2298,10 @@ function buildNotesRecordingRow(rec) {
 // the row itself is a no-op), with a prominent «▶ Обработать» that reuses the SAME
 // reprocess entry point a note's own ▶ uses (openReprocessPicker/reprocessHistory) —
 // there is no note metadata (template/language) to seed the picker with, so a synthetic
-// item carrying only base_stamp stands in for a real one. Deliberately NO
-// recording-level ✕ (owner decision, item 5 — deferred to the trash PR; permanent audio
-// deletion isn't acceptable yet), unlike the design reference card.
+// item carrying only base_stamp stands in for a real one. Recording-level ✕ (trash
+// feature) now applies here too — an orphan is just an audio-only recording, same as any
+// other; the histaudrail2x report's "deferred to the trash PR" note is resolved by this
+// one.
 function buildOrphanRow(rec) {
   const el = document.createElement("div");
   el.className = "rail-item orphan";
@@ -2295,12 +2310,15 @@ function buildOrphanRow(rec) {
   const name = (rec.audio.path || "").split("/").pop();
   el.innerHTML =
     `<div class="rail-rec-head"><span>🎙</span><span class="rail-title rail-title-file">${escapeHtml(name)}</span></div>` +
-    `<div class="rail-rec-meta">${escapeHtml([time, dur].filter(Boolean).join(" · "))}${recordingBadge("orphan")}</div>`;
+    `<div class="rail-rec-meta">${escapeHtml([time, dur].filter(Boolean).join(" · "))}${recordingBadge("orphan")}` +
+    `<button type="button" class="btn small ghost rec-trash-btn" title="Удалить (в корзину)">✕</button></div>`;
   const btn = document.createElement("button");
   btn.className = "btn small primary";
   btn.textContent = "▶ Обработать";
   btn.addEventListener("click", () => processOrphanAudio(rec.audio));
   el.appendChild(btn);
+  const trashBtn = el.querySelector(".rec-trash-btn");
+  trashBtn.addEventListener("click", () => deleteRecording(rec, trashBtn));
   return el;
 }
 
@@ -2545,8 +2563,10 @@ async function openHistoryNote(item) {
 }
 
 // Deletes ONE note (its .md file only — the audio stays on disk, versioned
-// siblings are untouched). item is always the note currently open in #noteView
-// (nvDelete only exists there — no per-row/rail delete affordance, by design).
+// siblings are untouched) — moves it into корзина (.trash/, 30-day retention) rather
+// than a permanent delete (История trash feature). item is always the note currently
+// open in #noteView (nvDelete only exists there — no per-row/rail delete affordance for
+// a single обработка, by design; see deleteRecording below for the recording-level ✕).
 // Always confirms first (same native confirm() pattern as onResetApp above);
 // on success, marks #noteView back to the ".history-placeholder" state BEFORE
 // calling refreshHistory() so updateNoteViewDefault() picks the marker up and
@@ -2557,18 +2577,79 @@ async function deleteHistoryNote(item) {
   if (btn.disabled) return;
   const ok = confirm(
     `Вы точно хотите удалить заметку «${item.title || item.name}»? ` +
-    "Аудиозапись останется на диске, заметку можно будет восстановить только вручную."
+    "Аудиозапись останется на диске. Заметка переедет в корзину, хранится 30 дней, потом удаляется навсегда."
   );
   if (!ok) return;
   btn.disabled = true;
   try {
-    const res = await window.api.deleteHistoryNote(item.note);
+    const res = await window.api.deleteHistoryNote(item.note, recordingBaseStamp(item));
     if (res && res.ok === false) { alert(res.error); return; }
     openNoteIdx = null;
     $("noteView").innerHTML = '<p class="hint history-placeholder">Заметка удалена.</p>';
     await refreshHistory();
   } finally {
     btn.disabled = false;
+  }
+}
+
+// Per-template breakdown for a trash confirm's note count (design reference
+// history-audio-trash.html: "3 заметки (Полная ×2, Саммари ×1)") — same grouping
+// buildNotesRecordingRow computes for rendering, recomputed here since deleteRecording's
+// confirm fires before any row-building context is available.
+function noteTemplateBreakdown(notes) {
+  const counts = new Map();
+  notes.forEach((it) => {
+    const t = it.template || "Без шаблона";
+    counts.set(t, (counts.get(t) || 0) + 1);
+  });
+  return [...counts.entries()].map(([t, n]) => `${t} ×${n}`).join(", ");
+}
+
+// Recording-level ✕ (История trash feature, owner decision — now allowed since корзина
+// exists): trashes the recording's out_dir audio file(s) and, for a notes-bearing
+// recording, EVERY обработка (all versions/templates/languages — rec.allNotes, not the
+// possibly-filtered rec.shownNotes). Not available on a pending row — pending keeps its
+// existing ✕/remove-pending-recording semantics untouched (buildPendingRow/
+// deletePendingRecording, unchanged by this feature). Always confirms (native confirm(),
+// same pattern as deleteHistoryNote/onResetApp — see the design reference's itemized
+// copy), itemizing exactly what moves to trash before asking.
+async function deleteRecording(rec, btn) {
+  if (btn && btn.disabled) return;
+  const notes = rec.kind === "notes" ? rec.allNotes : [];
+  const audios = rec.kind === "orphan" ? (rec.audio ? [rec.audio] : []) : audiosForBaseStamp(rec.baseStamp);
+  const title = rec.kind === "orphan"
+    ? (rec.audio.path || "").split("/").pop()
+    : (notes[0].title || notes[0].name || "Без темы");
+  const parts = [];
+  if (audios.length) parts.push("аудио");
+  if (notes.length) {
+    parts.push(`${notes.length} ${ruPlural(notes.length, "заметка", "заметки", "заметок")} (${noteTemplateBreakdown(notes)})`);
+  }
+  const ok = confirm(
+    `Удалить запись «${title}»?\n` +
+    `В корзину: ${parts.join(" + ")}.\n` +
+    "Хранится 30 дней, потом удаляется навсегда."
+  );
+  if (!ok) return;
+  if (btn) btn.disabled = true;
+  try {
+    const res = await window.api.deleteHistoryRecording({
+      baseStamp: rec.baseStamp,
+      notePaths: notes.map((n) => n.note),
+      audioPaths: audios.map((a) => a.path),
+    });
+    if (res && res.ok === false) { alert(res.error); return; }
+    // If the note currently open in #noteView belongs to the just-trashed recording,
+    // it must not keep showing stale content — same placeholder-then-refresh discipline
+    // as deleteHistoryNote above.
+    const trashedNotePaths = new Set(notes.map((n) => n.note));
+    if (openNoteIdx != null && historyItems[openNoteIdx] && trashedNotePaths.has(historyItems[openNoteIdx].note)) {
+      openNoteIdx = null;
+      $("noteView").innerHTML = '<p class="hint history-placeholder">Запись удалена.</p>';
+    }
+    await refreshHistory();
+  } finally {
+    if (btn) btn.disabled = false;
   }
 }
 

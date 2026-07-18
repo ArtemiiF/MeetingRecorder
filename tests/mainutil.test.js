@@ -8,6 +8,7 @@ const {
   buildWavHeader, WavWriter, rmsLevel, cacheKey,
   pairHistory, encodeTokenBlob, decodeTokenBlob, isStale,
   rewriteNoteSpeakers, isOutsideRoot, isNoteDeletable, indexRunReducer, upsertById, diskGuardVerdict,
+  isAudioDeletable, trashRootFor, trashDestPath, moveToTrash, purgeTrash,
   resolveOutDirOnVaultChange, trayMenuTemplate,
   resolvePythonBin, resolveFfmpegBin, resolveResourcePath, resolveAudioTeeBin, resolveAssetPath, backendInstallStatus,
   parseFfmpegVersion,
@@ -290,6 +291,133 @@ test("isNoteDeletable: non-string notePath is refused", () => {
 });
 test("isNoteDeletable: notePath ends in .md but resolves to a non-.md target (symlink case) is refused", () => {
   assert.equal(isNoteDeletable("/out/x.md", "/out/config.json", ["/out"]), false);
+});
+
+// ── История trash (30-day retention — recording ✕ + per-note delete) ────────
+test("isAudioDeletable: audio extension inside out_dir (single root) is deletable", () => {
+  assert.equal(isAudioDeletable("/out/meeting-x.wav", "/out/meeting-x.wav", ["/out"]), true);
+});
+test("isAudioDeletable: audio extension inside the PARA vault root (2nd root) is deletable", () => {
+  assert.equal(isAudioDeletable("/vault/Projects/meeting-x.mp3", "/vault/Projects/meeting-x.mp3", ["/out", "/vault"]), true);
+});
+test("isAudioDeletable: is case-insensitive on the extension", () => {
+  assert.equal(isAudioDeletable("/out/meeting-x.WAV", "/out/meeting-x.WAV", ["/out"]), true);
+});
+test("isAudioDeletable: resolved path outside every allowed root is refused", () => {
+  assert.equal(isAudioDeletable("/elsewhere/meeting-x.wav", "/elsewhere/meeting-x.wav", ["/out", "/vault"]), false);
+});
+test("isAudioDeletable: non-audio extension is refused even if it resolves inside a root", () => {
+  assert.equal(isAudioDeletable("/out/meeting-x.md", "/out/meeting-x.md", ["/out"]), false);
+  assert.equal(isAudioDeletable("/out/notes.txt", "/out/notes.txt", ["/out"]), false);
+});
+test("isAudioDeletable: missing/unresolvable file (resolvedPath null) is refused", () => {
+  assert.equal(isAudioDeletable("/out/gone.wav", null, ["/out"]), false);
+});
+test("isAudioDeletable: no allowed roots configured is refused", () => {
+  assert.equal(isAudioDeletable("/out/meeting-x.wav", "/out/meeting-x.wav", []), false);
+  assert.equal(isAudioDeletable("/out/meeting-x.wav", "/out/meeting-x.wav", [null, ""]), false);
+});
+test("isAudioDeletable: non-string audioPath is refused", () => {
+  assert.equal(isAudioDeletable(null, "/out/meeting-x.wav", ["/out"]), false);
+  assert.equal(isAudioDeletable(undefined, "/out/meeting-x.wav", ["/out"]), false);
+});
+test("isAudioDeletable: audioPath ends in an audio extension but resolves to a non-audio target (symlink case) is refused", () => {
+  assert.equal(isAudioDeletable("/out/x.wav", "/out/config.json", ["/out"]), false);
+});
+
+test("trashRootFor: a configured PARA vault root wins over out_dir (Obsidian convention — .trash lives at the vault root)", () => {
+  assert.equal(trashRootFor("/vault/Meetings", "/vault"), path.join("/vault", ".trash"));
+});
+test("trashRootFor: no vault configured falls back to a sibling .trash under out_dir", () => {
+  assert.equal(trashRootFor("/out", null), path.join("/out", ".trash"));
+  assert.equal(trashRootFor("/out", ""), path.join("/out", ".trash"));
+});
+
+test("trashDestPath: no existing file at the destination returns the bare name", () => {
+  const exists = () => false;
+  assert.equal(trashDestPath("/out/.trash", "meeting-x.wav", exists), path.join("/out/.trash", "meeting-x.wav"));
+});
+test("trashDestPath: a name collision gets a '-1' suffix", () => {
+  const taken = new Set([path.join("/out/.trash", "meeting-x.wav")]);
+  const exists = (p) => taken.has(p);
+  assert.equal(trashDestPath("/out/.trash", "meeting-x.wav", exists), path.join("/out/.trash", "meeting-x-1.wav"));
+});
+test("trashDestPath: multiple collisions pick the first free suffix", () => {
+  const taken = new Set([
+    path.join("/out/.trash", "meeting-x.wav"),
+    path.join("/out/.trash", "meeting-x-1.wav"),
+    path.join("/out/.trash", "meeting-x-2.wav"),
+  ]);
+  const exists = (p) => taken.has(p);
+  assert.equal(trashDestPath("/out/.trash", "meeting-x.wav", exists), path.join("/out/.trash", "meeting-x-3.wav"));
+});
+
+test("moveToTrash: same-volume rename — only renameSync is called, no copy/unlink fallback", () => {
+  const calls = [];
+  const deps = {
+    renameSync: (src, dest) => calls.push(["rename", src, dest]),
+    copyFileSync: () => calls.push(["copy"]),
+    unlinkSync: () => calls.push(["unlink"]),
+  };
+  moveToTrash("/out/a.wav", "/out/.trash/a.wav", deps);
+  assert.deepEqual(calls, [["rename", "/out/a.wav", "/out/.trash/a.wav"]]);
+});
+test("moveToTrash: EXDEV (cross-device rename) falls back to copyFileSync + unlinkSync", () => {
+  const calls = [];
+  const deps = {
+    renameSync: () => { const e = new Error("cross-device"); e.code = "EXDEV"; throw e; },
+    copyFileSync: (src, dest) => calls.push(["copy", src, dest]),
+    unlinkSync: (src) => calls.push(["unlink", src]),
+  };
+  moveToTrash("/out/a.wav", "/out/.trash/a.wav", deps);
+  assert.deepEqual(calls, [["copy", "/out/a.wav", "/out/.trash/a.wav"], ["unlink", "/out/a.wav"]]);
+});
+test("moveToTrash: a non-EXDEV rename error propagates (no silent fallback)", () => {
+  const deps = {
+    renameSync: () => { throw new Error("permission denied"); },
+    copyFileSync: () => { throw new Error("must not be called"); },
+    unlinkSync: () => { throw new Error("must not be called"); },
+  };
+  assert.throws(() => moveToTrash("/out/a.wav", "/out/.trash/a.wav", deps), /permission denied/);
+});
+
+test("purgeTrash: a fresh (not-yet-stale) entry is kept and its files are never even existence-checked", () => {
+  const now = 1_000_000_000_000;
+  const entry = { deletedAt: now - 1000, kind: "note", files: ["/out/.trash/a.md"], baseStamp: "s1" };
+  let existsCalled = false;
+  const deps = { existsSync: () => { existsCalled = true; return true; }, unlinkSync: () => { throw new Error("must not be called"); } };
+  const kept = purgeTrash([entry], 30 * 24 * 3600 * 1000, now, deps);
+  assert.deepEqual(kept, [entry]);
+  assert.equal(existsCalled, false, "a fresh entry's files must not even be existence-checked");
+});
+test("purgeTrash: an old (>30 day) entry has its existing files deleted and the entry dropped", () => {
+  const now = 1_000_000_000_000;
+  const maxAge = 30 * 24 * 3600 * 1000;
+  const entry = { deletedAt: now - maxAge - 1, kind: "recording", files: ["/out/.trash/a.wav", "/out/.trash/a.md"], baseStamp: "s1" };
+  const unlinked = [];
+  const deps = { existsSync: () => true, unlinkSync: (p) => unlinked.push(p) };
+  const kept = purgeTrash([entry], maxAge, now, deps);
+  assert.deepEqual(kept, [], "old entry must be dropped from the surviving manifest");
+  assert.deepEqual(unlinked, ["/out/.trash/a.wav", "/out/.trash/a.md"]);
+});
+test("purgeTrash: a missing file during purge is skipped silently (no throw) and the entry is still dropped", () => {
+  const now = 1_000_000_000_000;
+  const maxAge = 30 * 24 * 3600 * 1000;
+  const entry = { deletedAt: now - maxAge - 1, kind: "note", files: ["/out/.trash/gone.md"], baseStamp: null };
+  const deps = { existsSync: () => false, unlinkSync: () => { throw new Error("must not be called on a missing file"); } };
+  assert.doesNotThrow(() => {
+    const kept = purgeTrash([entry], maxAge, now, deps);
+    assert.deepEqual(kept, []);
+  });
+});
+test("purgeTrash: a mixed manifest keeps only the fresh entries", () => {
+  const now = 1_000_000_000_000;
+  const maxAge = 30 * 24 * 3600 * 1000;
+  const fresh = { deletedAt: now - 1000, kind: "note", files: ["/out/.trash/fresh.md"], baseStamp: "s1" };
+  const old = { deletedAt: now - maxAge - 1, kind: "note", files: ["/out/.trash/old.md"], baseStamp: "s2" };
+  const deps = { existsSync: () => true, unlinkSync: () => {} };
+  const kept = purgeTrash([fresh, old], maxAge, now, deps);
+  assert.deepEqual(kept, [fresh]);
 });
 
 // ── out-dir auto-follow (settings "Куда сохранять", Variant A) ──────────────
