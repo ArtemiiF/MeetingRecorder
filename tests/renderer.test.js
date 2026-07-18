@@ -3130,6 +3130,27 @@ test("main.js: process-audio refuses when no backend interpreter is available, a
   assert.match(processAudio, /if \(!backendAvailable\(\)\) return/);
 });
 
+// ── H3a arch-audit: file-stability gate (TODO.md incident — mixed.wav still being
+// written when process-audio's own mono-conversion cache snapshotted it mid-write) ──
+test("main.js: process-audio refuses when audioFile IS the currently-in-flight mix's target (mixInFlight + session.mixedPath match)", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const processAudio = mainSrc.match(/ipcMain\.handle\("process-audio"[\s\S]*?\n\}\);/)[0];
+  assert.match(processAudio, /if \(mixInFlight && session && audioFile === session\.mixedPath\) \{/);
+});
+test("main.js: process-audio refuses when the input file's size is still changing (isFileStable gate), even when it's not this app's own in-flight mix", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const processAudio = mainSrc.match(/ipcMain\.handle\("process-audio"[\s\S]*?\n\}\);/)[0];
+  assert.match(processAudio, /isFileStable\(\s*\n\s*audioFile, FILE_STABILITY_WAIT_MS,/);
+  assert.match(processAudio, /if \(!stable\) return \{ ok: false, error: "Файл ещё дописывается — подождите и повторите" \};/);
+});
+
+// ── H3b arch-audit: cache key folds in a content fingerprint, not just path:size:mtime ──
+test("main.js: cacheDirFor's tag includes contentFingerprint(audioFile), not just path:size:mtime", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const cacheDirFor = mainSrc.match(/function cacheDirFor\([\s\S]*?\n\}/)[0];
+  assert.match(cacheDirFor, /contentFingerprint\(audioFile\)/);
+});
+
 test("main.js: process-audio forwards --fast-model to the backend spawn only when fastModel is non-empty", () => {
   const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
   const processAudio = mainSrc.match(/ipcMain\.handle\("process-audio"[\s\S]*?\n\}\);/)[0];

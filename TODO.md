@@ -1,11 +1,10 @@
 # TODO
 
-## Инцидент 2026-07-10 (диагностирован, не чинен)
-- **Гонка стоп-записи ↔ обработка**: 25-мин запись → в пайплайн попало 0.4с (mono-кеш 12КБ при живом mixed 48МБ); стоп и старт обработки в одну секунду — mixed.wav, видимо, дописывался. Guard: pending-▶ (и «Обработать все») не активировать до подтверждённой финализации mixed (файл закрыт + размер стабилен), или манифест-append строго после close. Диагностика в HANDOFF.
+## Закрыто 2026-07-18 (arch-audit fixes)
+гонка стоп-записи↔обработка (H3a: file-stability gate — isFileStable size-check + mixInFlight+audioFile===session.mixedPath refusal в process-audio, cache key дополнен contentFingerprint) · `classify-glossary-terms`/`para-classify`/`para-extract` IPC без guard'а на `installBackendProc` (H1: busyVerdict централизован).
 
 ## Не-блокеры критик-гейтов (2026-07-10, PR #11-#13)
 - `removeGlossaryTerm` не чистит `glossaryCategories[low]` удалённого термина — сироты копятся в presets.json безгранично (рендер не задет; suggestions/dismissed капятся, категории — нет). Чистить при удалении.
-- `classify-glossary-terms` IPC без guard'а на `installBackendProc`/`updateProc` (паттерн para-extract) — клик мид-установки даст «нет ответа» вместо честного «дождитесь». Выровнять с start-recording-гейтами.
 - Двойной клик по «📋 Путь»/copy-кнопкам внутри окна фидбека клоберит захваченный текст (предсуществующий паттерн copyToClipboard) — кнопка залипает на «✓ Скопировано». Косметика.
 
 ## Не-блокеры критик-гейтов (2026-07-07, упаковка .app)

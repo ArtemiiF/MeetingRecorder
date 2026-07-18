@@ -5,7 +5,7 @@ const os = require("os");
 const path = require("path");
 
 const {
-  buildWavHeader, WavWriter, rmsLevel, cacheKey,
+  buildWavHeader, WavWriter, rmsLevel, cacheKey, contentFingerprint, isFileStable,
   pairHistory, encodeTokenBlob, decodeTokenBlob, isStale,
   rewriteNoteSpeakers, isOutsideRoot, isNoteDeletable, indexRunReducer, upsertById, diskGuardVerdict, busyVerdict,
   isPathInsideRoots,
@@ -75,6 +75,92 @@ test("cacheKey: deterministic, 16 hex chars", () => {
 });
 test("cacheKey: different tag → different key", () => {
   assert.notEqual(cacheKey("a:1:2"), cacheKey("a:1:3"));
+});
+
+// ── contentFingerprint (H3b arch-audit — cache staleness content check) ─────
+test("contentFingerprint: identical content produces the identical fingerprint", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fp-test-"));
+  const a = path.join(dir, "a.wav"); const b = path.join(dir, "b.wav");
+  fs.writeFileSync(a, "hello world");
+  fs.writeFileSync(b, "hello world");
+  assert.equal(contentFingerprint(a), contentFingerprint(b));
+});
+test("contentFingerprint: different content, SAME size, produces a DIFFERENT fingerprint — the whole point, catches an in-place rewrite path+size+mtime alone would miss", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fp-test-"));
+  const a = path.join(dir, "a.wav"); const b = path.join(dir, "b.wav");
+  fs.writeFileSync(a, "aaaaaaaaaa");
+  fs.writeFileSync(b, "bbbbbbbbbb");
+  assert.notEqual(contentFingerprint(a), contentFingerprint(b));
+});
+test("contentFingerprint: missing file returns '' rather than throwing", () => {
+  assert.equal(contentFingerprint(path.join(os.tmpdir(), `does-not-exist-${process.pid}.wav`)), "");
+});
+test("contentFingerprint: empty file (0 bytes) doesn't throw and returns a stable, non-empty hash string", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fp-test-"));
+  const p = path.join(dir, "empty.wav");
+  fs.writeFileSync(p, "");
+  const fp = contentFingerprint(p);
+  assert.equal(typeof fp, "string");
+  assert.notEqual(fp, "");
+  assert.equal(fp, contentFingerprint(p)); // deterministic
+});
+test("contentFingerprint: a change at the very start (inside the 64KB head window) IS detected, even on a large file", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fp-test-"));
+  const size = 200 * 1024; // bigger than the 64KB head/tail window on both ends
+  const bufA = Buffer.alloc(size, "x");
+  const bufB = Buffer.from(bufA);
+  bufB.write("CHANGED", 10);
+  const a = path.join(dir, "a.bin"); const b = path.join(dir, "b.bin");
+  fs.writeFileSync(a, bufA);
+  fs.writeFileSync(b, bufB);
+  assert.notEqual(contentFingerprint(a), contentFingerprint(b));
+});
+test("contentFingerprint: a middle-only change (head+tail+size unchanged) is NOT detected — documents the 64KB-window tradeoff", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fp-test-"));
+  const size = 200 * 1024;
+  const bufA = Buffer.alloc(size, "x");
+  const bufB = Buffer.from(bufA);
+  bufB.write("CHANGED", Math.floor(size / 2)); // mutate only the middle
+  const a = path.join(dir, "a.bin"); const b = path.join(dir, "b.bin");
+  fs.writeFileSync(a, bufA);
+  fs.writeFileSync(b, bufB);
+  assert.equal(contentFingerprint(a), contentFingerprint(b),
+    "middle-only edits are invisible to the 64KB head+tail window by design — a deliberate tradeoff, not a bug");
+});
+
+// ── isFileStable (H3a arch-audit — file-stability gate before processing) ───
+test("isFileStable: size unchanged across the wait → stable (true)", async () => {
+  const statFn = () => 1000; // same every call
+  const waitFn = () => Promise.resolve();
+  assert.equal(await isFileStable("/x", 10, statFn, waitFn), true);
+});
+test("isFileStable: size changed between the two samples → not stable (false) — mirrors the TODO.md incident's exact numbers (12KB → 48MB mid-write)", async () => {
+  const sizes = [12000, 48000000];
+  let i = 0;
+  const statFn = () => sizes[i++];
+  const waitFn = () => Promise.resolve();
+  assert.equal(await isFileStable("/x", 10, statFn, waitFn), false);
+});
+test("isFileStable: missing/unreadable file (statFn returns null) on the FIRST sample → not stable, waitFn never even called", async () => {
+  let waited = false;
+  const statFn = () => null;
+  const waitFn = () => { waited = true; return Promise.resolve(); };
+  assert.equal(await isFileStable("/x", 10, statFn, waitFn), false);
+  assert.equal(waited, false, "no point waiting on a file that doesn't exist at all");
+});
+test("isFileStable: file vanishes between samples (2nd statFn call returns null) → not stable", async () => {
+  const results = [1000, null];
+  let i = 0;
+  const statFn = () => results[i++];
+  const waitFn = () => Promise.resolve();
+  assert.equal(await isFileStable("/x", 10, statFn, waitFn), false);
+});
+test("isFileStable: waitFn is called with exactly the requested waitMs", async () => {
+  let seenMs = null;
+  const statFn = () => 5;
+  const waitFn = (ms) => { seenMs = ms; return Promise.resolve(); };
+  await isFileStable("/x", 250, statFn, waitFn);
+  assert.equal(seenMs, 250);
 });
 
 // ── history pairing ─────────────────────────────────────────────────────────

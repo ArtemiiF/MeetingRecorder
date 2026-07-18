@@ -13,7 +13,7 @@ const {
   WavWriter, rmsLevel, cacheKey, pairHistory,
   encodeTokenBlob, decodeTokenBlob, isStale,
   rewriteNoteSpeakers, isOutsideRoot, isNoteDeletable, indexRunReducer, upsertById, diskGuardVerdict, busyVerdict,
-  isPathInsideRoots,
+  isPathInsideRoots, contentFingerprint, isFileStable,
   isAudioDeletable, trashRootFor, trashDestPath, moveToTrash, purgeTrash,
   resolveOutDirOnVaultChange, trayMenuTemplate,
   resolvePythonBin, resolveFfmpegBin, resolveResourcePath, resolveAudioTeeBin, resolveAssetPath, backendInstallStatus,
@@ -917,18 +917,33 @@ ipcMain.handle("remove-pending-recording", async (_e, id) => {
   return { ok: true };
 });
 
-// Stable cache dir for an audio file (path+size+mtime) → resumable stages survive
-// a cancel/failed run, so a re-run reuses transcript/diarization instead of redoing them.
+// Stable cache dir for an audio file (path+size+mtime+content fingerprint) →
+// resumable stages survive a cancel/failed run, so a re-run reuses
+// transcript/diarization instead of redoing them.
+// H3b arch-audit: path+size+mtime ALONE can't tell an in-place rewrite that
+// preserves size and lands on a coarse/same-second mtime from the original file
+// — folding in contentFingerprint (lib/mainutil.js: sha1 of the first+last 64KB)
+// closes that gap. This DELIBERATELY changes every existing cache key once —
+// every cache computed before this fix is orphaned (never reused, never
+// cleaned up automatically — same as any other TMP_DIR/cache leftover pruneTemp
+// already sweeps on its own schedule).
 function cacheDirFor(audioFile) {
   let tag = audioFile;
   try {
     const st = fs.statSync(audioFile);
-    tag = `${audioFile}:${st.size}:${Math.round(st.mtimeMs)}`;
+    tag = `${audioFile}:${st.size}:${Math.round(st.mtimeMs)}:${contentFingerprint(audioFile)}`;
   } catch {}
   const dir = path.join(TMP_DIR, "cache", cacheKey(tag));
   fs.mkdirSync(dir, { recursive: true });
   return dir;
 }
+
+// H3a arch-audit: how long to wait between the two file-size samples in
+// process-audio's stability gate below. cmd_mix's ffmpeg subprocess.run is
+// synchronous (backend.py) — a genuine writer finishes well within this window;
+// this only needs to be long enough to CATCH an actively-growing file, not to
+// outlast a slow one.
+const FILE_STABILITY_WAIT_MS = 300;
 
 // processing pipeline
 ipcMain.handle("process-audio", async (_e, opts) => {
@@ -944,6 +959,27 @@ ipcMain.handle("process-audio", async (_e, opts) => {
   ]);
   if (busy) return { ok: false, error: busy };
   if (!backendAvailable()) return { ok: false, error: "Бэкенд не установлен — откройте Настройки → Бэкенд" };
+  // H3a arch-audit — file-stability gate (TODO.md incident: a 25-min recording was
+  // processed as 0.4s because mixed.wav was still being written when this handler's
+  // own mono-conversion cache snapshotted it mid-write, 12KB captured against an
+  // eventual 48MB file). Two checks, either one refuses:
+  //  1. Fast/zero-latency: audioFile IS the file stop-recording's own mix
+  //     (runBackend(["mix", ...])) is CURRENTLY writing — mixInFlight is set true
+  //     right before that call and cleared unconditionally in its onClose (see
+  //     mixInFlight's declaration above).
+  //  2. General safety net (a short real wait, ~300ms — negligible against a
+  //     multi-minute ML pipeline): the file's size must be unchanged across the
+  //     interval, catching ANY other still-writing source (an import mid-copy,
+  //     a sync tool), not just this app's own in-flight mix.
+  if (mixInFlight && session && audioFile === session.mixedPath) {
+    return { ok: false, error: "Дождитесь завершения сведения дорожек этой записи" };
+  }
+  const stable = await isFileStable(
+    audioFile, FILE_STABILITY_WAIT_MS,
+    (p) => { try { return fs.statSync(p).size; } catch { return null; } },
+    (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+  );
+  if (!stable) return { ok: false, error: "Файл ещё дописывается — подождите и повторите" };
   // Diarization is optional-by-design (not part of the setup-gate wall — see
   // appReadinessStatus's comment in lib/mainutil) but still needs its own
   // per-run guard: pyannote's repos are gated behind an HF token, so a run
