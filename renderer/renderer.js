@@ -803,7 +803,7 @@ function applyTheme() {
 }
 
 async function persistPresets() {
-  await window.api.savePresets({
+  const res = await window.api.savePresets({
     presets: state.presets,
     defaultOutDir: state.outDir,
     outDirCustom: state.outDirCustom,
@@ -820,6 +820,10 @@ async function persistPresets() {
     glossaryCategories: state.glossaryCategories,
     para: state.para,
   });
+  // L7 arch-audit: main.js's save-presets now reports a failed HF-token
+  // keychain/file write instead of silently succeeding — surface it the same
+  // way every other main-process failure in this file does (res.ok === false).
+  if (res && res.ok === false) alert(res.error);
 }
 
 $("language").addEventListener("change", (e) => {
@@ -1447,7 +1451,13 @@ function deletePendingRecording(idx) {
   if (!item || item.status === "running") return;
   state.pendingRecordings.splice(idx, 1);
   renderRail();
-  window.api.removePendingRecording(item.id);
+  // L7 arch-audit: main.js now reports honestly when the on-disk session dir
+  // failed to actually delete (used to always look like a clean success) —
+  // the row still stays removed from the queue (see main.js's own comment on
+  // why), but the user learns their files may still be on disk.
+  window.api.removePendingRecording(item.id).then((res) => {
+    if (res && res.ok === false) alert(res.error);
+  });
 }
 
 // "Обработать все" — processes pending/failed rows one at a time through the single

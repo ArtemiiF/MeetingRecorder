@@ -179,7 +179,7 @@ function shutdownChildren() {
   }
   if (tee) {
     tee.stop().catch(() => {});
-    try { if (sysWav) sysWav.close(); } catch {}
+    try { if (sysWav) sysWav.close(); } catch {} /* best-effort */
     tee = null; sysWav = null;
   }
   if (procProc) procProc.kill();
@@ -358,7 +358,7 @@ app.on("before-quit", async (e) => {
   // mic.wav is finalized by python only after it sees "stop" — must await before exit
   if (recordProc || tee) {
     e.preventDefault();
-    if (tee) { try { await tee.stop(); } catch {} try { if (sysWav) sysWav.close(); } catch {} tee = null; sysWav = null; }
+    if (tee) { try { await tee.stop(); } catch {} /* best-effort */ try { if (sysWav) sysWav.close(); } catch {} /* best-effort */ tee = null; sysWav = null; }
     if (recordProc) {
       try { recordProc.stdin.write("stop\n"); } catch { recordProc.kill(); }
       // align with stop-recording: wait for the WAV to finalize, generous bound
@@ -576,14 +576,31 @@ function encryptionAvailable() {
   return _encAvailableCache;
 }
 
+// L7 arch-audit: returns null on success, or a user-facing error string on
+// failure — a failed keychain/file write used to vanish into this function's
+// own catch with no way for save-presets (its only caller) to tell the
+// renderer the token silently didn't persist. Returns null (not throw): every
+// existing caller pre-dates this change and expects a plain call, not a
+// try/catch — the NEW save-presets handler below is the one that reads this.
 function saveToken(token) {
   try {
-    if (!token) { try { fs.unlinkSync(SECRET_FILE); } catch {} _tokenCache = null; return; }
+    if (!token) {
+      // Best-effort: an already-missing/permission-denied unlink still leaves
+      // the app in the intended "no token" state via _tokenCache below — a
+      // failure to physically remove an already-irrelevant file has no
+      // user-facing consequence worth surfacing.
+      try { fs.unlinkSync(SECRET_FILE); } catch {}
+      _tokenCache = null;
+      return null;
+    }
     const blob = encodeTokenBlob(token, encryptionAvailable(),
       (t) => safeStorage.encryptString(t));
     fs.writeFileSync(SECRET_FILE, blob, "utf-8");
     _tokenCache = null;
-  } catch {}
+    return null;
+  } catch (e) {
+    return String((e && e.message) || e);
+  }
 }
 function loadToken() {
   if (_tokenCache !== null) return _tokenCache;
@@ -648,9 +665,14 @@ ipcMain.handle("get-presets", async () => loadPresetsData());
 
 ipcMain.handle("save-presets", async (_e, data) => {
   const { hfToken, ...rest } = data;     // never persist the token in presets.json
-  saveToken(hfToken || "");
+  // L7 arch-audit: saveToken's own catch used to swallow a failed keychain/file
+  // write entirely — this handler always returned bare `true` regardless, so a
+  // user who just set an HF token had no way to learn it silently didn't
+  // persist. {ok, error} matches every other write-handler's contract in this file.
+  const tokenError = saveToken(hfToken || "");
+  if (tokenError) return { ok: false, error: "Не удалось сохранить HF-токен: " + tokenError };
   writeJsonAtomic(PRESETS_FILE, rest);
-  return true;
+  return { ok: true };
 });
 
 // Full app reset ("настроить заново"): writes a fresh presets.json (derived from the
@@ -818,8 +840,8 @@ ipcMain.handle("stop-recording", async () => {
 
   // 1. stop system audio + finalize system.wav
   if (tee) {
-    try { await tee.stop(); } catch {}
-    try { if (sysWav) sysWav.close(); } catch {}
+    try { await tee.stop(); } catch {} /* best-effort */
+    try { if (sysWav) sysWav.close(); } catch {} /* best-effort */
     tee = null; sysWav = null;
   }
   // 2. stop mic gracefully and wait for the WAV to be finalized
@@ -831,7 +853,7 @@ ipcMain.handle("stop-recording", async () => {
     if (!session.micRecorded && !session.micErrored && recordProc !== null) {
       // pathological hang — force-stop so the user isn't stuck on "Свожу дорожки…"; mix proceeds with whatever exists
       send("record-event", { event: "log", msg: "⚠️ микрофон завис — принудительно завершаю, дорожка может быть неполной" });
-      try { recordProc.kill("SIGTERM"); } catch {}
+      try { recordProc.kill("SIGTERM"); } catch {} /* best-effort */
       await waitFor(() => recordProc === null, 3000);
     }
   }
@@ -931,8 +953,22 @@ ipcMain.handle("remove-pending-recording", async (_e, id) => {
   const idx = manifest.findIndex((r) => r.id === id);
   if (idx < 0) return { ok: false, error: "Запись не найдена" };
   const [entry] = manifest.splice(idx, 1);
-  try { if (entry.dir) fs.rmSync(entry.dir, { recursive: true, force: true }); } catch {}
+  // L7 arch-audit: rmSync's own failure used to vanish into an empty catch while
+  // this handler still unconditionally returned {ok:true}. The manifest entry
+  // (and the renderer's optimistic row) still disappear either way — leaving the
+  // entry behind would resurrect a row the user already saw vanish, on the next
+  // list-pending-recordings reconcile — but the caller now learns honestly
+  // whether the on-disk files were actually removed, instead of a false success.
+  let rmError = null;
+  try {
+    if (entry.dir) fs.rmSync(entry.dir, { recursive: true, force: true });
+  } catch (e) {
+    rmError = String((e && e.message) || e);
+  }
   savePendingManifest(manifest);
+  if (rmError) {
+    return { ok: false, error: "Запись убрана из очереди, но файлы на диске не удалены: " + rmError };
+  }
   return { ok: true };
 });
 
@@ -1074,8 +1110,8 @@ ipcMain.handle("process-audio", async (_e, opts) => {
     (code, stderr) => {
       const canceled = procCanceled;
       send("process-event", { event: "process-closed", code, stderr, canceled });
-      try { fs.unlinkSync(promptFile); } catch {}
-      if (glossaryUsageFile) { try { fs.unlinkSync(glossaryUsageFile); } catch {} }
+      try { fs.unlinkSync(promptFile); } catch {} /* best-effort: TMP_DIR leftovers are swept by pruneTemp anyway */
+      if (glossaryUsageFile) { try { fs.unlinkSync(glossaryUsageFile); } catch {} } /* best-effort, same as promptFile above */
       procProc = null;
       procCanceled = false;
       // Fire-and-forget: resolves to the renderer above regardless; indexing runs after.
@@ -2069,7 +2105,7 @@ ipcMain.handle("classify-glossary-terms", async (_e, { terms, fastModel } = {}) 
         else if (ev.event === EVENTS.ERROR) out = { error: ev.msg };
       },
       () => {
-        try { fs.unlinkSync(termsFile); } catch {}
+        try { fs.unlinkSync(termsFile); } catch {} /* best-effort: TMP_DIR leftovers are swept by pruneTemp anyway */
         resolve(out || { error: "нет ответа от backend" });
       });
   });

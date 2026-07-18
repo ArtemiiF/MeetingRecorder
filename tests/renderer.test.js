@@ -1670,6 +1670,33 @@ test("changing authorName input persists with authorName in savePresets payload"
   assert.equal(saved.authorName, "Наталья");
 });
 
+// L7 arch-audit: main.js's save-presets now reports a failed HF-token
+// keychain/file write ({ok:false, error}) instead of silently succeeding —
+// persistPresets must surface it, same alert(res.error) convention every other
+// main-process failure in this file already uses.
+test("persistPresets alerts the user when savePresets reports ok:false (failed token write)", async () => {
+  const { $, window } = await boot({
+    savePresets: async () => ({ ok: false, error: "Не удалось сохранить HF-токен: EACCES" }),
+  });
+  await tick(window);
+  let alerted = null;
+  window.alert = (msg) => { alerted = msg; };
+  $("authorName").value = "Кто-то";
+  $("authorName").dispatchEvent(new window.Event("change"));
+  await tick(window);
+  assert.equal(alerted, "Не удалось сохранить HF-токен: EACCES");
+});
+test("persistPresets does NOT alert when savePresets succeeds (plain true, the boot-mock default)", async () => {
+  const { $, window } = await boot();
+  await tick(window);
+  let alerted = null;
+  window.alert = (msg) => { alerted = msg; };
+  $("authorName").value = "Кто-то ещё";
+  $("authorName").dispatchEvent(new window.Event("change"));
+  await tick(window);
+  assert.equal(alerted, null);
+});
+
 // ── theme setting (design-sidebar B-2) ──────────────────────────────────────────
 
 test("theme loads from presets into the settings select and applies data-theme on the document root", async () => {
@@ -3391,6 +3418,24 @@ test("main.js: saveToken() invalidates the token cache so a changed/cleared secr
   assert.match(saveToken, /_tokenCache = null/);
 });
 
+// L7 arch-audit: saveToken()'s catch used to swallow a failed keychain/file
+// write with no way for the caller to learn about it — it must now return the
+// error string (not throw, not silently return undefined for a real failure),
+// and save-presets must surface that as {ok:false, error} instead of bare true.
+test("main.js: saveToken() returns the error string on a failed write instead of silently swallowing it", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const saveToken = mainSrc.match(/function saveToken\(token\)[\s\S]*?\n\}/)[0];
+  assert.match(saveToken, /\} catch \(e\) \{\s*\n\s*return String\(\(e && e\.message\) \|\| e\);\s*\n\s*\}/);
+  assert.doesNotMatch(saveToken, /\} catch \{\}\s*\n\}/, "the outer catch must no longer be an empty swallow");
+});
+test("main.js: save-presets returns {ok:false, error} when saveToken fails, {ok:true} otherwise — not bare `true`", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const handler = mainSrc.match(/ipcMain\.handle\("save-presets"[\s\S]*?\n\}\);/)[0];
+  assert.match(handler, /const tokenError = saveToken\(hfToken \|\| ""\);/);
+  assert.match(handler, /if \(tokenError\) return \{ ok: false, error: /);
+  assert.match(handler, /return \{ ok: true \};/);
+});
+
 test("main.js: every safeStorage.* call site is funneled through encryptionAvailable()/saveToken()/loadToken() — no stray direct calls", () => {
   // A regression guard: a new direct safeStorage call added elsewhere (e.g. in a
   // future handler) would reintroduce the double keychain-prompt bug this fixes.
@@ -4424,6 +4469,49 @@ test("main.js: remove-pending-recording refuses while a reprocess (procProc) is 
   const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
   const removePending = mainSrc.match(/ipcMain\.handle\("remove-pending-recording"[\s\S]*?\n\}\);/)[0];
   assert.match(removePending, /\[!!procProc, "Дождитесь окончания обработки"\]/);
+});
+
+// L7 arch-audit: a failed rmSync used to vanish into an empty catch while this
+// handler still unconditionally returned {ok:true} — a state-mutating failure
+// (files may still be on disk) reported as a clean success.
+test("main.js: remove-pending-recording reports {ok:false, error} when rmSync actually fails, instead of a false ok:true", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const removePending = mainSrc.match(/ipcMain\.handle\("remove-pending-recording"[\s\S]*?\n\}\);/)[0];
+  assert.match(removePending, /\} catch \(e\) \{\s*\n\s*rmError = String\(\(e && e\.message\) \|\| e\);\s*\n\s*\}/);
+  assert.match(removePending, /if \(rmError\) \{\s*\n\s*return \{ ok: false, error: /);
+  // the manifest entry must still be dropped either way (a resurrected row would
+  // surprise the user who already saw it vanish) — savePendingManifest runs
+  // BEFORE the rmError check, not conditionally on success.
+  const saveIdx = removePending.indexOf("savePendingManifest(manifest)");
+  const rmErrorCheckIdx = removePending.indexOf("if (rmError)");
+  assert.ok(saveIdx >= 0 && saveIdx < rmErrorCheckIdx, "savePendingManifest must run unconditionally, before the rmError check");
+});
+
+test("pending recordings: delete (✕) alerts the user when removePendingRecording reports ok:false (files may still be on disk)", async () => {
+  const { $, window, handlers } = await boot({
+    removePendingRecording: async () => ({ ok: false, error: "Запись убрана из очереди, но файлы на диске не удалены: EACCES" }),
+  });
+  handlers.record({ event: "recorded", id: "r1", name: "Запись 1", file: "/rec/r1/mixed.wav", mic: null, system: null, tracks: 1 });
+  await tick(window);
+  let alerted = null;
+  window.alert = (msg) => { alerted = msg; };
+  $("historyList").querySelector(".pending-del-btn").click();
+  await tick(window);
+  await tick(window); // one extra tick for the removePendingRecording().then() microtask
+  assert.equal(alerted, "Запись убрана из очереди, но файлы на диске не удалены: EACCES");
+});
+test("pending recordings: delete (✕) does NOT alert when removePendingRecording succeeds", async () => {
+  const { $, window, handlers } = await boot({
+    removePendingRecording: async () => ({ ok: true }),
+  });
+  handlers.record({ event: "recorded", id: "r1", name: "Запись 1", file: "/rec/r1/mixed.wav", mic: null, system: null, tracks: 1 });
+  await tick(window);
+  let alerted = null;
+  window.alert = (msg) => { alerted = msg; };
+  $("historyList").querySelector(".pending-del-btn").click();
+  await tick(window);
+  await tick(window);
+  assert.equal(alerted, null);
 });
 
 test("main.js: pruneTemp's sweep() calls never target RECORDINGS_DIR — recordings are permanent, not swept", () => {
