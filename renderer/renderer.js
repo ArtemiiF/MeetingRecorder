@@ -2638,14 +2638,25 @@ async function deleteRecording(rec, btn) {
       notePaths: notes.map((n) => n.note),
       audioPaths: audios.map((a) => a.path),
     });
-    if (res && res.ok === false) { alert(res.error); return; }
-    // If the note currently open in #noteView belongs to the just-trashed recording,
-    // it must not keep showing stale content — same placeholder-then-refresh discipline
-    // as deleteHistoryNote above.
-    const trashedNotePaths = new Set(notes.map((n) => n.note));
-    if (openNoteIdx != null && historyItems[openNoteIdx] && trashedNotePaths.has(historyItems[openNoteIdx].note)) {
-      openNoteIdx = null;
-      $("noteView").innerHTML = '<p class="hint history-placeholder">Запись удалена.</p>';
+    if (res && res.ok === false) {
+      alert(res.error);
+      // main.js's handler validates every path before moving anything, but a partial
+      // failure can still land mid-move (e.g. disk error after 2 of 3 files already
+      // moved + manifest-recorded server-side) — refreshHistory() below MUST still run
+      // on this path so the rail re-fetches real on-disk state instead of keeping stale
+      // rows around whose files are already gone (clicking one would otherwise error).
+      // The busy-refuse case (procProc active, nothing moved at all) just makes this a
+      // harmless no-op re-fetch.
+    } else {
+      // If the note currently open in #noteView belongs to the just-trashed recording,
+      // it must not keep showing stale content — same placeholder-then-refresh discipline
+      // as deleteHistoryNote above. Gated to the success branch: on a refusal nothing was
+      // actually moved, so clearing the note view here would falsely claim it's deleted.
+      const trashedNotePaths = new Set(notes.map((n) => n.note));
+      if (openNoteIdx != null && historyItems[openNoteIdx] && trashedNotePaths.has(historyItems[openNoteIdx].note)) {
+        openNoteIdx = null;
+        $("noteView").innerHTML = '<p class="hint history-placeholder">Запись удалена.</p>';
+      }
     }
     await refreshHistory();
   } finally {

@@ -386,7 +386,7 @@ test("purgeTrash: a fresh (not-yet-stale) entry is kept and its files are never 
   const entry = { deletedAt: now - 1000, kind: "note", files: ["/out/.trash/a.md"], baseStamp: "s1" };
   let existsCalled = false;
   const deps = { existsSync: () => { existsCalled = true; return true; }, unlinkSync: () => { throw new Error("must not be called"); } };
-  const kept = purgeTrash([entry], 30 * 24 * 3600 * 1000, now, deps);
+  const kept = purgeTrash([entry], "/out/.trash", 30 * 24 * 3600 * 1000, now, deps);
   assert.deepEqual(kept, [entry]);
   assert.equal(existsCalled, false, "a fresh entry's files must not even be existence-checked");
 });
@@ -396,7 +396,7 @@ test("purgeTrash: an old (>30 day) entry has its existing files deleted and the 
   const entry = { deletedAt: now - maxAge - 1, kind: "recording", files: ["/out/.trash/a.wav", "/out/.trash/a.md"], baseStamp: "s1" };
   const unlinked = [];
   const deps = { existsSync: () => true, unlinkSync: (p) => unlinked.push(p) };
-  const kept = purgeTrash([entry], maxAge, now, deps);
+  const kept = purgeTrash([entry], "/out/.trash", maxAge, now, deps);
   assert.deepEqual(kept, [], "old entry must be dropped from the surviving manifest");
   assert.deepEqual(unlinked, ["/out/.trash/a.wav", "/out/.trash/a.md"]);
 });
@@ -406,7 +406,7 @@ test("purgeTrash: a missing file during purge is skipped silently (no throw) and
   const entry = { deletedAt: now - maxAge - 1, kind: "note", files: ["/out/.trash/gone.md"], baseStamp: null };
   const deps = { existsSync: () => false, unlinkSync: () => { throw new Error("must not be called on a missing file"); } };
   assert.doesNotThrow(() => {
-    const kept = purgeTrash([entry], maxAge, now, deps);
+    const kept = purgeTrash([entry], "/out/.trash", maxAge, now, deps);
     assert.deepEqual(kept, []);
   });
 });
@@ -416,8 +416,22 @@ test("purgeTrash: a mixed manifest keeps only the fresh entries", () => {
   const fresh = { deletedAt: now - 1000, kind: "note", files: ["/out/.trash/fresh.md"], baseStamp: "s1" };
   const old = { deletedAt: now - maxAge - 1, kind: "note", files: ["/out/.trash/old.md"], baseStamp: "s2" };
   const deps = { existsSync: () => true, unlinkSync: () => {} };
-  const kept = purgeTrash([fresh, old], maxAge, now, deps);
+  const kept = purgeTrash([fresh, old], "/out/.trash", maxAge, now, deps);
   assert.deepEqual(kept, [fresh]);
+});
+test("purgeTrash: a file outside trashDir in the manifest is skipped (never deleted) — defends against a tampered/malformed manifest.json", () => {
+  const now = 1_000_000_000_000;
+  const maxAge = 30 * 24 * 3600 * 1000;
+  const trashDir = "/out/.trash";
+  const entry = {
+    deletedAt: now - maxAge - 1, kind: "recording",
+    files: ["/etc/passwd", path.join(trashDir, "a.wav")], baseStamp: "s1",
+  };
+  const unlinked = [];
+  const deps = { existsSync: () => true, unlinkSync: (p) => unlinked.push(p) };
+  const kept = purgeTrash([entry], trashDir, maxAge, now, deps);
+  assert.deepEqual(kept, [], "entry is still dropped from the manifest — the purge decision is time-based, not per-file-success-based");
+  assert.deepEqual(unlinked, [path.join(trashDir, "a.wav")], "only the file actually inside trashDir gets deleted; the out-of-trashDir path is skipped");
 });
 
 // ── out-dir auto-follow (settings "Куда сохранять", Variant A) ──────────────

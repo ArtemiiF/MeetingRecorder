@@ -5640,20 +5640,24 @@ test("recording ✕ (orphan): confirmed → deleteHistoryRecording called with t
   assert.ok(!$("historyList").querySelector(".rail-item.orphan"), "orphan row must be gone after refresh");
 });
 
-test("recording ✕: main refuses while busy (ok:false) → alert shown, group stays", async () => {
+test("recording ✕: main refuses/fails (ok:false) → alert shown AND rail still refreshed (refreshHistory must not be skipped on the error path)", async () => {
   let alerted = null;
+  let listHistoryCalls = 0;
   const notes = [{ name: "2026-07-11-100000", base_stamp: "2026-07-11-100000", title: "Планёрка", note: "/o/a.md", audio: "/o/a.wav" }];
   const { window, $ } = await boot({
-    listHistory: async () => Object.assign([...notes], { audios: [] }),
+    listHistory: async () => { listHistoryCalls++; return Object.assign([...notes], { audios: [] }); },
     deleteHistoryRecording: async () => ({ ok: false, error: "Дождитесь окончания обработки" }),
   });
   window.alert = (msg) => { alerted = msg; };
   window.confirm = () => true;
   window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  const callsBeforeDelete = listHistoryCalls;
   $("historyList").querySelector(".rec-trash-btn").click();
   await tick(window); await tick(window);
   assert.equal(alerted, "Дождитесь окончания обработки");
-  assert.equal($("historyList").querySelectorAll(".rail-group").length, 1, "group must survive a refused trash");
+  assert.equal($("historyList").querySelectorAll(".rail-group").length, 1, "group must survive a refused trash (nothing actually moved, so nothing to remove)");
+  assert.ok(listHistoryCalls > callsBeforeDelete,
+    "refreshHistory() must still run on the error path — a partial server-side failure (some files already moved+manifest-recorded) must not leave the rail showing stale rows whose files are gone");
 });
 
 test("recording ✕: excluded on pending rows — no .rec-trash-btn, existing remove-pending-recording ✕ untouched", async () => {

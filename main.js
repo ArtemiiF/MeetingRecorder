@@ -535,7 +535,7 @@ function purgeTrashOnStartup() {
   const trashDir = trashRootFor(outDir, vaultRoot);
   if (!fs.existsSync(trashDir)) return;
   const entries = loadTrashManifest(trashDir);
-  const kept = purgeTrash(entries, 30 * 24 * 3600 * 1000, Date.now());
+  const kept = purgeTrash(entries, trashDir, 30 * 24 * 3600 * 1000, Date.now());
   if (kept.length !== entries.length) saveTrashManifest(trashDir, kept);
 }
 
