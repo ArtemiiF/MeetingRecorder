@@ -27,6 +27,7 @@
       "main.js",
       "preload.js",
       "presets.example.json",
+      "events.json",
       "lib/**/*",
       "renderer/**/*",
       "assets/**/*",
@@ -36,6 +37,10 @@
       {
         "from": "backend.py",
         "to": "backend.py"
+      },
+      {
+        "from": "events.json",
+        "to": "events.json"
       },
       {
         "from": "requirements.txt",
