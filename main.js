@@ -1650,13 +1650,14 @@ ipcMain.handle("list-history", async (_e, outDir) => {
   const vaultRoot = readParaRoot();
   const histArgs = ["history", "--out-dir", dir, "--db", DB_PATH, "--pending-file", PENDING_FILE];
   if (vaultRoot) histArgs.push("--vault-root", vaultRoot);
-  const items = await new Promise((resolve) => {
+  const { items, audios } = await new Promise((resolve) => {
     let out = [];
+    let auds = [];
     runBackend(histArgs,
-      (ev) => { if (ev.event === "history") out = ev.items; },
-      () => resolve(out));
+      (ev) => { if (ev.event === "history") { out = ev.items; auds = ev.audios || []; } },
+      () => resolve({ items: out, audios: auds }));
   });
-  return items.map((it) => it.kind === "pending" ? {
+  const mapped = items.map((it) => it.kind === "pending" ? {
     kind: "pending",
     id: it.id,
     name: it.name,
@@ -1674,7 +1675,20 @@ ipcMain.handle("list-history", async (_e, outDir) => {
     // before its next mtime-triggered reconcile) has no version key; default 1
     // (mirrors backend.py's own _reconcile/process default for the same case).
     version: it.version || 1,
+    // Canonical recording identity (feat-history-audio-inventory's cmd_history
+    // addition — every note row is tagged with it) — pairs a note with the out_dir
+    // audio inventory (see the renderer's recordingBaseStamp/buildRecordings).
+    base_stamp: it.base_stamp,
   });
+  // audios[] (the out_dir audio inventory — same PR) rides along as a plain extra
+  // property on the returned ARRAY rather than changing list-history's return shape
+  // to {items, audios}: dozens of existing renderer tests (and refreshParaInbox,
+  // which only wants the note list) already treat this call's result as a bare
+  // array — an own property doesn't show up in .map/.filter/.forEach/.length, so
+  // every one of those call sites keeps working untouched, while refreshHistory
+  // (the only consumer that cares) can still read `.audios` off it.
+  mapped.audios = audios;
+  return mapped;
 });
 
 // Rewrite speaker labels in a saved note (**[old]** → **[new]**) and the

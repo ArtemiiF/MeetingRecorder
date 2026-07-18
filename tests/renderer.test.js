@@ -36,7 +36,7 @@ async function boot(apiOverrides = {}) {
       presets: [], defaultOutDir: "/tmp/out", hfToken: "", authorName: "Автор", glossary: "",
       language: "ru", para: { root: "", folders: {} }, secretEncrypted: true,
     }),
-    listHistory: async () => [{ name: "2026-01-01", title: "Синк", note: "/o/meeting-x.md", audio: "/o/meeting-x.wav" }],
+    listHistory: async () => [{ name: "2026-01-01", base_stamp: "2026-01-01", title: "Синк", note: "/o/meeting-x.md", audio: "/o/meeting-x.wav" }],
     readNote: async () => '---\ntitle: "T"\n---\n\n## Резюме\n\nтекст\n\n**[Спикер 1]**: привет',
     deleteHistoryNote: async () => ({ ok: true }),
     paraCreateVault: async () => ({ ok: true }),
@@ -673,10 +673,12 @@ test("history rail renders items; selecting one renders the note markdown", asyn
   const { window, $ } = await boot();
   window.document.querySelector('.topbtn[data-view="history"]').click();
   await tick(window);
+  // Every recording (even a solitary обработка) now renders as a collapsible group —
+  // see buildNotesRecordingRow — so the one obrabotka row still carries `.rail-item`.
   const items = $("historyList").querySelectorAll(".rail-item");
   assert.equal(items.length, 1);
   assert.ok($("historyList").textContent.includes("Синк"));       // title
-  assert.ok($("historyList").textContent.includes("2026-01-01")); // date
+  assert.ok($("historyList").querySelector(".rail-date-header"), "a date-group header separates days");
   items[0].click(); await tick(window);
   const html = $("noteView").innerHTML;
   assert.ok($("noteView").querySelector(".note-body"));
@@ -721,15 +723,20 @@ test("history search matches a different word-form (проблема → про�
 test("history rail preserves backend-provided order (no client-side re-sort)", async () => {
   const { window, $ } = await boot({
     listHistory: async () => [
-      { name: "2026-03-20-100000", title: "Newest", language: "ru", note: "/c.md", audio: null },
-      { name: "2026-02-15-100000", title: "Middle", language: "ru", note: "/b.md", audio: null },
-      { name: "2026-01-01-100000", title: "Oldest", language: "ru", note: "/a.md", audio: null },
+      { name: "2026-03-20-100000", base_stamp: "2026-03-20-100000", title: "Newest", language: "ru", note: "/c.md", audio: null },
+      { name: "2026-02-15-100000", base_stamp: "2026-02-15-100000", title: "Middle", language: "ru", note: "/b.md", audio: null },
+      { name: "2026-01-01-100000", base_stamp: "2026-01-01-100000", title: "Oldest", language: "ru", note: "/a.md", audio: null },
     ],
   });
   window.document.querySelector('.topbtn[data-view="history"]').click();
   await tick(window);
-  const titles = [...$("historyList").querySelectorAll(".rail-title")].map((e) => e.textContent);
-  assert.deepEqual(titles, ["Newest", "Middle", "Oldest"]);
+  // A recording's own title now lives in its group header (.rail-title is the
+  // обработка's own template/version label, e.g. "Без шаблона · v1") — check header order.
+  const headers = [...$("historyList").querySelectorAll(".rail-group-header")];
+  assert.equal(headers.length, 3);
+  assert.ok(headers[0].textContent.includes("Newest"));
+  assert.ok(headers[1].textContent.includes("Middle"));
+  assert.ok(headers[2].textContent.includes("Oldest"));
 });
 
 test("language selector: #language has no «Авто» option, #historyLang keeps it", async () => {
@@ -789,9 +796,9 @@ test("history filters by template and by date range", async () => {
 test("history rail: date-group headers separate days, with per-day counts", async () => {
   const { window, $ } = await boot({
     listHistory: async () => [
-      { name: "2026-07-08-190000", title: "C", language: "ru", note: "/c.md", audio: null },
-      { name: "2026-07-08-184655", title: "B", language: "ru", note: "/b.md", audio: null },
-      { name: "2026-07-07-120000", title: "A", language: "ru", note: "/a.md", audio: null },
+      { name: "2026-07-08-190000", base_stamp: "2026-07-08-190000", title: "C", language: "ru", note: "/c.md", audio: null },
+      { name: "2026-07-08-184655", base_stamp: "2026-07-08-184655", title: "B", language: "ru", note: "/b.md", audio: null },
+      { name: "2026-07-07-120000", base_stamp: "2026-07-07-120000", title: "A", language: "ru", note: "/a.md", audio: null },
     ],
   });
   window.document.querySelector('.topbtn[data-view="history"]').click();
@@ -803,7 +810,7 @@ test("history rail: date-group headers separate days, with per-day counts", asyn
 test("history rail: date-group headers carry no idx and are not clickable", async () => {
   const { window, $ } = await boot({
     listHistory: async () => [
-      { name: "2026-07-08-190000", title: "C", language: "ru", note: "/c.md", audio: null },
+      { name: "2026-07-08-190000", base_stamp: "2026-07-08-190000", title: "C", language: "ru", note: "/c.md", audio: null },
     ],
   });
   window.document.querySelector('.topbtn[data-view="history"]').click();
@@ -819,8 +826,8 @@ test("history rail: date-group headers carry no idx and are not clickable", asyn
 test("history rail: date-group counts follow active filters, not raw per-day totals", async () => {
   const { window, $ } = await boot({
     listHistory: async () => [
-      { name: "2026-07-08-190000", title: "Релиз", language: "ru", note: "/c.md", audio: null },
-      { name: "2026-07-08-184655", title: "Интервью", language: "en", note: "/b.md", audio: null },
+      { name: "2026-07-08-190000", base_stamp: "2026-07-08-190000", title: "Релиз", language: "ru", note: "/c.md", audio: null },
+      { name: "2026-07-08-184655", base_stamp: "2026-07-08-184655", title: "Интервью", language: "en", note: "/b.md", audio: null },
     ],
   });
   window.document.querySelector('.topbtn[data-view="history"]').click();
@@ -833,19 +840,50 @@ test("history rail: date-group counts follow active filters, not raw per-day tot
   assert.equal(headers[0].textContent, "8 июля · 1");
 });
 
-test("history rail: pending recordings stay above date-group headers, ungrouped", async () => {
+// Audio-first rail redesign (design "Вариант A"): a pending recording is no longer a
+// separate always-first section — it interleaves at its OWN real chronological
+// position among notes/orphans (buildRecordings' unified sort). A real "recorded"
+// event's id IS the recording's own stamp (main.js: `id = sess.stamp`, literal
+// "T"-format) — these two tests use a realistic stamp-shaped id (not the "r1" shorthand
+// most other fixtures use, since "r1" isn't parseable and always sorts last).
+test("history rail: a pending recording NEWER than an existing note renders above it", async () => {
   const { window, $, handlers } = await boot({
     listHistory: async () => [
-      { name: "2026-07-08-190000", title: "C", language: "ru", note: "/c.md", audio: null },
+      { name: "2026-07-08-190000", base_stamp: "2026-07-08-190000", title: "C", language: "ru", note: "/c.md", audio: null },
     ],
   });
-  handlers.record({ event: "recorded", id: "r1", name: "Запись 1", file: "/tmp/mixed.wav", mic: "/tmp/m.wav", system: null, tracks: 1 });
   window.document.querySelector('.topbtn[data-view="history"]').click();
+  await tick(window);
+  handlers.record({
+    event: "recorded", id: "2026-07-09T10-00-00-a1b2", name: "Запись новая",
+    file: "/tmp/mixed.wav", mic: "/tmp/m.wav", system: null, tracks: 1,
+  });
   await tick(window);
   const children = [...$("historyList").children];
   const pendingIdx = children.findIndex((c) => c.classList.contains("pending"));
-  const headerIdx = children.findIndex((c) => c.classList.contains("rail-date-header"));
-  assert.ok(pendingIdx !== -1 && headerIdx !== -1 && pendingIdx < headerIdx);
+  const groupIdx = children.findIndex((c) => c.classList.contains("rail-group"));
+  assert.ok(pendingIdx !== -1 && groupIdx !== -1 && pendingIdx < groupIdx,
+    "2026-07-09 pending is newer than the 2026-07-08 note — must render first");
+});
+
+test("history rail: a pending recording OLDER than an existing note renders below it", async () => {
+  const { window, $, handlers } = await boot({
+    listHistory: async () => [
+      { name: "2026-07-08-190000", base_stamp: "2026-07-08-190000", title: "C", language: "ru", note: "/c.md", audio: null },
+    ],
+  });
+  window.document.querySelector('.topbtn[data-view="history"]').click();
+  await tick(window);
+  handlers.record({
+    event: "recorded", id: "2026-07-01T10-00-00-a1b2", name: "Запись старая",
+    file: "/tmp/mixed.wav", mic: "/tmp/m.wav", system: null, tracks: 1,
+  });
+  await tick(window);
+  const children = [...$("historyList").children];
+  const pendingIdx = children.findIndex((c) => c.classList.contains("pending"));
+  const groupIdx = children.findIndex((c) => c.classList.contains("rail-group"));
+  assert.ok(groupIdx !== -1 && pendingIdx !== -1 && groupIdx < pendingIdx,
+    "2026-07-01 pending is older than the 2026-07-08 note — must render after it");
 });
 
 test("note view shows the title as a heading", async () => {
@@ -2766,7 +2804,7 @@ test("История note view exposes a speaker editor; apply calls renameSpeak
   let renamed = false; // content-keyed, not call-count-keyed — auto-open now reads the note once extra on entry
   let renamedArg = null;
   const { window, $ } = await boot({
-    listHistory: async () => [{ name: "2026-01-01", title: "Синк", note: "/o/meeting-x.md", audio: "/o/meeting-x.wav" }],
+    listHistory: async () => [{ name: "2026-01-01", base_stamp: "2026-01-01", title: "Синк", note: "/o/meeting-x.md", audio: "/o/meeting-x.wav" }],
     readNote: async () => {
       readCount++;
       return renamed
@@ -5260,11 +5298,11 @@ test("История groups a multi-version recording into a collapsible block: 
   assert.ok(!$("historyList").querySelector(".rail-group-versions").classList.contains("hidden"), "re-expands on a second click");
 });
 
-// Regression guard (critic nit on ccad5ba): buildHistoryVersionGroup's rows are built
-// via innerHTML + closure-wired click handlers, and originally never got a
-// dataset.idx — selectNote's `+e.dataset.idx === idx` highlight match silently never
-// fired for them (NaN !== idx), so a clicked version row opened the note but never
-// showed selected. Plain (single-version) rows always set dataset.idx and were fine.
+// Regression guard (critic nit on ccad5ba): the recording group's обработка rows
+// (buildNotesRecordingRow, formerly buildHistoryVersionGroup) are built via innerHTML +
+// closure-wired click handlers, and originally never got a dataset.idx — selectNote's
+// `+e.dataset.idx === idx` highlight match silently never fired for them (NaN !== idx),
+// so a clicked version row opened the note but never showed selected.
 test("clicking a version row inside a История group highlights it with .active (and only that row)", async () => {
   const { window, $ } = await boot({
     listHistory: async () => [
@@ -5291,19 +5329,144 @@ test("clicking a version row inside a История group highlights it with .a
   assert.ok(!rows[1].classList.contains("active"), "only the clicked row is active");
 });
 
-test("История: a single-version recording still renders as a plain row, not wrapped in a group", async () => {
+// Audio-first rail redesign (design "Вариант A"): EVERY notes-bearing recording is now
+// a collapsible group, including a solitary (single-обработка) one — there's no more
+// special-cased flat row (the old buildHistoryRow is retired).
+test("История: a single-обработка recording still renders as a collapsible group, badged '1 обработка'", async () => {
   const { window, $ } = await boot({
-    listHistory: async () => [{ name: "2026-01-01", title: "Синк", template: "Митинг", note: "/o/a.md", audio: "/o/a.wav" }],
+    listHistory: async () => [{ name: "2026-01-01-100000", title: "Синк", template: "Митинг", note: "/o/a.md", audio: "/o/a.wav" }],
   });
   window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
-  assert.equal($("historyList").querySelectorAll(".rail-group").length, 0);
-  assert.ok($("historyList").querySelector(".rail-item:not(.pending)"));
+  assert.equal($("historyList").querySelectorAll(".rail-group").length, 1);
+  assert.ok($("historyList").querySelector(".rail-version-row"), "the note itself is the group's one обработка row");
+  assert.match($("historyList").querySelector(".rail-rec-badge.count").textContent, /^1 обработка$/);
+});
+
+// ── audio-first История rail (design "Вариант A" — recording is the top level,
+// обработки the second; see buildRecordings/buildRecordingRow in renderer.js) ───────
+test("audio-first rail: groups note rows purely by the backend-provided base_stamp field, even when the note stamps themselves differ", async () => {
+  const { window, $ } = await boot({
+    listHistory: async () => [
+      { name: "2026-07-11-100000", base_stamp: "2026-07-11-100000", title: "Планёрка", template: "Митинг", version: 1, note: "/o/a.md", audio: "/o/a.wav" },
+      // a completely different `name` stamp — grouping must key off base_stamp alone,
+      // not re-derive identity from the note's own filename stamp.
+      { name: "2026-07-11-999999", base_stamp: "2026-07-11-100000", title: "Планёрка", template: "Интервью", version: 1, note: "/o/b.md", audio: "/o/a.wav" },
+    ],
+  });
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  assert.equal($("historyList").querySelectorAll(".rail-group").length, 1, "same base_stamp field — one group despite different name stamps");
+  assert.equal($("historyList").querySelectorAll(".rail-version-row").length, 2);
+});
+
+test("audio-first rail: an audios[] entry with no matching note renders as a «без обработок» orphan row with ▶ Обработать", async () => {
+  const { window, $ } = await boot({
+    listHistory: async () => Object.assign(
+      [{ name: "2026-07-08-190000", base_stamp: "2026-07-08-190000", title: "C", note: "/c.md", audio: "/c.wav" }],
+      {
+        audios: [
+          { base_stamp: "2026-07-08-190000", path: "/out/meeting-2026-07-08-190000.wav", size: 1000, mtime: 1, duration_s: 600 },
+          { base_stamp: "2026-07-14-140300", path: "/out/meeting-2026-07-14-140300.wav", size: 2000, mtime: 2, duration_s: 2460 },
+        ],
+      }
+    ),
+  });
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  const orphan = $("historyList").querySelector(".rail-item.orphan");
+  assert.ok(orphan, "the unpaired audio entry must render as its own orphan row");
+  assert.match(orphan.textContent, /meeting-2026-07-14-140300\.wav/);
+  assert.match(orphan.textContent, /без обработок/);
+  assert.match(orphan.querySelector("button").textContent, /▶ Обработать/);
+  assert.equal($("historyList").querySelectorAll(".rail-group").length, 1, "the PAIRED audio entry must not also render as an orphan");
+});
+
+test("audio-first rail: an orphan row's ▶ Обработать opens the reprocess picker and sends THAT audio's path", async () => {
+  let sentAudioFile = null;
+  const { window, $ } = await boot({
+    getPresets: async () => ({
+      presets: [{ id: "p1", name: "Митинг", prompt: "prompt M" }], defaultOutDir: "/tmp", hfToken: "", language: "ru",
+    }),
+    listHistory: async () => Object.assign(
+      [],
+      { audios: [{ base_stamp: "2026-07-14-140300", path: "/out/meeting-2026-07-14-140300.wav", size: 100, mtime: 1, duration_s: 120 }] }
+    ),
+    processAudio: async (opts) => { sentAudioFile = opts.audioFile; return { ok: true }; },
+  });
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  const orphan = $("historyList").querySelector(".rail-item.orphan");
+  orphan.querySelector("button").click(); await tick(window);
+  assert.ok($("noteView").querySelector("#reprocessPresetSelect"), "picker must open (reuses the same entry point a note's own ▶ uses)");
+  $("noteView").querySelector("#reprocessConfirm").click(); await tick(window);
+  assert.equal(sentAudioFile, "/out/meeting-2026-07-14-140300.wav", "reprocesses THIS orphan's own audio, not item.audio/currentAudio() leftovers");
+});
+
+test("audio-first rail: a pending recording (status 'pending') shows the «ждёт обработки» badge", async () => {
+  const { window, $, handlers } = await boot({ listHistory: async () => [] });
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  handlers.record({
+    event: "recorded", id: "2026-07-09T10-00-00-a1b2", name: "Запись 1",
+    file: "/tmp/mixed.wav", mic: "/tmp/m.wav", system: null, tracks: 1,
+  });
+  await tick(window);
+  const row = $("historyList").querySelector(".rail-item.pending");
+  assert.ok(row);
+  assert.match(row.querySelector(".rail-rec-badge.wait").textContent, /ждёт обработки/);
+});
+
+test("audio-first rail: text search hides a non-matching notes-recording but keeps an orphan (audio-only) recording visible", async () => {
+  const { window, $ } = await boot({
+    listHistory: async () => Object.assign(
+      [{ name: "2026-07-08-190000", base_stamp: "2026-07-08-190000", title: "Планирование спринта", note: "/c.md", audio: null }],
+      { audios: [{ base_stamp: "2026-07-14-140300", path: "/out/meeting-2026-07-14-140300.wav", size: 100, mtime: 1, duration_s: 60 }] }
+    ),
+  });
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  assert.equal($("historyList").querySelectorAll(".rail-group").length, 1);
+  assert.ok($("historyList").querySelector(".rail-item.orphan"));
+  $("historySearch").value = "интервью"; // matches neither the note's title nor an orphan (no title to match)
+  $("historySearch").dispatchEvent(new window.Event("input"));
+  assert.equal($("historyList").querySelectorAll(".rail-group").length, 0, "the non-matching notes-recording is hidden");
+  assert.ok($("historyList").querySelector(".rail-item.orphan"), "the orphan recording always passes text/lang/template filters");
+});
+
+test("history rail: date-group headers count RECORDINGS, not обработки — a multi-обработка recording counts once", async () => {
+  const { window, $ } = await boot({
+    listHistory: async () => [
+      { name: "2026-07-11-100000", base_stamp: "2026-07-11-100000", title: "Планёрка", template: "Митинг", version: 1, note: "/o/a.md", audio: "/o/a.wav" },
+      { name: "2026-07-11-100000-r1", base_stamp: "2026-07-11-100000", title: "Планёрка", template: "Митинг", version: 2, note: "/o/b.md", audio: "/o/a.wav" },
+      { name: "2026-07-11-150000", base_stamp: "2026-07-11-150000", title: "Отдельная", template: "Митинг", note: "/o/c.md", audio: "/o/c.wav" },
+    ],
+  });
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  const header = $("historyList").querySelector(".rail-date-header");
+  assert.equal(header.textContent, "11 июля · 2", "3 обработки total, but only 2 RECORDINGS (one multi-обработка group + one solitary)");
+});
+
+test("История note delete: after deleting the recording's last note, it stays visible as «без обработок» (audio inventory keeps it alive)", async () => {
+  let notes = [{ name: "2026-07-08-190000", base_stamp: "2026-07-08-190000", title: "Синк", note: "/o/meeting-x.md", audio: "/o/meeting-x.wav" }];
+  const audios = [{ base_stamp: "2026-07-08-190000", path: "/o/meeting-x.wav", size: 1000, mtime: 1, duration_s: 900 }];
+  const { window, $ } = await boot({
+    listHistory: async () => Object.assign([...notes], { audios }),
+    deleteHistoryNote: async (notePath) => {
+      notes = notes.filter((n) => n.note !== notePath);
+      return { ok: true };
+    },
+  });
+  window.confirm = () => true;
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  assert.equal($("historyList").querySelectorAll(".rail-group").length, 1);
+  $("historyList").querySelector(".rail-version-row").click(); await tick(window);
+  $("noteView").querySelector("#nvDelete").click();
+  await tick(window); await tick(window);
+  assert.equal($("historyList").querySelectorAll(".rail-group").length, 0, "no notes left — no more group");
+  const orphan = $("historyList").querySelector(".rail-item.orphan");
+  assert.ok(orphan, "the audio inventory entry keeps the recording visible as «без обработок»");
+  assert.match(orphan.textContent, /без обработок/);
 });
 
 // ── История note deletion ────────────────────────────────────────────────────
 test("История note view: delete button lives in the note header, uses the shared .btn.danger style", async () => {
   const { window, $ } = await boot({
-    listHistory: async () => [{ name: "2026-01-01", title: "Синк", note: "/o/meeting-x.md", audio: "/o/meeting-x.wav" }],
+    listHistory: async () => [{ name: "2026-01-01", base_stamp: "2026-01-01", title: "Синк", note: "/o/meeting-x.md", audio: "/o/meeting-x.wav" }],
   });
   window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
   $("historyList").querySelector(".rail-item").click(); await tick(window);
@@ -5316,7 +5479,7 @@ test("История note view: delete button lives in the note header, uses the
 test("История note delete: confirm() cancel → deleteHistoryNote is never called, note stays open", async () => {
   let called = false;
   const { window, $ } = await boot({
-    listHistory: async () => [{ name: "2026-01-01", title: "Синк", note: "/o/meeting-x.md", audio: "/o/meeting-x.wav" }],
+    listHistory: async () => [{ name: "2026-01-01", base_stamp: "2026-01-01", title: "Синк", note: "/o/meeting-x.md", audio: "/o/meeting-x.wav" }],
     deleteHistoryNote: async () => { called = true; return { ok: true }; },
   });
   window.confirm = () => false;
@@ -5381,7 +5544,7 @@ test("История note delete: with another note remaining, refresh auto-open
 test("История note delete: main refuses while busy (ok:false) → alert shown, note stays open, button re-enabled", async () => {
   let alerted = null;
   const { window, $ } = await boot({
-    listHistory: async () => [{ name: "2026-01-01", title: "Синк", note: "/o/meeting-x.md", audio: "/o/meeting-x.wav" }],
+    listHistory: async () => [{ name: "2026-01-01", base_stamp: "2026-01-01", title: "Синк", note: "/o/meeting-x.md", audio: "/o/meeting-x.wav" }],
     deleteHistoryNote: async () => ({ ok: false, error: "Дождитесь окончания обработки" }),
   });
   window.alert = (msg) => { alerted = msg; };
