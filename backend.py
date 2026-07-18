@@ -37,11 +37,38 @@ from pathlib import Path
 warnings.filterwarnings("ignore", category=UserWarning)
 
 
+# ──────────────────────────────────────────────────────────────────────────
+# Event-name contract (M4 arch-audit) — single source of truth shared with
+# main.js's lib/events.js (see that file's own comment for the full picture).
+# Loaded once at import time from the repo-root events.json; emit() below
+# asserts every event name it ever sends is a member of this set, so a
+# typo/rename here fails LOUDLY at runtime instead of silently drifting out of
+# sync with main.js's dispatch. The cross-lock test (tests/test_backend.py)
+# checks the OTHER direction: every EVENTS.* constant main.js's dispatch
+# actually references resolves to a name present in this same events.json.
+def _load_event_names():
+    contract_path = Path(__file__).parent / "events.json"
+    try:
+        data = json.loads(contract_path.read_text(encoding="utf-8"))
+        return frozenset(data["events"])
+    except Exception:
+        # A missing/corrupt contract file must not crash the whole backend —
+        # None disables emit()'s assertion below (an empty frozenset would
+        # reject EVERY event) rather than break every single command; the
+        # cross-lock test still catches a missing/corrupt file directly.
+        return None
+
+
+EVENT_NAMES = _load_event_names()
+
 _CURRENT_STAGE = "general"  # which stage subsequent log() lines belong to
 
 
 def emit(event, **kwargs):
     """Print one json line to stdout and flush."""
+    assert EVENT_NAMES is None or event in EVENT_NAMES, (
+        f"unknown event name {event!r} — not in events.json contract (M4 arch-audit)"
+    )
     payload = {"event": event}
     payload.update(kwargs)
     sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")

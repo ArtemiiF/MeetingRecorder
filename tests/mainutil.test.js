@@ -17,6 +17,31 @@ const {
   modelCacheDirsFor, cleanupPartialModelCache, dirSizeBytes,
   compareVersions, pickUpdateAsset,
 } = require("../lib/mainutil");
+const { EVENT_NAMES, EVENTS } = require("../lib/events");
+
+// ── lib/events.js (M4 arch-audit — event-name contract) ─────────────────────
+// events.json is the shared source of truth read by BOTH this module and
+// backend.py's own EVENT_NAMES frozenset (tests/test_backend.py has the
+// cross-lock test on the Python side, scanning main.js for EVENTS.* usage).
+test("EVENT_NAMES: non-empty array of unique strings, sourced from events.json", () => {
+  assert.ok(Array.isArray(EVENT_NAMES) && EVENT_NAMES.length > 0);
+  assert.equal(new Set(EVENT_NAMES).size, EVENT_NAMES.length, "no duplicate event names in the contract");
+  for (const name of EVENT_NAMES) assert.equal(typeof name, "string");
+});
+test("EVENTS: every contract name gets its own constant (no naming collisions after the uppercase/underscore transform)", () => {
+  assert.equal(Object.keys(EVENTS).length, EVENT_NAMES.length);
+});
+test("EVENTS: spot-check known constants resolve to their exact contract string", () => {
+  assert.equal(EVENTS.CLASSIFIED, "classified");
+  assert.equal(EVENTS.CLASSIFIED_TERMS, "classified-terms");
+  assert.equal(EVENTS.SEARCH_RESULT, "search_result");
+  assert.equal(EVENTS.STAGE_END, "stage_end");
+  assert.equal(EVENTS.ERROR, "error");
+  assert.equal(EVENTS.LOG, "log");
+});
+test("EVENTS: an unknown constant name resolves to undefined, not a throw (a typo like EVENTS.CLASIFIED must never silently match every ev.event string)", () => {
+  assert.equal(EVENTS.NOT_A_REAL_EVENT, undefined);
+});
 
 // ── WAV header ──────────────────────────────────────────────────────────────
 test("buildWavHeader: 44 bytes, correct markers and sizes", () => {

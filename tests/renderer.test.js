@@ -3735,8 +3735,8 @@ test("main.js: download-models tracks the in-flight model via stage/stage_end be
   const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
   const handler = mainSrc.match(/async function runModelDownloadBatch\([\s\S]*?\n\}/)[0];
   assert.match(handler, /let inFlightModelId = null/);
-  assert.match(handler, /if \(ev\.event === "stage"\) inFlightModelId = /);
-  assert.match(handler, /else if \(ev\.event === "stage_end"\) inFlightModelId = null/);
+  assert.match(handler, /if \(ev\.event === EVENTS\.STAGE\) inFlightModelId = /);
+  assert.match(handler, /else if \(ev\.event === EVENTS\.STAGE_END\) inFlightModelId = null/);
 });
 
 test("main.js: download-models' close handler cleans up ONLY when canceled or non-zero exit, and ONLY the in-flight model", () => {
@@ -5068,7 +5068,7 @@ test("main.js: classify-glossary-terms writes the batch to a temp JSON file, cal
   const handler = mainSrc.match(/ipcMain\.handle\("classify-glossary-terms"[\s\S]*?\n\}\);/)[0];
   assert.match(handler, /"classify-terms", "--terms-file", termsFile/);
   assert.match(handler, /if \(fastModel\) args\.push\("--fast-model", fastModel\)/);
-  assert.match(handler, /ev\.event === "classified-terms"/);
+  assert.match(handler, /ev\.event === EVENTS\.CLASSIFIED_TERMS/);
   assert.match(handler, /try \{ fs\.unlinkSync\(termsFile\); \} catch \{\}/);
 });
 

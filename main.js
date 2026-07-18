@@ -21,6 +21,10 @@ const {
   whisperModelDir, vadJitPath, diarizationModelDirs, appReadinessStatus,
   cleanupPartialModelCache, modelCacheDirsFor, dirSizeBytes, compareVersions, pickUpdateAsset,
 } = require("./lib/mainutil");
+// M4 arch-audit: single source of truth for backend.py's event-name protocol —
+// see lib/events.js's own comment for the cross-lock this closes.
+const { EVENT_NAMES, EVENTS } = require("./lib/events");
+const EVENT_NAMES_SET = new Set(EVENT_NAMES);
 
 // audiotee is ESM-only — load it lazily via dynamic import() from this CommonJS module.
 let AudioTeeClass = null;
@@ -207,11 +211,26 @@ function runBackend(args, onEvent, onClose, extraEnv = {}) {
   rl.on("line", (line) => {
     line = line.trim();
     if (!line) return;
+    let ev;
     try {
-      onEvent(JSON.parse(line));
+      ev = JSON.parse(line);
     } catch {
-      onEvent({ event: "log", msg: line });
+      ev = { event: EVENTS.LOG, msg: line };
     }
+    // M4 arch-audit: backend.py's own emit() asserts every event it sends against
+    // the SAME events.json contract (backend.py can never emit outside it) — this
+    // is the main.js-side half of the lock. An event name that isn't in the
+    // contract at all (a stale main.js listening for a renamed/removed event, or a
+    // version-mismatched backend.py) gets surfaced loudly here instead of silently
+    // vanishing into whichever handler's narrower if/else-if chain happened to
+    // receive it. Deliberately NOT warning for a cataloged event a given handler
+    // simply doesn't special-case (e.g. a "log" line arriving during para-classify)
+    // — that's normal, not a protocol violation, so this check is centralized here
+    // (once per line) rather than repeated per-handler.
+    if (ev && typeof ev.event === "string" && !EVENT_NAMES_SET.has(ev.event)) {
+      console.warn(`[backend] неизвестное событие "${ev.event}" — нет в контракте events.json:`, ev);
+    }
+    onEvent(ev);
   });
   let stderr = "";
   proc.stderr.on("data", (d) => (stderr += d.toString()));
@@ -394,7 +413,7 @@ ipcMain.handle("preflight", async () => {
   const token = loadToken();
   const be = await new Promise((resolve) => {
     let out = {};
-    runBackend(["preflight"], (ev) => { if (ev.event === "preflight") out = ev; },
+    runBackend(["preflight"], (ev) => { if (ev.event === EVENTS.PREFLIGHT) out = ev; },
       () => resolve(out), token ? { HF_TOKEN: token } : {});
   });
   return {
@@ -467,7 +486,7 @@ ipcMain.handle("list-devices", async () => {
   return new Promise((resolve) => {
     let devices = [];
     runBackend(["devices"], (ev) => {
-      if (ev.event === "devices") devices = ev.devices;
+      if (ev.event === EVENTS.DEVICES) devices = ev.devices;
     }, () => resolve(devices));
   });
 });
@@ -736,8 +755,8 @@ ipcMain.handle("start-recording", async (_e, opts) => {
   recordProc = runBackend(
     micArgs,
     (ev) => {
-      if (ev.event === "recorded") session.micRecorded = true;
-      if (ev.event === "error") session.micErrored = true;
+      if (ev.event === EVENTS.RECORDED) session.micRecorded = true;
+      if (ev.event === EVENTS.ERROR) session.micErrored = true;
       send("record-event", ev); // forwards elapsed/log → timer + logs
     },
     (code, stderr) => {
@@ -841,7 +860,7 @@ ipcMain.handle("stop-recording", async () => {
   runBackend(
     args,
     (ev) => {
-      if (ev.event === "mixed") {
+      if (ev.event === EVENTS.MIXED) {
         // Recording finished capture — persist it to the pending-recordings manifest
         // (survives an app restart) before telling the renderer, so the queue and the
         // notification can never disagree about what's waiting to be processed.
@@ -864,7 +883,7 @@ ipcMain.handle("stop-recording", async () => {
           system: sysOk ? sess.sysPath : null,
           tracks: ev.tracks,
         });
-      } else if (ev.event === "error") {
+      } else if (ev.event === EVENTS.ERROR) {
         send("record-event", { event: "error", msg: ev.msg });
       } else {
         send("record-event", ev);
@@ -1049,7 +1068,7 @@ ipcMain.handle("process-audio", async (_e, opts) => {
   procProc = runBackend(
     args,
     (ev) => {
-      if (ev.event === "done") doneNote = ev.note;
+      if (ev.event === EVENTS.DONE) doneNote = ev.note;
       send("process-event", ev);
     },
     (code, stderr) => {
@@ -1091,7 +1110,7 @@ ipcMain.handle("models", async () => {
   const token = loadToken();
   const items = await new Promise((resolve) => {
     let out = [];
-    runBackend(["models"], (ev) => { if (ev.event === "models") out = ev.items; },
+    runBackend(["models"], (ev) => { if (ev.event === EVENTS.MODELS) out = ev.items; },
       () => resolve(out), token ? { HF_TOKEN: token } : {});
   });
   // On-disk footprint per model (settings "Модели" section: "добавить размер на
@@ -1154,8 +1173,8 @@ async function runModelDownloadBatch(only, beforeStart) {
   modelDlProc = runBackend(
     args,
     (ev) => {
-      if (ev.event === "stage") inFlightModelId = (ev.stage || "").replace(/^model:/, "") || null;
-      else if (ev.event === "stage_end") inFlightModelId = null;
+      if (ev.event === EVENTS.STAGE) inFlightModelId = (ev.stage || "").replace(/^model:/, "") || null;
+      else if (ev.event === EVENTS.STAGE_END) inFlightModelId = null;
       send("download-models-event", ev);
     },
     (code, stderr) => {
@@ -1755,7 +1774,7 @@ ipcMain.handle("list-history", async (_e, outDir) => {
     let out = [];
     let auds = [];
     runBackend(histArgs,
-      (ev) => { if (ev.event === "history") { out = ev.items; auds = ev.audios || []; } },
+      (ev) => { if (ev.event === EVENTS.HISTORY) { out = ev.items; auds = ev.audios || []; } },
       () => resolve({ items: out, audios: auds }));
   });
   const mapped = items.map((it) => it.kind === "pending" ? {
@@ -2019,8 +2038,8 @@ ipcMain.handle("para-classify", async (_e, arg) => {
     let out = null;
     runBackend(args,
       (ev) => {
-        if (ev.event === "classified") out = { category: ev.category, project: ev.project };
-        else if (ev.event === "error") out = { error: ev.msg };
+        if (ev.event === EVENTS.CLASSIFIED) out = { category: ev.category, project: ev.project };
+        else if (ev.event === EVENTS.ERROR) out = { error: ev.msg };
       },
       () => resolve(out || { error: "нет ответа от backend" }));
   });
@@ -2046,8 +2065,8 @@ ipcMain.handle("classify-glossary-terms", async (_e, { terms, fastModel } = {}) 
     let out = null;
     runBackend(args,
       (ev) => {
-        if (ev.event === "classified-terms") out = { categories: ev.categories || {} };
-        else if (ev.event === "error") out = { error: ev.msg };
+        if (ev.event === EVENTS.CLASSIFIED_TERMS) out = { categories: ev.categories || {} };
+        else if (ev.event === EVENTS.ERROR) out = { error: ev.msg };
       },
       () => {
         try { fs.unlinkSync(termsFile); } catch {}
@@ -2074,8 +2093,8 @@ ipcMain.handle("para-extract", async (_e, notePath) => {
     let out = null;
     runBackend(["extract", "--note", resolvedNote],
       (ev) => {
-        if (ev.event === "extracted") out = { content: ev.content };
-        else if (ev.event === "error") out = { error: ev.msg };
+        if (ev.event === EVENTS.EXTRACTED) out = { content: ev.content };
+        else if (ev.event === EVENTS.ERROR) out = { error: ev.msg };
       },
       () => resolve(out || { error: "нет ответа от backend" }));
   });
@@ -2196,7 +2215,7 @@ function readParaRoot() {
 function startAutoIndex(root) {
   autoIndexProc = runBackend(indexArgs(root),
     (ev) => {
-      if (ev.event === "log" || ev.event === "error") send("para-reindex-event", ev);
+      if (ev.event === EVENTS.LOG || ev.event === EVENTS.ERROR) send("para-reindex-event", ev);
     },
     () => {
       autoIndexProc = null;
@@ -2241,8 +2260,8 @@ ipcMain.handle("para-reindex", async (_e, { root }) => {
     let summary = null;
     runBackend(indexArgs(root),
       (ev) => {
-        if (ev.event === "indexed") summary = { indexed: ev.indexed, skipped: ev.skipped, removed: ev.removed };
-        else if (ev.event === "log" || ev.event === "error") send("para-reindex-event", ev);
+        if (ev.event === EVENTS.INDEXED) summary = { indexed: ev.indexed, skipped: ev.skipped, removed: ev.removed };
+        else if (ev.event === EVENTS.LOG || ev.event === EVENTS.ERROR) send("para-reindex-event", ev);
       },
       (_code, stderr) => {
         if (!summary) summary = { error: stderr || "нет ответа от backend" };
@@ -2278,9 +2297,9 @@ ipcMain.handle("para-search", async (_e, { root, messages, query, mainModel }) =
     let degraded = false;
     searchProc = runBackend(args,
       (ev) => {
-        if (ev.event === "search_result") result = { found: ev.found, answer: ev.answer, citations: ev.citations, degraded };
-        else if (ev.event === "error") result = { found: false, error: ev.msg };
-        else if (ev.event === "log" && ev.msg === DEGRADED_LOG_MSG) degraded = true;
+        if (ev.event === EVENTS.SEARCH_RESULT) result = { found: ev.found, answer: ev.answer, citations: ev.citations, degraded };
+        else if (ev.event === EVENTS.ERROR) result = { found: false, error: ev.msg };
+        else if (ev.event === EVENTS.LOG && ev.msg === DEGRADED_LOG_MSG) degraded = true;
       },
       (_code, stderr) => {
         const canceled = searchCanceled;

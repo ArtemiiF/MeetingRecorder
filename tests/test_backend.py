@@ -59,6 +59,133 @@ def test_stage_end_emits_status():
         "event": "stage_end", "stage": "llm", "status": "fail", "msg": "no summary"}
 
 
+# ── event-name contract (M4 arch-audit) ─────────────────────────────────────
+# events.json (repo root) is the single source of truth shared with main.js's
+# lib/events.js — backend.EVENT_NAMES (loaded at import time) is the SAME file,
+# and emit() asserts every event it ever sends is a member of it. This section
+# locks the OTHER direction: every EVENTS.* constant main.js's dispatch actually
+# references must resolve to a name present in the SAME contract — main.js
+# can't require() from here (this is Python), so the mapping ("classified-terms"
+# -> "CLASSIFIED_TERMS") is reproduced from events.json directly, mirroring
+# lib/events.js's own transform, rather than requiring a JS runtime.
+APP_DIR = Path(__file__).resolve().parent.parent
+EVENTS_JSON_PATH = APP_DIR / "events.json"
+MAIN_JS_PATH = APP_DIR / "main.js"
+
+
+def _event_name_to_const(name):
+    """Mirrors lib/events.js's own transform exactly: uppercase, "-" -> "_"."""
+    return name.upper().replace("-", "_")
+
+
+def test_backend_event_names_loaded_from_the_shared_contract_file():
+    assert backend.EVENT_NAMES is not None, "events.json must be present and valid for the contract to be enforced"
+    data = json.loads(EVENTS_JSON_PATH.read_text(encoding="utf-8"))
+    assert backend.EVENT_NAMES == frozenset(data["events"])
+
+
+def test_emit_rejects_an_event_name_outside_the_contract():
+    with pytest.raises(AssertionError):
+        capture(backend.emit, "totally-not-a-real-event", msg="x")
+
+
+def test_emit_accepts_every_name_actually_in_the_contract():
+    # Belt-and-suspenders: every cataloged name must be a valid emit() call, not
+    # just the ones backend.py happens to call today — keeps the contract file
+    # itself honest as a superset, not just a lucky match of current usage.
+    for name in backend.EVENT_NAMES:
+        capture(backend.emit, name)  # must not raise
+
+
+def test_cross_lock_every_EVENTS_constant_main_js_dispatches_on_resolves_to_a_cataloged_event_name():
+    """The actual cross-lock (M4 arch-audit): scans main.js's source for every
+    `EVENTS.SOME_NAME` token, maps each back to the event-name string it must
+    resolve to (lib/events.js's transform), and asserts that string is present in
+    events.json. A stale/renamed main.js reference (e.g. a typo like
+    EVENTS.CLASIFIED, which lib/events.js would silently resolve to `undefined`
+    and NEVER match any real ev.event string) fails HERE instead of silently
+    dropping every occurrence of that event at runtime."""
+    contract = frozenset(json.loads(EVENTS_JSON_PATH.read_text(encoding="utf-8"))["events"])
+    const_to_name = {_event_name_to_const(name): name for name in contract}
+    assert len(const_to_name) == len(contract), "two contract names collided onto the same constant — pick a less ambiguous event name"
+
+    main_js_src = MAIN_JS_PATH.read_text(encoding="utf-8")
+    referenced_consts = set(re.findall(r"EVENTS\.([A-Z_0-9]+)", main_js_src))
+    assert referenced_consts, "sanity check: main.js should reference at least one EVENTS.* constant"
+
+    unknown = referenced_consts - set(const_to_name.keys())
+    assert not unknown, (
+        f"main.js references EVENTS.{{{', '.join(sorted(unknown))}}} — no such constant exists in "
+        f"events.json's contract (lib/events.js would silently resolve it to undefined, and "
+        f"ev.event === undefined never matches a real string)"
+    )
+
+
+# ── model-cache path mirror lock (M5 arch-audit) ────────────────────────────
+# lib/mainutil.js's hfCacheDir/whisperModelDir/vadJitPath/PYANNOTE_REPO_IDS must
+# stay byte-identical to backend.py's own _WHISPER_MODEL_DIR/_VAD_JIT_PATH/
+# _PYANNOTE_REPO_IDS (both sides' own comments already say so — see
+# lib/mainutil.js:546-547) — the JS side pins these via hand-typed literal tests
+# (tests/mainutil.test.js), but nothing previously locked backend.py's side to
+# the SAME literals.
+#
+# Chose a regex-extraction test over a shared models-spec.json contract file
+# (unlike M4's events.json): mainutil.js's functions take `homedir` as an
+# explicit parameter (pure, computed per-call) while backend.py's are
+# module-level absolute-path constants computed once via Path.home() —
+# unifying the two behind a shared spec would mean restructuring backend.py's
+# constant computation (a real, model-loading-critical code path) purely to
+# serve a drift-lock. A zero-runtime-cost text-extraction test (no node
+# subprocess, no CI dependency on a working `node` binary) buys the same
+# protection against accidental drift without touching that code at all —
+# reading backend.py's side via its LIVE imported attributes (not a second
+# layer of source-text regex) keeps this test itself honest.
+MAINUTIL_JS_PATH = APP_DIR / "lib" / "mainutil.js"
+
+
+def _mainutil_js_source():
+    return MAINUTIL_JS_PATH.read_text(encoding="utf-8")
+
+
+def test_mirror_lock_whisper_repo_id_matches_backend_WHISPER_MODEL_DIR():
+    src = _mainutil_js_source()
+    m = re.search(r'function whisperModelDir\(homedir\) \{\s*\n\s*return hfCacheDir\(homedir, "([^"]+)"\);', src)
+    assert m, "whisperModelDir's body shape changed in lib/mainutil.js — update this test's regex alongside it"
+    js_repo_id = m.group(1)
+    expected_dirname = "models--" + js_repo_id.replace("/", "--")
+    assert backend._WHISPER_MODEL_DIR.name == expected_dirname, (
+        f"lib/mainutil.js's whisperModelDir repo id ({js_repo_id!r}) no longer matches "
+        f"backend.py's _WHISPER_MODEL_DIR ({backend._WHISPER_MODEL_DIR.name!r})"
+    )
+
+
+def test_mirror_lock_vad_jit_path_matches_backend_VAD_JIT_PATH():
+    src = _mainutil_js_source()
+    m = re.search(
+        r"function vadJitPath\(homedir\) \{\s*\n\s*return path\.join\(\s*\n\s*homedir, (.+?)\s*\n\s*\);\s*\n\}",
+        src,
+    )
+    assert m, "vadJitPath's body shape changed in lib/mainutil.js — update this test's regex alongside it"
+    segments = re.findall(r'"([^"]+)"', m.group(1))
+    js_relative = "/".join(segments)
+    backend_relative = str(backend._VAD_JIT_PATH.relative_to(Path.home())).replace(os.sep, "/")
+    assert js_relative == backend_relative, (
+        f"lib/mainutil.js's vadJitPath ({js_relative!r}) no longer matches "
+        f"backend.py's _VAD_JIT_PATH ({backend_relative!r})"
+    )
+
+
+def test_mirror_lock_pyannote_repo_ids_match_backend_PYANNOTE_REPO_IDS():
+    src = _mainutil_js_source()
+    m = re.search(r"const PYANNOTE_REPO_IDS = \[(.*?)\];", src, re.S)
+    assert m, "PYANNOTE_REPO_IDS's literal shape changed in lib/mainutil.js — update this test's regex alongside it"
+    js_ids = re.findall(r'"([^"]+)"', m.group(1))
+    assert js_ids == list(backend._PYANNOTE_REPO_IDS), (
+        f"lib/mainutil.js's PYANNOTE_REPO_IDS ({js_ids!r}) no longer matches "
+        f"backend.py's _PYANNOTE_REPO_IDS ({list(backend._PYANNOTE_REPO_IDS)!r})"
+    )
+
+
 # ── str2bool ────────────────────────────────────────────────────────────────
 @pytest.mark.parametrize("v,exp", [
     ("true", True), ("True", True), ("1", True), ("yes", True), ("on", True),
