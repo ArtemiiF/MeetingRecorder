@@ -1333,15 +1333,24 @@ function renderImportQueue() {
 let activePendingId = null;   // id of the pending recording the in-flight run belongs to, if any
 let pendingBatchRunning = false; // true while "Обработать все" is driving the queue
 
-// Builds one pending-recording row (icon + name + ▶/✕) for the История rail — the single
-// render path for a pending recording (owner decision: no separate control strip — see
-// renderRail below). idx is the item's current position in state.pendingRecordings.
+// Builds one pending-recording row (icon + name + time + status badge + ▶/✕) for the
+// История rail — the single render path for a pending recording (owner decision: no
+// separate control strip, rendered inline at its real chronological position among
+// notes/orphans — see buildRecordings/renderRail below). idx is the item's current
+// position in state.pendingRecordings. ▶/✕ semantics are untouched by the audio-first
+// rail redesign (item 3 — ✕ here is remove-pending-recording, not the trash feature).
 function buildPendingRow(item, idx) {
   const icon = QUEUE_STATUS_ICON[item.status] || "⏳";
   const row = document.createElement("div");
   row.className = "rail-item pending queue-item queue-" + item.status;
+  const time = formatStampTime(item.stamp || item.id);
+  // "ждёт обработки" is only accurate for the true waiting state — running/failed
+  // already have their own status icon (QUEUE_STATUS_ICON) and aren't given invented
+  // badge text here.
+  const badge = item.status === "pending" ? recordingBadge("pending") : "";
   row.innerHTML =
-    `<span class="queue-icon">${icon}</span><span class="queue-name">${escapeHtml(item.name)}</span>`;
+    `<span class="queue-icon">${icon}</span><span class="queue-name">${escapeHtml(item.name)}</span>` +
+    (time || badge ? `<span class="rail-pending-meta">${escapeHtml(time)}${badge}</span>` : "");
   const canProcess = item.status === "pending" || item.status === "failed";
   // First trailing button gets queue-retry-btn's margin-left:auto (pushes this
   // row's action button(s) to the right, same as renderImportQueue's ↻).
@@ -1988,6 +1997,12 @@ $("historyRefresh").addEventListener("click", refreshHistory);
 
 // ── history (rail + note viewer) ─────────────────────────────────────────────
 let historyItems = [];
+// Out-dir audio inventory (feat-history-audio-inventory / PR #29's cmd_history
+// addition): {base_stamp, path, size, mtime, duration_s}[] — every audio file
+// physically present, including ones with zero surviving notes ("без обработок").
+// Read off historyItems.audios (see main.js's list-history mapping) rather than a
+// second IPC round-trip; [] on a not-yet-updated backend (safety until #29 merges).
+let historyAudios = [];
 // idx (into historyItems) of the note currently shown in #noteView, or null — renderRail()
 // rebuilds the whole rail from scratch on every call (filters, refresh, auto-open included),
 // which would otherwise silently drop the .active highlight on every re-render even though
@@ -1995,6 +2010,7 @@ let historyItems = [];
 let openNoteIdx = null;
 async function refreshHistory() {
   historyItems = await window.api.listHistory(state.outDir);
+  historyAudios = historyItems.audios || [];
   populateTemplateFilter();
   renderRail();
   updateNoteViewDefault();
@@ -2067,8 +2083,8 @@ function formatGroupDate(isoDate) {
 // filenames) from its stamp, recovering the shared "meeting-<timestamp>" recording
 // identity. Mirrors backend.py's _find_audio stem-stripping (same order: revision
 // suffix first, then language) so a reprocessed note's version-group and its shared
-// audio agree on what "the same recording" means. One helper, reused by both the
-// next-version computation (openReprocessPicker) and the rail's grouping (renderRail).
+// audio agree on what "the same recording" means. Fallback only — recordingBaseStamp
+// below prefers the backend-provided base_stamp field when present.
 const NOTE_LANG_SUFFIXES = new Set(["en", "auto"]);
 function baseStampOf(stamp) {
   let s = String(stamp || "");
@@ -2079,6 +2095,66 @@ function baseStampOf(stamp) {
   return s;
 }
 
+// Canonical recording identity for a note row: prefer the backend-provided base_stamp
+// (feat-history-audio-inventory / PR #29's cmd_history addition, pairs a note with the
+// out_dir audio inventory) and fall back to the renderer's own baseStampOf(it.name) when
+// absent — safety net until #29 merges into main (or for any payload from a
+// not-yet-updated backend).
+function recordingBaseStamp(it) {
+  return it.base_stamp || baseStampOf(it.name);
+}
+
+// Mirrors backend.py's _parse_any_stamp — parses either stamp namespace into a real
+// Date for the audio-first rail's unified chronological sort: a note/recording base
+// stamp ("2026-07-07-123456", 17 chars) or a still-pending recording's stamp
+// ("2026-07-07T12-34-56-x9k2" — a literal "T" at index 10 distinguishes it). Returns
+// null on anything unparseable — callers sort those last rather than crashing.
+function parseAnyStamp(stamp) {
+  const s = String(stamp || "");
+  if (s.length < 17) return null;
+  const m = (s.length >= 19 && s[10] === "T")
+    ? /^(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})-(\d{2})/.exec(s)
+    : /^(\d{4})-(\d{2})-(\d{2})-(\d{2})(\d{2})(\d{2})/.exec(s);
+  if (!m) return null;
+  const [, y, mo, d, h, mi, se] = m;
+  const date = new Date(+y, +mo - 1, +d, +h, +mi, +se); // local ctor — no UTC shift
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+// "HH:MM" time-of-day for a rail row's meta line (design "Вариант A" — history-audio-a.html).
+const RAIL_TIME_FMT = new Intl.DateTimeFormat("ru-RU", { hour: "2-digit", minute: "2-digit" });
+function formatStampTime(stamp) {
+  const d = parseAnyStamp(stamp);
+  return d ? RAIL_TIME_FMT.format(d) : "";
+}
+// Whole-minute duration for a rail row's meta line — seconds is audios[]'s duration_s
+// (backend's best-effort WAV header read), null/undefined whenever it's unknown (a
+// pending recording's audio isn't in the out_dir inventory yet, a non-wav orphan, etc.).
+function formatDurationMin(seconds) {
+  if (seconds == null) return "";
+  return `${Math.round(seconds / 60)} мин`;
+}
+
+// Standard Russian count-noun declension (1 → nominative singular, 2-4 → genitive
+// singular, everything else → genitive plural) — used only by recordingBadge's
+// "N обработок" text below; ruStem (above) is a query stemmer, a different concept.
+function ruPlural(n, one, few, many) {
+  const mod10 = n % 10, mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return one;
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 10 || mod100 >= 20)) return few;
+  return many;
+}
+
+// Recording-level status badge (design "Вариант A" reference, history-audio-a.html):
+// «ждёт обработки» (pending, --rec-tint), «без обработок» (orphan audio inventory entry
+// with zero surviving notes, dashed --inactive outline), «N обработок» (has notes,
+// neutral) — tokens only (style.css's .rail-rec-badge.* rules), no hardcoded colors.
+function recordingBadge(kind, count) {
+  if (kind === "pending") return '<span class="rail-rec-badge wait">ждёт обработки</span>';
+  if (kind === "orphan") return '<span class="rail-rec-badge empty">без обработок</span>';
+  return `<span class="rail-rec-badge count">${count} ${ruPlural(count, "обработка", "обработки", "обработок")}</span>`;
+}
+
 // Next per-template version number for a История reprocess: 1 + the highest existing
 // version among ALL history notes (not just whatever the current search/date filter
 // shows — numbering must stay correct even when sibling versions are filtered out)
@@ -2087,58 +2163,81 @@ function baseStampOf(stamp) {
 function nextVersionFor(baseStamp, templateName) {
   const maxV = historyItems.reduce((m, it) => {
     if (it.kind === "pending") return m;
-    if (baseStampOf(it.name) !== baseStamp) return m;
+    if (recordingBaseStamp(it) !== baseStamp) return m;
     if ((it.template || "") !== (templateName || "")) return m;
     return Math.max(m, it.version || 1);
   }, 0);
   return maxV + 1;
 }
 
-// Groups a note list into recording-groups keyed by base stamp, preserving each
-// group's position at its first occurrence in `items` (already backend-ordered by
-// stamp DESC) — see renderRail's per-group date-header + collapse rendering below.
-function groupByBaseStamp(items) {
+// Session-only collapsed-state for История's per-recording обработки — same
+// lifetime/rationale as glossaryCategoryCollapsed (glossary "Мои" category folders,
+// see renderGlossaryChips): UI-only, reset every session, never persisted. Keyed by
+// base stamp (app-derived from the note filename/backend field, not a user/LLM string)
+// so the same recording's group stays collapsed/expanded across a renderRail()
+// re-render triggered by a filter change.
+let historyGroupCollapsed = new Set();
+
+// Unified recording model for the audio-first История rail (design "Вариант A" —
+// history-audio-a.html): merges backend note rows (grouped by recordingBaseStamp),
+// the out_dir audio inventory (audios[] — pairs by base_stamp; an unpaired entry is an
+// orphan, "без обработок"), and still-pending recordings (state.pendingRecordings)
+// into ONE chronologically-sorted list of "recording" descriptors — replaces the old
+// two-tier "pending always first" + separately-grouped-notes rail. Returns ALL
+// recordings (unfiltered, newest first); renderRail() computes per-recording
+// visibility (обработки filtering, date range) on top of this.
+function buildRecordings() {
+  const notes = historyItems.filter((it) => it.kind !== "pending");
   const order = [];
-  const groups = new Map();
-  items.forEach((it) => {
-    const base = baseStampOf(it.name);
+  const groups = new Map(); // base_stamp -> notes[]
+  notes.forEach((it) => {
+    const base = recordingBaseStamp(it);
     if (!groups.has(base)) { groups.set(base, []); order.push(base); }
     groups.get(base).push(it);
   });
-  return { order, groups };
+
+  const recordings = order.map((base) => ({
+    kind: "notes",
+    baseStamp: base,
+    allNotes: groups.get(base),
+    audio: historyAudios.find((a) => a.base_stamp === base) || null,
+  }));
+
+  // audios[] entries whose base_stamp has NO surviving note at all are true orphans
+  // (histmap4x analyzer report Q5/constraint (a): an audio file with zero notes was
+  // previously invisible to the whole system). One paired with a note-group above
+  // must not ALSO render as a second, orphan row.
+  historyAudios.forEach((a) => {
+    if (groups.has(a.base_stamp)) return;
+    recordings.push({ kind: "orphan", baseStamp: a.base_stamp, audio: a });
+  });
+
+  (state.pendingRecordings || []).forEach((p, idx) => {
+    recordings.push({ kind: "pending", baseStamp: p.stamp || p.id, pendingItem: p, pendingIdx: idx });
+  });
+
+  recordings.sort((a, b) => {
+    const ta = parseAnyStamp(a.baseStamp);
+    const tb = parseAnyStamp(b.baseStamp);
+    if (!ta && !tb) return 0;
+    if (!ta) return 1;
+    if (!tb) return -1;
+    return tb - ta; // newest first
+  });
+  return recordings;
 }
 
-// Session-only collapsed-state for История's per-recording version groups — same
-// lifetime/rationale as glossaryCategoryCollapsed (glossary "Мои" category folders,
-// see renderGlossaryChips): UI-only, reset every session, never persisted. Keyed by
-// base stamp (app-derived from the note filename, not a user/LLM string) so the same
-// recording's group stays collapsed/expanded across a renderRail() re-render
-// triggered by a filter change.
-let historyGroupCollapsed = new Set();
-
-// A single, ungrouped note row — the pre-existing renderRail row, extracted so it can
-// be reused both for a solitary (single-version) recording and untouched otherwise.
-function buildHistoryRow(it) {
-  const idx = historyItems.indexOf(it);
-  const el = document.createElement("button");
-  el.className = "rail-item";
-  el.dataset.idx = idx;
-  el.innerHTML = `<span class="rail-title">${escapeHtml(it.title || "Без темы")}</span>` +
-    `<span class="rail-date">${escapeHtml(it.name)}${sourceBadge(it.source)}</span>`;
-  el.addEventListener("click", () => selectNote(idx));
-  return el;
-}
-
-// Multi-version recording group (История "Переобработать" — see backend.py
-// Pipeline.process's version/-r<seq> scheme): one collapsible block per recording
-// that has more than one (currently shown) note, versions organized by template
-// (stable order = first-seen within the group, which is already backend stamp-DESC)
-// and, within a template, ordered by version DESCENDING — the highest version per
-// template is marked "(latest)". Caret/hidden-class/session-Set collapse mechanics
-// mirror renderGlossaryChips' "Мои" category folders (see glossaryCategoryCollapsed)
-// — same discipline: no user/LLM string (title, template name) ever lands in an HTML
-// attribute; rows wire via closure-by-index, not a data-* attribute.
-function buildHistoryVersionGroup(baseStamp, notes) {
+// One collapsible recording row for any base stamp with ≥1 (currently shown) note —
+// EVERY notes-bearing recording renders this way now (a solitary обработка is no
+// longer a special-cased flat row), organized by template (stable order = first-seen,
+// already backend stamp-DESC) and, within a template, ordered by version DESCENDING —
+// the highest version per template marked "(latest)". Caret/hidden-class/session-Set
+// collapse mechanics mirror renderGlossaryChips' "Мои" category folders (see
+// glossaryCategoryCollapsed) — same discipline: no user/LLM string (title, template
+// name) ever lands in an HTML attribute; rows wire via closure-by-index, not a data-*
+// attribute.
+function buildNotesRecordingRow(rec) {
+  const notes = rec.shownNotes; // may be a subset of rec.allNotes — filters "shrink" the group
   const wrap = document.createElement("div");
   wrap.className = "rail-group";
 
@@ -2161,22 +2260,28 @@ function buildHistoryVersionGroup(baseStamp, notes) {
       rowOrder.push(it);
       const v = it.version || 1;
       const latest = v === maxV ? ' <span class="rail-latest">(latest)</span>' : "";
+      // No sourceBadge here — matches the pre-existing group-row precedent (only the
+      // old solitary flat row, now retired, ever showed it); the design reference
+      // (history-audio-a.html) doesn't show a source icon on обработка rows either.
       return `<button type="button" class="rail-item rail-version-row">` +
         `<span class="rail-title">${escapeHtml(tmpl || "Без шаблона")} · v${v}${latest}</span></button>`;
     }).join("");
   }).join("");
 
-  const collapsed = historyGroupCollapsed.has(baseStamp);
+  const collapsed = historyGroupCollapsed.has(rec.baseStamp);
   const title = notes[0].title || "Без темы";
+  const time = formatStampTime(rec.baseStamp);
+  const dur = rec.audio ? formatDurationMin(rec.audio.duration_s) : "";
+  const metaText = [time, dur].filter(Boolean).join(" · ");
   wrap.innerHTML =
     `<button type="button" class="rail-group-header">` +
-    `<span class="glossary-caret">${collapsed ? "▸" : "▾"}</span> ${escapeHtml(title)} ` +
-    `<span class="glossary-count">${notes.length}</span></button>` +
+    `<span class="glossary-caret">${collapsed ? "▸" : "▾"}</span> 🎙 ${escapeHtml(title)}</button>` +
+    `<div class="rail-rec-meta">${escapeHtml(metaText)}${recordingBadge("notes", notes.length)}</div>` +
     `<div class="rail-group-versions${collapsed ? " hidden" : ""}">${rowsHtml}</div>`;
 
   wrap.querySelector(".rail-group-header").addEventListener("click", () => {
-    if (historyGroupCollapsed.has(baseStamp)) historyGroupCollapsed.delete(baseStamp);
-    else historyGroupCollapsed.add(baseStamp);
+    if (historyGroupCollapsed.has(rec.baseStamp)) historyGroupCollapsed.delete(rec.baseStamp);
+    else historyGroupCollapsed.add(rec.baseStamp);
     renderRail();
   });
   wrap.querySelectorAll(".rail-version-row").forEach((btn, i) => {
@@ -2187,11 +2292,45 @@ function buildHistoryVersionGroup(baseStamp, notes) {
   return wrap;
 }
 
-// render the rail filtered by search (title/date) + language + template + date range.
-// dataset.idx points into the full historyItems so selection survives filtering.
-// Pending recordings (state.pendingRecordings) render first and ALWAYS, bypassing every
-// filter below — they aren't notes yet (no template/language/date to filter by), and the
-// owner wants them visible in История regardless of whatever the rail is currently filtered to.
+// «без обработок» row (an audios[] entry with zero surviving notes — see buildRecordings):
+// a flat, non-clickable row (same shape as buildPendingRow — no note to open, so clicking
+// the row itself is a no-op), with a prominent «▶ Обработать» that reuses the SAME
+// reprocess entry point a note's own ▶ uses (openReprocessPicker/reprocessHistory) —
+// there is no note metadata (template/language) to seed the picker with, so a synthetic
+// item carrying only the base stamp stands in for a real one (recordingBaseStamp reads
+// it straight off .base_stamp, no baseStampOf guessing needed). Deliberately NO
+// recording-level ✕ (owner decision, item 5 — deferred to the trash PR; permanent audio
+// deletion isn't acceptable yet), unlike the design reference card.
+function buildOrphanRow(rec) {
+  const el = document.createElement("div");
+  el.className = "rail-item orphan";
+  const time = formatStampTime(rec.baseStamp);
+  const dur = formatDurationMin(rec.audio.duration_s);
+  const name = (rec.audio.path || "").split("/").pop();
+  el.innerHTML =
+    `<div class="rail-rec-head"><span>🎙</span><span class="rail-title rail-title-file">${escapeHtml(name)}</span></div>` +
+    `<div class="rail-rec-meta">${escapeHtml([time, dur].filter(Boolean).join(" · "))}${recordingBadge("orphan")}</div>`;
+  const btn = document.createElement("button");
+  btn.className = "btn small primary";
+  btn.textContent = "▶ Обработать";
+  btn.addEventListener("click", () => processOrphanAudio(rec.audio));
+  el.appendChild(btn);
+  return el;
+}
+
+// Dispatches a buildRecordings() descriptor to its row renderer — the single place
+// renderRail() needs to know about the three recording kinds.
+function buildRecordingRow(rec) {
+  if (rec.kind === "pending") return buildPendingRow(rec.pendingItem, rec.pendingIdx);
+  if (rec.kind === "orphan") return buildOrphanRow(rec);
+  return buildNotesRecordingRow(rec);
+}
+
+// render the rail: a single chronologically-sorted list of RECORDINGS (design "Вариант
+// A" — audio is the top level, обработки the second), date-separated. Notes/orphans/
+// pending all interleave by their own real timestamp (buildRecordings) — pending no
+// longer renders as a separate always-first section. dataset.idx (on each обработка
+// row) points into the full historyItems so selection survives re-render.
 function renderRail() {
   const q = ($("historySearch").value || "").trim().toLowerCase();
   const lang = $("historyLang").value;
@@ -2201,58 +2340,60 @@ function renderRail() {
   updateFiltersToggle();
   const rail = $("historyList");
   rail.innerHTML = "";
-  const pending = state.pendingRecordings || [];
-  // The rail is the single render path for a pending recording (owner decision — no
-  // separate control strip). Rows wire the same processPendingRecording/deletePendingRecording
-  // used everywhere else; the row itself gets no click listener, so clicking it (outside the
-  // buttons) is a no-op — it must never call selectNote/readNote like a real note row does.
-  pending.forEach((item, idx) => rail.appendChild(buildPendingRow(item, idx)));
-  const hasWork = pending.some((it) => it.status === "pending" || it.status === "failed");
-  $("pendingProcessAll").classList.toggle("hidden", !hasWork);
-  // Placed before the notes early-returns below (empty/no-match) so the Запись-tab
-  // button always re-evaluates on every renderRail() call, regardless of История's
-  // current filter/search state.
+  // Unconditional, regardless of filter/search state or what ends up visible below —
+  // same reasoning as before this feature (Запись-tab quick-process button must always
+  // reflect state.pendingRecordings, not История's current filter).
   refreshProcessLatestBtn();
-  // Backend-merged listHistory rows carry kind:"pending" too (cmd_history --pending-file) —
-  // real notes never do. Exclude them here so a restart-era pending row (already covered by
-  // state.pendingRecordings above, loaded from the same manifest) isn't rendered a second
-  // time as a broken "note" (it has no `note` path for openHistoryNote to read).
-  const notes = historyItems.filter((it) => it.kind !== "pending");
-  if (!notes.length) {
-    rail.insertAdjacentHTML("beforeend", '<p class="hint">Пока пусто.</p>');
-    return;
-  }
-  const shown = notes.filter((it) => {
+  const hasWork = (state.pendingRecordings || []).some((it) => it.status === "pending" || it.status === "failed");
+  $("pendingProcessAll").classList.toggle("hidden", !hasWork);
+
+  const noteMatches = (it) => {
     const d = (it.name || "").slice(0, 10); // stamp = YYYY-MM-DD-HHMMSS → ISO date sorts lexically
     return (!q || textMatchesQuery(it.title || "", q) || textMatchesQuery(it.name || "", q)) &&
       (!lang || it.language === lang) &&
       (!tmpl || it.template === tmpl) &&
       (!from || d >= from) && (!to || d <= to);
+  };
+  const dateInRange = (stamp) => {
+    const d = (stamp || "").slice(0, 10);
+    return (!from || d >= from) && (!to || d <= to);
+  };
+
+  const recordings = buildRecordings(); // chronological (desc), unfiltered
+  // A recording is visible if ≥1 обработка matches the note-level filters (q/lang/
+  // tmpl/date-range — same "shrinks the group" semantics as before), OR it has zero
+  // обработки at all (orphan/pending) — those always pass every filter except the
+  // date range, applied to the recording's own stamp (owner decision, item 6).
+  const visible = [];
+  recordings.forEach((rec) => {
+    if (rec.kind === "notes") {
+      rec.shownNotes = rec.allNotes.filter(noteMatches);
+      if (rec.shownNotes.length) visible.push(rec);
+    } else if (dateInRange(rec.baseStamp)) {
+      visible.push(rec);
+    }
   });
-  if (!shown.length) {
-    rail.insertAdjacentHTML("beforeend", '<p class="hint">Ничего не найдено.</p>');
+
+  if (!visible.length) {
+    const msg = recordings.length ? "Ничего не найдено." : "Пока пусто.";
+    rail.insertAdjacentHTML("beforeend", `<p class="hint">${msg}</p>`);
     return;
   }
-  // Date-group headers: counted over `shown` (the filtered list) so "8 июля · N" always
-  // matches what's actually visible, not the unfiltered total. `shown` is already in
-  // backend/stamp order (see comment above notes filter), so same-day rows are
-  // contiguous — a single forward pass with a running "last date seen" is enough.
+
+  // Date-group headers count VISIBLE RECORDINGS (owner decision, item 6 — a multi-
+  // обработка recording is one entry in the "N per day" count, not N), computed over
+  // `visible` so "8 июля · N" always matches what's actually shown. `visible` is
+  // already chronologically sorted, so same-day rows are contiguous — a single
+  // forward pass with a running "last date seen" is enough.
   const dateCounts = new Map();
-  shown.forEach((it) => {
-    const d = (it.name || "").slice(0, 10);
-    if (!d) return;
-    dateCounts.set(d, (dateCounts.get(d) || 0) + 1);
+  visible.forEach((rec) => {
+    const d = (rec.baseStamp || "").slice(0, 10);
+    if (d) dateCounts.set(d, (dateCounts.get(d) || 0) + 1);
   });
-  // Recordings that share a base stamp (История "Переобработать" — see baseStampOf)
-  // render as ONE collapsible group instead of N flat rows (see buildHistoryVersionGroup);
-  // a solitary (single-version) recording still renders as a plain row (buildHistoryRow),
-  // same look as before this feature. Grouping is computed over `shown` — the already-
-  // filtered set — so "N notes today"/group membership always match what's visible.
+
   let lastDate = null;
-  const { order: groupOrder, groups: groupMap } = groupByBaseStamp(shown);
-  groupOrder.forEach((base) => {
-    const groupNotes = groupMap.get(base);
-    const d = (groupNotes[0].name || "").slice(0, 10);
+  visible.forEach((rec) => {
+    const d = (rec.baseStamp || "").slice(0, 10);
     if (d && d !== lastDate) {
       lastDate = d;
       const header = document.createElement("div");
@@ -2260,9 +2401,7 @@ function renderRail() {
       header.textContent = `${formatGroupDate(d)} · ${dateCounts.get(d)}`;
       rail.appendChild(header);
     }
-    rail.appendChild(groupNotes.length > 1
-      ? buildHistoryVersionGroup(base, groupNotes)
-      : buildHistoryRow(groupNotes[0]));
+    rail.appendChild(buildRecordingRow(rec));
   });
   applyActiveHighlight(); // re-mark whichever note is currently open — rebuilt rows start unmarked
 }
@@ -2312,9 +2451,7 @@ function applyActiveHighlight() {
 function updateNoteViewDefault() {
   const view = $("noteView");
   if (!view.querySelector(".history-placeholder")) return; // a note (or read-error) already showing
-  const notes = historyItems.filter((it) => it.kind !== "pending");
-  const pendingCount = (state.pendingRecordings || []).length;
-  if (!notes.length && !pendingCount) {
+  if (!buildRecordings().length) {
     view.innerHTML =
       `<div class="note-view-empty history-placeholder">
          <div class="note-view-empty-icon">🎙</div>
@@ -2326,10 +2463,13 @@ function updateNoteViewDefault() {
     return;
   }
   // "Most recent note" reuses the rail's own already-computed order (stamp-DESC across
-  // recordings, version-DESC — "(latest)" first — within a multi-version group) instead of
-  // re-deriving that sort here: whichever .rail-item renders topmost is, by construction,
-  // the one renderRail()/groupByBaseStamp already decided sorts first.
-  const topRow = $("historyList").querySelector(".rail-item:not(.pending)");
+  // ALL recordings, version-DESC — "(latest)" first — within a recording) instead of
+  // re-deriving that sort here: .rail-version-row only ever renders for a notes-bearing
+  // recording, so the FIRST one in DOM order is, by construction, the most recent
+  // recording that actually has a note — if the very top of the unified rail is a
+  // pending/orphan entry (nothing to open), this naturally falls through to whichever
+  // note-bearing recording sorts next, exactly the "auto-open of last NOTE" contract.
+  const topRow = $("historyList").querySelector(".rail-version-row");
   if (topRow) selectNote(+topRow.dataset.idx);
 }
 
@@ -2485,7 +2625,7 @@ function openReprocessPicker(item, audioPath) {
     // reprocessHistory) because `item` — the note being reprocessed, needed for its
     // base stamp — is only in scope in this closure.
     const chosen = state.presets.find((p) => p.id === presetId);
-    const version = nextVersionFor(baseStampOf(item.name), chosen ? chosen.name : "");
+    const version = nextVersionFor(recordingBaseStamp(item), chosen ? chosen.name : "");
     closeReprocessPicker();
     reprocessHistory(audioPath, presetId, version);
   });
@@ -2523,6 +2663,30 @@ function insertAboveNoteBody(panel) {
   const body = view.querySelector(".note-body");
   if (body) view.insertBefore(panel, body);
   else view.appendChild(panel);
+}
+
+// «без обработок» row's ▶ Обработать (buildOrphanRow) — there's no note to show
+// underneath the picker, so #noteView first gets a minimal "audio only" view (this
+// audio's own name/time/duration, not a real note) purely so insertAboveNoteBody has a
+// sensible place to insert the picker into and the user can see WHICH audio they're
+// about to process. Reuses openReprocessPicker/reprocessHistory unchanged — a
+// synthetic item carrying only the audio's base_stamp stands in for a real note (no
+// template/language exists to preselect from for an orphan).
+function renderOrphanView(audio) {
+  openNoteIdx = null;
+  applyActiveHighlight();
+  const view = $("noteView");
+  const name = (audio.path || "").split("/").pop();
+  const dur = formatDurationMin(audio.duration_s);
+  view.innerHTML =
+    `<h2 class="note-title">${escapeHtml(name)}</h2>
+     <p class="note-meta">${escapeHtml([formatStampTime(audio.base_stamp), dur].filter(Boolean).join(" · "))}</p>
+     <p class="hint">Аудио без обработок. Выбери шаблон и запусти обработку.</p>`;
+}
+function processOrphanAudio(audio) {
+  if (state.recording || state.processing) return; // don't hijack an active run
+  renderOrphanView(audio);
+  openReprocessPicker({ name: audio.base_stamp, base_stamp: audio.base_stamp, template: "" }, audio.path);
 }
 
 // In-place progress/logs panel for a История-initiated reprocess (owner decision: no
