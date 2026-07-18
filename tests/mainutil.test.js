@@ -8,6 +8,7 @@ const {
   buildWavHeader, WavWriter, rmsLevel, cacheKey,
   pairHistory, encodeTokenBlob, decodeTokenBlob, isStale,
   rewriteNoteSpeakers, isOutsideRoot, isNoteDeletable, indexRunReducer, upsertById, diskGuardVerdict, busyVerdict,
+  isPathInsideRoots,
   isAudioDeletable, trashRootFor, trashDestPath, moveToTrash, purgeTrash,
   resolveOutDirOnVaultChange, trayMenuTemplate,
   resolvePythonBin, resolveFfmpegBin, resolveResourcePath, resolveAudioTeeBin, resolveAssetPath, backendInstallStatus,
@@ -276,6 +277,42 @@ test("isOutsideRoot: no root configured → false (nothing to compare)", () => {
 });
 test("isOutsideRoot: no dir → false", () => {
   assert.equal(isOutsideRoot("", "/vault"), false);
+});
+
+// ── isPathInsideRoots (general path containment, H2 arch-audit) ─────────────
+// General-purpose primitive behind isNoteDeletable/isAudioDeletable below —
+// main.js's read-note/rename-speakers/reveal/para-extract/para-classify/
+// para-file handlers validate renderer-supplied paths against it directly
+// (no .md/audio-extension requirement, unlike the deletion-specific wrappers).
+test("isPathInsideRoots: path inside out_dir (single root) is inside", () => {
+  assert.equal(isPathInsideRoots("/out/meeting.md", ["/out"]), true);
+});
+test("isPathInsideRoots: path inside the PARA vault root (2nd root) is inside", () => {
+  assert.equal(isPathInsideRoots("/vault/Projects/meeting.md", ["/out", "/vault"]), true);
+});
+test("isPathInsideRoots: path equal to a root itself is inside (directory-target case, e.g. para-file's root arg)", () => {
+  assert.equal(isPathInsideRoots("/vault", ["/vault"]), true);
+});
+test("isPathInsideRoots: path outside every allowed root is refused", () => {
+  assert.equal(isPathInsideRoots("/elsewhere/meeting.md", ["/out", "/vault"]), false);
+});
+test("isPathInsideRoots: traversal ('..') resolving outside the root is refused (symlink-escape shape — caller passes the REALPATH-resolved target)", () => {
+  // Mirrors isNoteDeletable's own traversal test: main.js resolves symlinks via
+  // fs.realpathSync BEFORE calling in, so a symlink named "x" inside an allowed
+  // root that points outside it arrives here already resolved to the escaped
+  // path — exactly like a literal ".." traversal would.
+  const resolved = path.resolve("/out/../../etc/passwd");
+  assert.equal(isPathInsideRoots(resolved, ["/out"]), false);
+});
+test("isPathInsideRoots: missing/unresolvable path (null) is refused", () => {
+  assert.equal(isPathInsideRoots(null, ["/out"]), false);
+});
+test("isPathInsideRoots: no allowed roots configured is refused", () => {
+  assert.equal(isPathInsideRoots("/out/meeting.md", []), false);
+  assert.equal(isPathInsideRoots("/out/meeting.md", [null, ""]), false);
+});
+test("isPathInsideRoots: no argument at all (undefined roots) → refused, not a throw", () => {
+  assert.equal(isPathInsideRoots("/out/meeting.md"), false);
 });
 
 // ── История note deletion (path validation before unlink) ───────────────────

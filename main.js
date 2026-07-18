@@ -13,6 +13,7 @@ const {
   WavWriter, rmsLevel, cacheKey, pairHistory,
   encodeTokenBlob, decodeTokenBlob, isStale,
   rewriteNoteSpeakers, isOutsideRoot, isNoteDeletable, indexRunReducer, upsertById, diskGuardVerdict, busyVerdict,
+  isPathInsideRoots,
   isAudioDeletable, trashRootFor, trashDestPath, moveToTrash, purgeTrash,
   resolveOutDirOnVaultChange, trayMenuTemplate,
   resolvePythonBin, resolveFfmpegBin, resolveResourcePath, resolveAudioTeeBin, resolveAssetPath, backendInstallStatus,
@@ -1758,12 +1759,23 @@ ipcMain.handle("list-history", async (_e, outDir) => {
 // Rewrite speaker labels in a saved note (**[old]** → **[new]**) and the
 // frontmatter speakers key, atomically.
 ipcMain.handle("rename-speakers", async (_e, { notePath, map }) => {
+  // Containment check (H2 arch-audit): notePath is renderer-supplied and this
+  // handler WRITES the note (tmp + rename) — same isPathInsideRoots primitive
+  // and roots (out_dir + PARA vault) delete-history-note validates against, and
+  // the same error wording for consistency.
+  const { outDir, vaultRoot } = currentOutDirAndVault();
+  const roots = [outDir, vaultRoot].filter(Boolean);
+  let resolved = null;
+  try { resolved = fs.realpathSync(notePath); } catch { resolved = null; }
+  if (!isPathInsideRoots(resolved, roots)) {
+    return { ok: false, error: "Заметка не найдена или находится вне рабочей папки" };
+  }
   try {
-    const text = fs.readFileSync(notePath, "utf-8");
+    const text = fs.readFileSync(resolved, "utf-8");
     const rewritten = rewriteNoteSpeakers(text, map || {});
-    const tmp = notePath + ".tmp";
+    const tmp = resolved + ".tmp";
     fs.writeFileSync(tmp, rewritten, "utf-8");
-    fs.renameSync(tmp, notePath);
+    fs.renameSync(tmp, resolved);
     return { ok: true };
   } catch (e) {
     return { ok: false, error: String((e && e.message) || e) };
@@ -1771,7 +1783,16 @@ ipcMain.handle("rename-speakers", async (_e, { notePath, map }) => {
 });
 
 ipcMain.handle("read-note", async (_e, notePath) => {
-  try { return fs.readFileSync(notePath, "utf-8"); } catch { return null; }
+  // Containment check (H2 arch-audit) — same roots/validator as rename-speakers
+  // above. Keeps read-note's existing null-on-failure contract (renderer already
+  // treats a null result as "couldn't load"), just extended to cover "outside the
+  // allowed roots" as another reason to fail closed.
+  const { outDir, vaultRoot } = currentOutDirAndVault();
+  const roots = [outDir, vaultRoot].filter(Boolean);
+  let resolved = null;
+  try { resolved = fs.realpathSync(notePath); } catch { resolved = null; }
+  if (!isPathInsideRoots(resolved, roots)) return null;
+  try { return fs.readFileSync(resolved, "utf-8"); } catch { return null; }
 });
 
 // Delete ONE История note (single .md version file) — moved into .trash/ (30-day
@@ -1930,6 +1951,15 @@ ipcMain.handle("para-classify", async (_e, arg) => {
   // arg may be a bare note path (legacy) or { note, root, folders, mainModel }
   const notePath = typeof arg === "string" ? arg : arg.note;
   const { root, folders, mainModel } = typeof arg === "string" ? {} : arg;
+  // Containment check (H2 arch-audit): notePath feeds into backend.py's --note
+  // (Path(note_path).read_text()) — same roots/validator as para-extract above.
+  const { outDir, vaultRoot } = currentOutDirAndVault();
+  const roots = [outDir, vaultRoot].filter(Boolean);
+  let resolvedNote = null;
+  try { resolvedNote = fs.realpathSync(notePath); } catch { resolvedNote = null; }
+  if (!isPathInsideRoots(resolvedNote, roots)) {
+    return { error: "Заметка не найдена или находится вне рабочей папки" };
+  }
   // gather existing accumulators per category so the LLM can reuse one (anti-fragmentation)
   let existing = "";
   if (root && folders) {
@@ -1944,7 +1974,7 @@ ipcMain.handle("para-classify", async (_e, arg) => {
     }
     existing = JSON.stringify(map);
   }
-  const args = ["classify", "--note", notePath];
+  const args = ["classify", "--note", resolvedNote];
   if (existing) args.push("--existing", existing);
   // Main model for this substantive task — same omit-when-empty contract as
   // process-audio's --main-model above.
@@ -1995,9 +2025,18 @@ ipcMain.handle("para-extract", async (_e, notePath) => {
   // handler spawns runBackend() (pythonBin()) too and had no guard at all before.
   const busy = busyVerdict([[!!installBackendProc, "Дождитесь окончания установки бэкенда"]]);
   if (busy) return { error: busy };
+  // Containment check (H2 arch-audit): notePath feeds straight into backend.py's
+  // --note (Path(note_path).read_text()) — same roots/validator as read-note above.
+  const { outDir, vaultRoot } = currentOutDirAndVault();
+  const roots = [outDir, vaultRoot].filter(Boolean);
+  let resolvedNote = null;
+  try { resolvedNote = fs.realpathSync(notePath); } catch { resolvedNote = null; }
+  if (!isPathInsideRoots(resolvedNote, roots)) {
+    return { error: "Заметка не найдена или находится вне рабочей папки" };
+  }
   return new Promise((resolve) => {
     let out = null;
-    runBackend(["extract", "--note", notePath],
+    runBackend(["extract", "--note", resolvedNote],
       (ev) => {
         if (ev.event === "extracted") out = { content: ev.content };
         else if (ev.event === "error") out = { error: ev.msg };
@@ -2017,10 +2056,35 @@ ipcMain.handle("para-file", async (_e, { note, audio, category, project, extract
   // delete-history-recording already guard their own note/audio moves.
   const busy = busyVerdict([[!!procProc, "Дождитесь окончания обработки"]]);
   if (busy) return { ok: false, error: busy };
+  // Containment checks (H2 arch-audit):
+  //  - `root` drives EVERY write destination below (accum/archiveDir) — must
+  //    resolve inside the server's OWN configured PARA vault root
+  //    (readParaRoot()), not whatever the renderer happened to send, or this
+  //    handler becomes a write-anywhere primitive for a compromised/buggy renderer.
+  //  - `note`/`audio` are the SOURCE files renamed into the archive — must
+  //    resolve inside out_dir or the vault root, same roots delete-history-note
+  //    validates against (both are optional — mv() below already tolerates a
+  //    falsy/missing src, so only present ones are checked).
+  const configuredVaultRoot = readParaRoot();
+  let resolvedRoot = null;
+  try { resolvedRoot = fs.realpathSync(root); } catch { resolvedRoot = null; }
+  if (!isPathInsideRoots(resolvedRoot, [configuredVaultRoot].filter(Boolean))) {
+    return { ok: false, error: "PARA-корень не найден или не совпадает с настроенным" };
+  }
+  const { outDir, vaultRoot } = currentOutDirAndVault();
+  const srcRoots = [outDir, vaultRoot].filter(Boolean);
+  for (const src of [note, audio]) {
+    if (!src) continue;
+    let resolvedSrc = null;
+    try { resolvedSrc = fs.realpathSync(src); } catch { resolvedSrc = null; }
+    if (!isPathInsideRoots(resolvedSrc, srcRoots)) {
+      return { ok: false, error: "Заметка или аудио не найдены либо вне рабочей папки" };
+    }
+  }
   try {
     const folder = (folders && folders[category]) || category;
     const proj = (project || "").trim().replace(/[/\\:]/g, "-") || "Без названия";
-    const accum = path.join(root, folder, proj + ".md");
+    const accum = path.join(resolvedRoot, folder, proj + ".md");
     fs.mkdirSync(path.dirname(accum), { recursive: true });
     if (!fs.existsSync(accum)) fs.writeFileSync(accum, `# ${proj}\n`);
     // heading date = the meeting date from the file stamp (meeting-YYYY-MM-DD-…),
@@ -2032,7 +2096,7 @@ ipcMain.handle("para-file", async (_e, { note, audio, category, project, extract
     fs.appendFileSync(accum, `\n\n${heading}\n\n${(extracted || "").trim()}\n`);
 
     // archive the raw source (note + audio) out of the Meetings inbox
-    const archiveDir = path.join(root, (folders && folders.archives) || "Archives", "Исходные встречи");
+    const archiveDir = path.join(resolvedRoot, (folders && folders.archives) || "Archives", "Исходные встречи");
     fs.mkdirSync(archiveDir, { recursive: true });
     const mv = (src) => {
       if (!src || !fs.existsSync(src)) return;
@@ -2046,8 +2110,25 @@ ipcMain.handle("para-file", async (_e, { note, audio, category, project, extract
 });
 
 ipcMain.handle("reveal", async (_e, p) => {
+  // Containment check (H2 arch-audit): reveal() is used for BOTH note and audio
+  // paths (renderer.js's nvOpen/nvAudio/ptvOpen/openNote/openAudio) — unlike
+  // isNoteDeletable/isAudioDeletable this only enforces containment, no
+  // extension requirement, since Finder-revealing an arbitrary file OUTSIDE
+  // out_dir/the PARA vault is the actual risk being closed here, not the file
+  // type. Every current reveal() target resolves inside out_dir: backend.py's
+  // "done"/history "audio" field is always vault_audio (the out_dir copy) —
+  // main.js never passes --keep-audio, so backend.py's own default
+  // (keep_audio_in_obsidian=True) is always in effect.
+  const { outDir, vaultRoot } = currentOutDirAndVault();
+  const roots = [outDir, vaultRoot].filter(Boolean);
+  let resolved = null;
+  try { resolved = fs.realpathSync(p); } catch { resolved = null; }
+  if (!isPathInsideRoots(resolved, roots)) {
+    return { ok: false, error: "Файл не найден или находится вне рабочей папки" };
+  }
   const { shell } = require("electron");
-  shell.showItemInFolder(p);
+  shell.showItemInFolder(resolved);
+  return { ok: true };
 });
 
 // Shared with the auto-index trigger below — one place defines what "run the indexer" means.

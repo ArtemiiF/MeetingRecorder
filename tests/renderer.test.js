@@ -3181,6 +3181,46 @@ test("main.js: para-file refuses while a reprocess (procProc) is active — it n
   assert.match(paraFile, /\[!!procProc, "Дождитесь окончания обработки"\]/);
 });
 
+// ── H2 arch-audit: general path containment (isPathInsideRoots) applied to every
+// renderer-supplied-path handler that reads/writes/reveals a file, not just the
+// delete handlers (which already had isNoteDeletable/isAudioDeletable) ──────────
+test("main.js: read-note validates notePath via isPathInsideRoots before reading, fails closed to null", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const readNote = mainSrc.match(/ipcMain\.handle\("read-note"[\s\S]*?\n\}\);/)[0];
+  assert.match(readNote, /isPathInsideRoots\(resolved, roots\)/);
+  assert.match(readNote, /if \(!isPathInsideRoots\(resolved, roots\)\) return null;/);
+});
+test("main.js: rename-speakers validates notePath via isPathInsideRoots before reading/writing", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const renameSpeakers = mainSrc.match(/ipcMain\.handle\("rename-speakers"[\s\S]*?\n\}\);/)[0];
+  assert.match(renameSpeakers, /isPathInsideRoots\(resolved, roots\)/);
+});
+test("main.js: reveal validates the path via isPathInsideRoots before shell.showItemInFolder", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const reveal = mainSrc.match(/ipcMain\.handle\("reveal"[\s\S]*?\n\}\);/)[0];
+  assert.match(reveal, /isPathInsideRoots\(resolved, roots\)/);
+  assert.match(reveal, /shell\.showItemInFolder\(resolved\)/);
+});
+test("main.js: para-extract/para-classify validate their --note arg via isPathInsideRoots before spawning the backend", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const paraExtract = mainSrc.match(/ipcMain\.handle\("para-extract"[\s\S]*?\n\}\);/)[0];
+  const paraClassify = mainSrc.match(/ipcMain\.handle\("para-classify"[\s\S]*?\n\}\);/)[0];
+  assert.match(paraExtract, /isPathInsideRoots\(resolvedNote, roots\)/);
+  assert.match(paraExtract, /"extract", "--note", resolvedNote/);
+  assert.match(paraClassify, /isPathInsideRoots\(resolvedNote, roots\)/);
+  assert.match(paraClassify, /"classify", "--note", resolvedNote/);
+});
+test("main.js: para-file validates root against the server's OWN configured PARA vault root (readParaRoot()), and note/audio against out_dir/vault roots", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const paraFile = mainSrc.match(/ipcMain\.handle\("para-file"[\s\S]*?\n\}\);/)[0];
+  assert.match(paraFile, /const configuredVaultRoot = readParaRoot\(\);/);
+  assert.match(paraFile, /isPathInsideRoots\(resolvedRoot, \[configuredVaultRoot\]\.filter\(Boolean\)\)/);
+  assert.match(paraFile, /isPathInsideRoots\(resolvedSrc, srcRoots\)/);
+  // write destinations must be built off the VALIDATED resolvedRoot, not the raw arg
+  assert.match(paraFile, /path\.join\(resolvedRoot, folder, proj \+ "\.md"\)/);
+  assert.match(paraFile, /path\.join\(resolvedRoot, \(folders && folders\.archives\)/);
+});
+
 test("main.js: list-lm-models IPC GETs LM Studio's /api/v0/models with a 3s timeout, filters out embeddings, and degrades to [] on failure", () => {
   const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
   const handler = mainSrc.match(/ipcMain\.handle\("list-lm-models"[\s\S]*?\n\}\);/)[0];
