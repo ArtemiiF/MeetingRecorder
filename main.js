@@ -12,7 +12,7 @@ const readline = require("readline");
 const {
   WavWriter, rmsLevel, cacheKey, pairHistory,
   encodeTokenBlob, decodeTokenBlob, isStale,
-  rewriteNoteSpeakers, isOutsideRoot, isNoteDeletable, indexRunReducer, upsertById, diskGuardVerdict,
+  rewriteNoteSpeakers, isOutsideRoot, isNoteDeletable, indexRunReducer, upsertById, diskGuardVerdict, busyVerdict,
   isAudioDeletable, trashRootFor, trashDestPath, moveToTrash, purgeTrash,
   resolveOutDirOnVaultChange, trayMenuTemplate,
   resolvePythonBin, resolveFfmpegBin, resolveResourcePath, resolveAudioTeeBin, resolveAssetPath, backendInstallStatus,
@@ -679,19 +679,22 @@ ipcMain.handle("pick-out-dir", async () => {
 
 // recording: start — mic (python/pyaudio) + system audio (AudioTee), in parallel
 ipcMain.handle("start-recording", async (_e, opts) => {
-  if (recordProc || tee) return { ok: false, error: "Запись уже идёт" };
-  // A previous recording's mix (stop-recording) is still finishing in the background —
-  // starting now would reassign the module-level `session` out from under it. See
-  // mixInFlight's declaration above for the cross-link bug this closes.
-  if (mixInFlight) return { ok: false, error: "Дождитесь завершения обработки предыдущей записи" };
-  // Recording spawns pythonBin() too (mic capture) — a concurrent install-backend
-  // run can be actively overwriting that same interpreter file underneath it.
-  if (installBackendProc) return { ok: false, error: "Дождитесь окончания установки бэкенда" };
-  // An in-flight update swaps the whole .app bundle out from under the running
-  // process and finishes with app.exit(0) — which skips before-quit's graceful
-  // mic-finalize wait entirely. A recording started during that window would
-  // die unplayable at relaunch (WavWriter only patches its header in close()).
-  if (updateProc) return { ok: false, error: "Идёт обновление приложения — дождитесь завершения" };
+  const busy = busyVerdict([
+    [!!(recordProc || tee), "Запись уже идёт"],
+    // A previous recording's mix (stop-recording) is still finishing in the background —
+    // starting now would reassign the module-level `session` out from under it. See
+    // mixInFlight's declaration above for the cross-link bug this closes.
+    [mixInFlight, "Дождитесь завершения обработки предыдущей записи"],
+    // Recording spawns pythonBin() too (mic capture) — a concurrent install-backend
+    // run can be actively overwriting that same interpreter file underneath it.
+    [!!installBackendProc, "Дождитесь окончания установки бэкенда"],
+    // An in-flight update swaps the whole .app bundle out from under the running
+    // process and finishes with app.exit(0) — which skips before-quit's graceful
+    // mic-finalize wait entirely. A recording started during that window would
+    // die unplayable at relaunch (WavWriter only patches its header in close()).
+    [!!updateProc, "Идёт обновление приложения — дождитесь завершения"],
+  ]);
+  if (busy) return { ok: false, error: busy };
 
   // Disk guard: session dirs live under RECORDINGS_DIR (permanent — see PENDING_FILE
   // above) — check that volume's free space before committing to a recording. statfs
@@ -898,6 +901,12 @@ ipcMain.handle("list-pending-recordings", async () => {
 // manifest entry. Used both for an explicit user delete and after a pending
 // recording has been processed successfully.
 ipcMain.handle("remove-pending-recording", async (_e, id) => {
+  // Mirrors delete-history-note/delete-history-recording's own procProc guard: a
+  // reprocess run may be actively reading this very entry's mixed.wav (--in) when
+  // the user clicks remove — rmSync'ing entry.dir out from under it would corrupt
+  // an in-flight run instead of just refusing the removal upfront.
+  const busy = busyVerdict([[!!procProc, "Дождитесь окончания обработки"]]);
+  if (busy) return { ok: false, error: busy };
   const manifest = loadPendingManifest();
   const idx = manifest.findIndex((r) => r.id === id);
   if (idx < 0) return { ok: false, error: "Запись не найдена" };
@@ -923,13 +932,16 @@ function cacheDirFor(audioFile) {
 // processing pipeline
 ipcMain.handle("process-audio", async (_e, opts) => {
   const { audioFile, prompt, diarize, outDir, engine, hfToken, fresh, language, glossary, summarize, template, micFile, systemFile, authorName, origin, fastModel, mainModel, glossaryUsage, version } = opts;
-  if (procProc) return { ok: false, error: "Обработка уже идёт" };
-  if (modelDlProc) return { ok: false, error: "Дождитесь окончания скачивания моделей" };
-  // Same reasoning as start-recording's guard above: processing spawns pythonBin(),
-  // which an in-flight install may be actively replacing on disk.
-  if (installBackendProc) return { ok: false, error: "Дождитесь окончания установки бэкенда" };
-  // Same reasoning as start-recording's updateProc guard above.
-  if (updateProc) return { ok: false, error: "Идёт обновление приложения — дождитесь завершения" };
+  const busy = busyVerdict([
+    [!!procProc, "Обработка уже идёт"],
+    [!!modelDlProc, "Дождитесь окончания скачивания моделей"],
+    // Same reasoning as start-recording's guard above: processing spawns pythonBin(),
+    // which an in-flight install may be actively replacing on disk.
+    [!!installBackendProc, "Дождитесь окончания установки бэкенда"],
+    // Same reasoning as start-recording's updateProc guard above.
+    [!!updateProc, "Идёт обновление приложения — дождитесь завершения"],
+  ]);
+  if (busy) return { ok: false, error: busy };
   if (!backendAvailable()) return { ok: false, error: "Бэкенд не установлен — откройте Настройки → Бэкенд" };
   // Diarization is optional-by-design (not part of the setup-gate wall — see
   // appReadinessStatus's comment in lib/mainutil) but still needs its own
@@ -1068,14 +1080,17 @@ ipcMain.handle("models", async () => {
 // reason (busy/low disk), which would otherwise delete a working cache with no
 // download happening to replace it.
 async function runModelDownloadBatch(only, beforeStart) {
-  if (modelDlProc) return { ok: false, error: "Скачивание уже идёт" };
-  if (procProc) return { ok: false, error: "Дождитесь окончания обработки" };
-  if (recordProc || tee) return { ok: false, error: "Дождитесь окончания записи" };
-  // Model download also spawns pythonBin() (backend.py's download-models command) —
-  // same install-in-progress hazard as start-recording/process-audio above.
-  if (installBackendProc) return { ok: false, error: "Дождитесь окончания установки бэкенда" };
-  // Same reasoning as start-recording's updateProc guard above.
-  if (updateProc) return { ok: false, error: "Идёт обновление приложения — дождитесь завершения" };
+  const busy = busyVerdict([
+    [!!modelDlProc, "Скачивание уже идёт"],
+    [!!procProc, "Дождитесь окончания обработки"],
+    [!!(recordProc || tee), "Дождитесь окончания записи"],
+    // Model download also spawns pythonBin() (backend.py's download-models command) —
+    // same install-in-progress hazard as start-recording/process-audio above.
+    [!!installBackendProc, "Дождитесь окончания установки бэкенда"],
+    // Same reasoning as start-recording's updateProc guard above.
+    [!!updateProc, "Идёт обновление приложения — дождитесь завершения"],
+  ]);
+  if (busy) return { ok: false, error: busy };
 
   // Disk guard: models download into ~/.cache, not TMP_DIR — check that volume.
   let diskVerdict = { action: "ok", msg: null };
@@ -1354,13 +1369,16 @@ async function runInstallBackend() {
 }
 
 ipcMain.handle("install-backend", async () => {
-  if (installBackendProc) return { ok: false, error: "Установка уже идёт" };
-  if (recordProc || tee) return { ok: false, error: "Дождитесь окончания записи" };
-  if (procProc) return { ok: false, error: "Дождитесь окончания обработки" };
-  if (modelDlProc) return { ok: false, error: "Дождитесь окончания скачивания моделей" };
-  // Same reasoning as start-recording's updateProc guard above — install-backend
-  // wasn't previously mutually exclusive with the updater at all.
-  if (updateProc) return { ok: false, error: "Идёт обновление приложения — дождитесь завершения" };
+  const busy = busyVerdict([
+    [!!installBackendProc, "Установка уже идёт"],
+    [!!(recordProc || tee), "Дождитесь окончания записи"],
+    [!!procProc, "Дождитесь окончания обработки"],
+    [!!modelDlProc, "Дождитесь окончания скачивания моделей"],
+    // Same reasoning as start-recording's updateProc guard above — install-backend
+    // wasn't previously mutually exclusive with the updater at all.
+    [!!updateProc, "Идёт обновление приложения — дождитесь завершения"],
+  ]);
+  if (busy) return { ok: false, error: busy };
 
   let diskVerdict = { action: "ok", msg: null };
   try {
@@ -1650,11 +1668,14 @@ async function runUpdateInstall() {
 
 ipcMain.handle("download-and-install-update", async () => {
   if (!app.isPackaged) return { ok: false, error: "только в собранном приложении" };
-  if (updateProc) return { ok: false, error: "Обновление уже идёт" };
-  if (recordProc || tee) return { ok: false, error: "Дождитесь окончания записи" };
-  if (procProc) return { ok: false, error: "Дождитесь окончания обработки" };
-  if (modelDlProc) return { ok: false, error: "Дождитесь окончания скачивания моделей" };
-  if (installBackendProc) return { ok: false, error: "Дождитесь окончания установки бэкенда" };
+  const busy = busyVerdict([
+    [!!updateProc, "Обновление уже идёт"],
+    [!!(recordProc || tee), "Дождитесь окончания записи"],
+    [!!procProc, "Дождитесь окончания обработки"],
+    [!!modelDlProc, "Дождитесь окончания скачивания моделей"],
+    [!!installBackendProc, "Дождитесь окончания установки бэкенда"],
+  ]);
+  if (busy) return { ok: false, error: busy };
 
   updateCanceled = false;
   // Placeholder so a second call sees "busy" immediately — same pattern as
@@ -1901,6 +1922,11 @@ ipcMain.handle("para-tree", async (_e, root) => {
 });
 
 ipcMain.handle("para-classify", async (_e, arg) => {
+  // Guards the interpreter-overwrite-during-install race (see busyVerdict's comment
+  // in lib/mainutil.js): this handler spawns runBackend() (pythonBin()) just like
+  // process-audio/start-recording, but had no guard at all before.
+  const busy = busyVerdict([[!!installBackendProc, "Дождитесь окончания установки бэкенда"]]);
+  if (busy) return { error: busy };
   // arg may be a bare note path (legacy) or { note, root, folders, mainModel }
   const notePath = typeof arg === "string" ? arg : arg.note;
   const { root, folders, mainModel } = typeof arg === "string" ? {} : arg;
@@ -1940,6 +1966,10 @@ ipcMain.handle("para-classify", async (_e, arg) => {
 // file (same file-based plumbing as --prompt-file/--glossary-usage-file above —
 // avoids CLI arg length/escaping concerns), cleaned up on close either way.
 ipcMain.handle("classify-glossary-terms", async (_e, { terms, fastModel } = {}) => {
+  // Same interpreter-overwrite-during-install race as para-classify above — this
+  // handler spawns runBackend() (pythonBin()) too and had no guard at all before.
+  const busy = busyVerdict([[!!installBackendProc, "Дождитесь окончания установки бэкенда"]]);
+  if (busy) return { error: busy };
   const list = Array.isArray(terms) ? terms : [];
   if (!list.length) return { categories: {} };
   const termsFile = path.join(TMP_DIR, `glossary-terms-${Date.now()}.json`);
@@ -1961,6 +1991,10 @@ ipcMain.handle("classify-glossary-terms", async (_e, { terms, fastModel } = {}) 
 });
 
 ipcMain.handle("para-extract", async (_e, notePath) => {
+  // Same interpreter-overwrite-during-install race as para-classify above — this
+  // handler spawns runBackend() (pythonBin()) too and had no guard at all before.
+  const busy = busyVerdict([[!!installBackendProc, "Дождитесь окончания установки бэкенда"]]);
+  if (busy) return { error: busy };
   return new Promise((resolve) => {
     let out = null;
     runBackend(["extract", "--note", notePath],
@@ -1976,6 +2010,13 @@ ipcMain.handle("para-extract", async (_e, notePath) => {
 // raw note. Appends the extracted sections (dated block) into root/<category>/<project>.md,
 // then files the raw note + audio into Archives so nothing is lost and the inbox clears.
 ipcMain.handle("para-file", async (_e, { note, audio, category, project, extracted, title, stamp, root, folders }) => {
+  // Unlike para-classify/para-extract/classify-glossary-terms, this handler never
+  // spawns runBackend() (no pythonBin() involved) — its actual race is a concurrent
+  // reprocess (procProc) rewriting the SAME note/audio path this handler is about to
+  // rename out from under it. Guarded the same way delete-history-note/
+  // delete-history-recording already guard their own note/audio moves.
+  const busy = busyVerdict([[!!procProc, "Дождитесь окончания обработки"]]);
+  if (busy) return { ok: false, error: busy };
   try {
     const folder = (folders && folders[category]) || category;
     const proj = (project || "").trim().replace(/[/\\:]/g, "-") || "Без названия";

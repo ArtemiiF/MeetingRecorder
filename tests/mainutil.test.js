@@ -7,7 +7,7 @@ const path = require("path");
 const {
   buildWavHeader, WavWriter, rmsLevel, cacheKey,
   pairHistory, encodeTokenBlob, decodeTokenBlob, isStale,
-  rewriteNoteSpeakers, isOutsideRoot, isNoteDeletable, indexRunReducer, upsertById, diskGuardVerdict,
+  rewriteNoteSpeakers, isOutsideRoot, isNoteDeletable, indexRunReducer, upsertById, diskGuardVerdict, busyVerdict,
   isAudioDeletable, trashRootFor, trashDestPath, moveToTrash, purgeTrash,
   resolveOutDirOnVaultChange, trayMenuTemplate,
   resolvePythonBin, resolveFfmpegBin, resolveResourcePath, resolveAudioTeeBin, resolveAssetPath, backendInstallStatus,
@@ -194,6 +194,26 @@ test("diskGuardVerdict: custom threshold refuse message reflects the given thres
   assert.equal(v.action, "refuse");
   assert.match(v.msg, /нужно ≥2 ГБ/);
   assert.doesNotMatch(v.msg, /≥1 ГБ/);
+});
+
+// ── busyVerdict (centralized concurrent-operation refusal, H1 arch-audit) ────
+test("busyVerdict: nothing busy → null", () => {
+  assert.equal(busyVerdict([[false, "a"], [false, "b"]]), null);
+});
+test("busyVerdict: single busy check returns its message", () => {
+  assert.equal(busyVerdict([[true, "занято"]]), "занято");
+});
+test("busyVerdict: first-match-wins — earlier entries take priority over later ones", () => {
+  assert.equal(busyVerdict([[true, "первый"], [true, "второй"]]), "первый");
+});
+test("busyVerdict: skips false entries, returns the first true one regardless of position", () => {
+  assert.equal(busyVerdict([[false, "a"], [false, "b"], [true, "c"], [true, "d"]]), "c");
+});
+test("busyVerdict: empty checks array → null", () => {
+  assert.equal(busyVerdict([]), null);
+});
+test("busyVerdict: no argument at all → null (defensive default)", () => {
+  assert.equal(busyVerdict(), null);
 });
 
 // ── rewriteNoteSpeakers ───────────────────────────────────────────────────────

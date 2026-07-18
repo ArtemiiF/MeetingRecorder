@@ -3054,10 +3054,10 @@ test("Бэкенд: disk-warning event alerts the message", async () => {
 test("main.js: install-backend refuses while recording/processing/model-download/another install is active", () => {
   const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
   const installBackend = mainSrc.match(/ipcMain\.handle\("install-backend"[\s\S]*?\n\}\);/)[0];
-  assert.match(installBackend, /if \(installBackendProc\) return/);
-  assert.match(installBackend, /if \(recordProc \|\| tee\) return/);
-  assert.match(installBackend, /if \(procProc\) return/);
-  assert.match(installBackend, /if \(modelDlProc\) return/);
+  assert.match(installBackend, /\[!!installBackendProc, "Установка уже идёт"\]/);
+  assert.match(installBackend, /\[!!\(recordProc \|\| tee\), "Дождитесь окончания записи"\]/);
+  assert.match(installBackend, /\[!!procProc, "Дождитесь окончания обработки"\]/);
+  assert.match(installBackend, /\[!!modelDlProc, "Дождитесь окончания скачивания моделей"\]/);
 });
 
 test("main.js: cancel-install-backend sets installBackendCanceled and kills the tracked step", () => {
@@ -3126,7 +3126,7 @@ test("main.js: runModelDownloadBatch's beforeStart hook fires only after every b
 test("main.js: process-audio refuses when no backend interpreter is available, and while an install is in flight", () => {
   const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
   const processAudio = mainSrc.match(/ipcMain\.handle\("process-audio"[\s\S]*?\n\}\);/)[0];
-  assert.match(processAudio, /if \(installBackendProc\) return/);
+  assert.match(processAudio, /\[!!installBackendProc, "Дождитесь окончания установки бэкенда"\]/);
   assert.match(processAudio, /if \(!backendAvailable\(\)\) return/);
 });
 
@@ -3152,6 +3152,33 @@ test("main.js: para-search forwards --main-model to the backend spawn only when 
   const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
   const paraSearch = mainSrc.match(/ipcMain\.handle\("para-search"[\s\S]*?\n\}\);/)[0];
   assert.match(paraSearch, /if \(mainModel\) args\.push\("--main-model", mainModel\)/);
+});
+
+// ── H1 arch-audit: PARA handlers that spawn runBackend() (pythonBin()) but had NO
+// busy guard at all before — vulnerable to the interpreter-overwrite-during-install
+// race (see busyVerdict's comment in lib/mainutil.js). para-file spawns no backend
+// process at all (pure fs), so it's guarded against procProc instead (a concurrent
+// reprocess rewriting the same note/audio path), mirroring delete-history-note/
+// delete-history-recording's own procProc guard.
+test("main.js: para-classify refuses while a backend install is in flight (spawns runBackend())", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const paraClassify = mainSrc.match(/ipcMain\.handle\("para-classify"[\s\S]*?\n\}\);/)[0];
+  assert.match(paraClassify, /\[!!installBackendProc, "Дождитесь окончания установки бэкенда"\]/);
+});
+test("main.js: para-extract refuses while a backend install is in flight (spawns runBackend())", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const paraExtract = mainSrc.match(/ipcMain\.handle\("para-extract"[\s\S]*?\n\}\);/)[0];
+  assert.match(paraExtract, /\[!!installBackendProc, "Дождитесь окончания установки бэкенда"\]/);
+});
+test("main.js: classify-glossary-terms refuses while a backend install is in flight (spawns runBackend())", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const handler = mainSrc.match(/ipcMain\.handle\("classify-glossary-terms"[\s\S]*?\n\}\);/)[0];
+  assert.match(handler, /\[!!installBackendProc, "Дождитесь окончания установки бэкенда"\]/);
+});
+test("main.js: para-file refuses while a reprocess (procProc) is active — it never spawns runBackend() itself, but moves the same note/audio path a reprocess may be writing", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const paraFile = mainSrc.match(/ipcMain\.handle\("para-file"[\s\S]*?\n\}\);/)[0];
+  assert.match(paraFile, /\[!!procProc, "Дождитесь окончания обработки"\]/);
 });
 
 test("main.js: list-lm-models IPC GETs LM Studio's /api/v0/models with a 3s timeout, filters out embeddings, and degrades to [] on failure", () => {
@@ -3181,8 +3208,8 @@ test("main.js: start-recording and download-models also refuse while a backend i
   const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
   const startRecording = mainSrc.match(/ipcMain\.handle\("start-recording"[\s\S]*?\n  const micDevice/)[0];
   const downloadModels = mainSrc.match(/async function runModelDownloadBatch\([\s\S]*?\n\}/)[0];
-  assert.match(startRecording, /if \(installBackendProc\) return/);
-  assert.match(downloadModels, /if \(installBackendProc\) return/);
+  assert.match(startRecording, /\[!!installBackendProc, "Дождитесь окончания установки бэкенда"\]/);
+  assert.match(downloadModels, /\[!!installBackendProc, "Дождитесь окончания установки бэкенда"\]/);
 });
 
 test("main.js: installBackendProc is killed in before-quit alongside the other tracked children", () => {
@@ -3672,14 +3699,14 @@ test("main.js: download-models and process-audio refuse to run while the other i
   const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
   const downloadModels = mainSrc.match(/async function runModelDownloadBatch\([\s\S]*?\n\}/)[0];
   const processAudio = mainSrc.match(/ipcMain\.handle\("process-audio"[\s\S]*?\n\}\);/)[0];
-  assert.match(downloadModels, /if \(procProc\)/);
-  assert.match(processAudio, /if \(modelDlProc\)/);
+  assert.match(downloadModels, /\[!!procProc, "Дождитесь окончания обработки"\]/);
+  assert.match(processAudio, /\[!!modelDlProc, "Дождитесь окончания скачивания моделей"\]/);
 });
 
 test("main.js: download-models also refuses while a recording is active (recordProc or tee) — CPU/network contention with live capture", () => {
   const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
   const downloadModels = mainSrc.match(/async function runModelDownloadBatch\([\s\S]*?\n\}/)[0];
-  assert.match(downloadModels, /if \(recordProc \|\| tee\)/,
+  assert.match(downloadModels, /\[!!\(recordProc \|\| tee\), "Дождитесь окончания записи"\]/,
     "download-models must refuse while recordProc/tee are set, same as reset-app's busy guard");
 });
 
@@ -4302,7 +4329,7 @@ test("main.js: stop-recording snapshots session into a local BEFORE the async mi
 test("main.js: start-recording refuses to start while a previous recording's mix is still in flight, and stop-recording sets/clears the flag around the mix", () => {
   const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
   const startRecording = mainSrc.match(/ipcMain\.handle\("start-recording"[\s\S]*?\n\}\);/)[0];
-  assert.match(startRecording, /if \(mixInFlight\) return \{ ok: false,/,
+  assert.match(startRecording, /\[mixInFlight, "Дождитесь завершения обработки предыдущей записи"\]/,
     "start-recording must refuse while mixInFlight is true");
 
   const stopRecording = mainSrc.match(/ipcMain\.handle\("stop-recording"[\s\S]*?\n\}\);/)[0];
@@ -4326,6 +4353,16 @@ test("main.js: remove-pending-recording deletes the session dir and drops the ma
   assert.match(removePending, /fs\.rmSync\(entry\.dir, \{ recursive: true, force: true \}\)/);
   assert.match(removePending, /manifest\.splice\(idx, 1\)/);
   assert.match(removePending, /savePendingManifest\(manifest\)/);
+});
+
+// M6 arch-audit: mirrors delete-history-note/delete-history-recording's own procProc
+// guard — a reprocess run may be actively reading THIS entry's mixed.wav (--in) when
+// the user clicks remove; rmSync'ing entry.dir out from under it must be refused, not
+// silently allowed to race (main.js:900-908 previously had no guard at all here).
+test("main.js: remove-pending-recording refuses while a reprocess (procProc) is active", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const removePending = mainSrc.match(/ipcMain\.handle\("remove-pending-recording"[\s\S]*?\n\}\);/)[0];
+  assert.match(removePending, /\[!!procProc, "Дождитесь окончания обработки"\]/);
 });
 
 test("main.js: pruneTemp's sweep() calls never target RECORDINGS_DIR — recordings are permanent, not swept", () => {
@@ -4822,11 +4859,11 @@ test("main.js: download-and-install-update refuses outside a packaged app, while
   const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
   const handler = mainSrc.match(/ipcMain\.handle\("download-and-install-update"[\s\S]*?\n\}\);/)[0];
   assert.match(handler, /if \(!app\.isPackaged\) return/);
-  assert.match(handler, /if \(updateProc\) return/);
-  assert.match(handler, /if \(recordProc \|\| tee\) return/);
-  assert.match(handler, /if \(procProc\) return/);
-  assert.match(handler, /if \(modelDlProc\) return/);
-  assert.match(handler, /if \(installBackendProc\) return/);
+  assert.match(handler, /\[!!updateProc, "Обновление уже идёт"\]/);
+  assert.match(handler, /\[!!\(recordProc \|\| tee\), "Дождитесь окончания записи"\]/);
+  assert.match(handler, /\[!!procProc, "Дождитесь окончания обработки"\]/);
+  assert.match(handler, /\[!!modelDlProc, "Дождитесь окончания скачивания моделей"\]/);
+  assert.match(handler, /\[!!installBackendProc, "Дождитесь окончания установки бэкенда"\]/);
 });
 
 test("main.js: cancel-app-update sets updateCanceled and kills the tracked step", () => {
@@ -4946,13 +4983,13 @@ test("main.js: cleanupUpdateLeftovers is wired into app.whenReady alongside prun
 test("main.js: start-recording refuses while an update is in flight (updateProc)", () => {
   const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
   const startRecording = mainSrc.match(/ipcMain\.handle\("start-recording"[\s\S]*?\n  const micDevice/)[0];
-  assert.match(startRecording, /if \(updateProc\) return/);
+  assert.match(startRecording, /\[!!updateProc, "Идёт обновление приложения — дождитесь завершения"\]/);
 });
 
 test("main.js: process-audio refuses while an update is in flight (updateProc)", () => {
   const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
   const processAudio = mainSrc.match(/ipcMain\.handle\("process-audio"[\s\S]*?\n\}\);/)[0];
-  assert.match(processAudio, /if \(updateProc\) return/);
+  assert.match(processAudio, /\[!!updateProc, "Идёт обновление приложения — дождитесь завершения"\]/);
 });
 
 test("main.js: process-audio writes glossaryUsage to a temp JSON file and passes --glossary-usage-file, only when usage data exists", () => {
@@ -4977,13 +5014,13 @@ test("main.js: classify-glossary-terms writes the batch to a temp JSON file, cal
 test("main.js: download-models refuses while an update is in flight (updateProc)", () => {
   const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
   const downloadModels = mainSrc.match(/async function runModelDownloadBatch\([\s\S]*?\n\}/)[0];
-  assert.match(downloadModels, /if \(updateProc\) return/);
+  assert.match(downloadModels, /\[!!updateProc, "Идёт обновление приложения — дождитесь завершения"\]/);
 });
 
 test("main.js: install-backend refuses while an update is in flight (updateProc) — wasn't mutually exclusive before", () => {
   const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
   const installBackend = mainSrc.match(/ipcMain\.handle\("install-backend"[\s\S]*?\n\}\);/)[0];
-  assert.match(installBackend, /if \(updateProc\) return/);
+  assert.match(installBackend, /\[!!updateProc, "Идёт обновление приложения — дождитесь завершения"\]/);
 });
 
 // ── pre-swap recheck: belt-and-suspenders against the reverse guards above —
