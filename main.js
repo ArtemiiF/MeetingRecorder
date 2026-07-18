@@ -13,6 +13,7 @@ const {
   WavWriter, rmsLevel, cacheKey, pairHistory,
   encodeTokenBlob, decodeTokenBlob, isStale,
   rewriteNoteSpeakers, isOutsideRoot, isNoteDeletable, indexRunReducer, upsertById, diskGuardVerdict,
+  isAudioDeletable, trashRootFor, trashDestPath, moveToTrash, purgeTrash,
   resolveOutDirOnVaultChange, trayMenuTemplate,
   resolvePythonBin, resolveFfmpegBin, resolveResourcePath, resolveAudioTeeBin, resolveAssetPath, backendInstallStatus,
   parseFfmpegVersion,
@@ -322,6 +323,7 @@ function refreshTray() {
 app.whenReady().then(() => {
   try { pruneTemp(7 * 24 * 3600 * 1000); } catch {}
   try { cleanupUpdateLeftovers(); } catch {}
+  try { purgeTrashOnStartup(); } catch {}
   createWindow();
   createTray();
 });
@@ -494,6 +496,47 @@ function loadPendingManifest() {
 }
 function savePendingManifest(recordings) {
   writeJsonAtomic(PENDING_FILE, { recordings });
+}
+
+// ── История trash (30-day retention) ─────────────────────────────────────────
+// Trash manifest ({ entries: [...] }) — same shape convention as pending.json's
+// { recordings: [...] } above. Lives inside the trash dir itself (<root>/.trash/
+// manifest.json), not WRITABLE_DIR: the trash root is either out_dir or the PARA vault
+// root depending on config (see trashRootFor, lib/mainutil.js), and the manifest must
+// travel with whichever one is actually in use.
+function loadTrashManifest(trashDir) {
+  try {
+    const data = JSON.parse(fs.readFileSync(path.join(trashDir, "manifest.json"), "utf-8"));
+    return Array.isArray(data.entries) ? data.entries : [];
+  } catch {
+    return [];
+  }
+}
+function saveTrashManifest(trashDir, entries) {
+  writeJsonAtomic(path.join(trashDir, "manifest.json"), { entries });
+}
+
+// Current out_dir/vault-root pair from persisted config — same read delete-history-note's
+// own `roots` computation always did, factored out so delete-history-recording and the
+// startup purge below share one source of truth instead of three copies of the same
+// two-line read.
+function currentOutDirAndVault() {
+  const presetsData = loadPresetsData();
+  return { outDir: presetsData.defaultOutDir || DEFAULT_OUT, vaultRoot: readParaRoot() };
+}
+
+// One-time startup sweep (mirrors pruneTemp/cleanupUpdateLeftovers below, same
+// try/catch-at-call-site discipline in app.whenReady): permanently deletes any trash
+// entry older than 30 days. purgeTrash itself never throws; this function still isn't
+// trusted blindly — the app.whenReady() call site wraps it in try/catch too, since a
+// purge failure must never block app launch.
+function purgeTrashOnStartup() {
+  const { outDir, vaultRoot } = currentOutDirAndVault();
+  const trashDir = trashRootFor(outDir, vaultRoot);
+  if (!fs.existsSync(trashDir)) return;
+  const entries = loadTrashManifest(trashDir);
+  const kept = purgeTrash(entries, trashDir, 30 * 24 * 3600 * 1000, Date.now());
+  if (kept.length !== entries.length) saveTrashManifest(trashDir, kept);
 }
 
 // HF token is a secret → kept out of presets.json, encrypted via OS keychain (safeStorage).
@@ -1650,13 +1693,14 @@ ipcMain.handle("list-history", async (_e, outDir) => {
   const vaultRoot = readParaRoot();
   const histArgs = ["history", "--out-dir", dir, "--db", DB_PATH, "--pending-file", PENDING_FILE];
   if (vaultRoot) histArgs.push("--vault-root", vaultRoot);
-  const items = await new Promise((resolve) => {
+  const { items, audios } = await new Promise((resolve) => {
     let out = [];
+    let auds = [];
     runBackend(histArgs,
-      (ev) => { if (ev.event === "history") out = ev.items; },
-      () => resolve(out));
+      (ev) => { if (ev.event === "history") { out = ev.items; auds = ev.audios || []; } },
+      () => resolve({ items: out, audios: auds }));
   });
-  return items.map((it) => it.kind === "pending" ? {
+  const mapped = items.map((it) => it.kind === "pending" ? {
     kind: "pending",
     id: it.id,
     name: it.name,
@@ -1674,7 +1718,20 @@ ipcMain.handle("list-history", async (_e, outDir) => {
     // before its next mtime-triggered reconcile) has no version key; default 1
     // (mirrors backend.py's own _reconcile/process default for the same case).
     version: it.version || 1,
+    // Canonical recording identity (feat-history-audio-inventory's cmd_history
+    // addition — every note row is tagged with it) — pairs a note with the out_dir
+    // audio inventory (see the renderer's recordingBaseStamp/buildRecordings).
+    base_stamp: it.base_stamp,
   });
+  // audios[] (the out_dir audio inventory — same PR) rides along as a plain extra
+  // property on the returned ARRAY rather than changing list-history's return shape
+  // to {items, audios}: dozens of existing renderer tests (and refreshParaInbox,
+  // which only wants the note list) already treat this call's result as a bare
+  // array — an own property doesn't show up in .map/.filter/.forEach/.length, so
+  // every one of those call sites keeps working untouched, while refreshHistory
+  // (the only consumer that cares) can still read `.audios` off it.
+  mapped.audios = audios;
+  return mapped;
 });
 
 // Rewrite speaker labels in a saved note (**[old]** → **[new]**) and the
@@ -1696,11 +1753,14 @@ ipcMain.handle("read-note", async (_e, notePath) => {
   try { return fs.readFileSync(notePath, "utf-8"); } catch { return null; }
 });
 
-// Delete ONE История note (single .md version file) from disk. The audio (.wav)
-// is never touched — it stays so the recording can be reprocessed later. No
-// separate index/db mutation is needed: cmd_history's reconcile (backend.py)
-// drops any row whose file has vanished on the next scan, so deleting the file
-// is the whole mutation.
+// Delete ONE История note (single .md version file) — moved into .trash/ (30-day
+// retention, lib/mainutil.js's trash helpers) rather than permanently unlinked, so a
+// misclick is recoverable — manually, via Obsidian/Finder; no restore UI in v1 (owner
+// decision). The audio is never touched here — it stays on disk so the recording can be
+// reprocessed later; trashing the recording's audio too is the separate
+// delete-history-recording handler below. No separate index/db mutation is needed:
+// cmd_history's reconcile (backend.py) drops any row whose file has vanished on the next
+// scan, so moving the file out of out_dir/the vault is the whole mutation.
 // Guarded the same way process-audio/redownload-model/download-and-install-update
 // are ("Дождитесь окончания обработки") — a reprocess run may be about to write a
 // new version of the same recording, so no note deletion is allowed to race it.
@@ -1708,21 +1768,90 @@ ipcMain.handle("read-note", async (_e, notePath) => {
 // (symlinks followed via fs.realpathSync) inside out_dir or the PARA vault root —
 // same out_dir/vault duality triggerAutoIndex already handles — so this can never
 // be pointed at an arbitrary path.
-ipcMain.handle("delete-history-note", async (_e, notePath) => {
+ipcMain.handle("delete-history-note", async (_e, { notePath, baseStamp } = {}) => {
   if (procProc) return { ok: false, error: "Дождитесь окончания обработки" };
-  const presetsData = loadPresetsData();
-  const roots = [presetsData.defaultOutDir || DEFAULT_OUT, readParaRoot()].filter(Boolean);
+  const { outDir, vaultRoot } = currentOutDirAndVault();
+  const roots = [outDir, vaultRoot].filter(Boolean);
   let resolved = null;
   try { resolved = fs.realpathSync(notePath); } catch { resolved = null; }
   if (!isNoteDeletable(notePath, resolved, roots)) {
     return { ok: false, error: "Заметка не найдена или находится вне рабочей папки" };
   }
   try {
-    fs.unlinkSync(resolved);
+    const trashDir = trashRootFor(outDir, vaultRoot);
+    fs.mkdirSync(trashDir, { recursive: true });
+    const dest = trashDestPath(trashDir, path.basename(resolved), fs.existsSync);
+    moveToTrash(resolved, dest);
+    const entries = loadTrashManifest(trashDir);
+    entries.push({ deletedAt: Date.now(), kind: "note", files: [dest], baseStamp: baseStamp || null });
+    saveTrashManifest(trashDir, entries);
     return { ok: true };
   } catch (e) {
     return { ok: false, error: String((e && e.message) || e) };
   }
+});
+
+// Recording-level ✕ (audio-first История rail's trash feature): trashes the recording's
+// out_dir audio file(s) AND every обработка (all versions/templates/languages) in one
+// call — every path is validated BEFORE anything is moved, so a bad path can't leave the
+// recording half-trashed. notePaths/audioPaths are resolved+validated exactly like
+// delete-history-note's single note (isNoteDeletable/isAudioDeletable against out_dir/
+// PARA-vault roots); audioPaths uses isAudioDeletable (lib/mainutil.js) — same
+// containment check, extended to the known audio extensions (backend.py's _AUDIO_EXT).
+// Guarded identically to delete-history-note (global procProc busy-guard) — this app
+// only ever runs one processing job at a time, so this already refuses while ANY
+// recording (including this one) is being processed.
+ipcMain.handle("delete-history-recording", async (_e, { baseStamp, notePaths, audioPaths } = {}) => {
+  if (procProc) return { ok: false, error: "Дождитесь окончания обработки" };
+  const { outDir, vaultRoot } = currentOutDirAndVault();
+  const roots = [outDir, vaultRoot].filter(Boolean);
+
+  const resolvedNotes = [];
+  for (const p of (Array.isArray(notePaths) ? notePaths : [])) {
+    let resolved = null;
+    try { resolved = fs.realpathSync(p); } catch { resolved = null; }
+    if (!isNoteDeletable(p, resolved, roots)) {
+      return { ok: false, error: "Заметка не найдена или находится вне рабочей папки" };
+    }
+    resolvedNotes.push(resolved);
+  }
+  const resolvedAudios = [];
+  for (const p of (Array.isArray(audioPaths) ? audioPaths : [])) {
+    let resolved = null;
+    try { resolved = fs.realpathSync(p); } catch { resolved = null; }
+    if (!isAudioDeletable(p, resolved, roots)) {
+      return { ok: false, error: "Аудио не найдено или находится вне рабочей папки" };
+    }
+    resolvedAudios.push(resolved);
+  }
+
+  const trashDir = trashRootFor(outDir, vaultRoot);
+  const moved = [];
+  let moveError = null;
+  try {
+    fs.mkdirSync(trashDir, { recursive: true });
+    for (const resolved of [...resolvedNotes, ...resolvedAudios]) {
+      const dest = trashDestPath(trashDir, path.basename(resolved), fs.existsSync);
+      moveToTrash(resolved, dest);
+      moved.push(dest);
+    }
+  } catch (e) {
+    moveError = String((e && e.message) || e);
+  }
+  // A partial failure (e.g. 2 of 3 files moved before an error) must still record whatever
+  // DID move — otherwise those files would sit in .trash with no manifest entry and never
+  // get auto-purged by purgeTrashOnStartup. The manifest write itself is best-effort too:
+  // this handler already reported the real error above; a manifest write failure on top of
+  // that isn't surfaced as a second error.
+  if (moved.length) {
+    try {
+      const entries = loadTrashManifest(trashDir);
+      entries.push({ deletedAt: Date.now(), kind: "recording", files: moved, baseStamp: baseStamp || null });
+      saveTrashManifest(trashDir, entries);
+    } catch {}
+  }
+  if (moveError) return { ok: false, error: moveError };
+  return { ok: true };
 });
 
 // ── PARA ───────────────────────────────────────────────────────────────────

@@ -4390,3 +4390,220 @@ def test_correct_cache_recomputes_when_transcribe_output_changes_underneath_it(m
     assert "из кеша" not in ends["correct"]["msg"]
     done = [e for e in events if e["event"] == "done"][0]
     assert "совершенно другой текст" in done["transcript"]  # fresh content, not the stale run's
+
+
+# ── shared _base_stamp() helper — canonical recording identity (audio-inventory feature,
+# History audio inventory + base_stamp deliverable) ─────────────────────────────────────
+def test_base_stamp_plain_stamp_unchanged():
+    assert backend._base_stamp("2026-01-01-100000") == "2026-01-01-100000"
+
+
+def test_base_stamp_strips_revision_suffix():
+    assert backend._base_stamp("2026-01-01-100000-r2") == "2026-01-01-100000"
+
+
+def test_base_stamp_strips_language_suffix():
+    assert backend._base_stamp("2026-01-01-100000-en") == "2026-01-01-100000"
+
+
+def test_base_stamp_strips_revision_and_language_suffix():
+    assert backend._base_stamp("2026-01-01-100000-en-r3") == "2026-01-01-100000"
+
+
+def test_base_stamp_prefix_agnostic_matches_find_audio_stripping():
+    # _find_audio feeds _base_stamp a "meeting-"-prefixed stem (matching on-disk filenames);
+    # cmd_history/the audios inventory feed it a prefix-free stem. Both must strip identically
+    # (the regexes only anchor on the trailing end) — this is the "one shared helper" refactor.
+    assert backend._base_stamp("meeting-2026-01-01-100000-en-r3") == "meeting-2026-01-01-100000"
+    assert backend._find_audio(
+        "meeting-2026-01-01-100000-en-r3.md",
+        ["meeting-2026-01-01-100000-en-r3.md", "meeting-2026-01-01-100000.wav"],
+    ) == "meeting-2026-01-01-100000.wav"
+
+
+# ── _wav_duration_s() — stdlib `wave` header parse, no ffprobe, no full-file read ───────
+def test_wav_duration_s_valid_wav(tmp_path):
+    p = tmp_path / "a.wav"
+    make_wav(p, seconds=2.0, rate=16000)
+    assert backend._wav_duration_s(str(p)) == pytest.approx(2.0, abs=0.01)
+
+
+def test_wav_duration_s_none_for_corrupt_file(tmp_path):
+    p = tmp_path / "a.wav"
+    p.write_bytes(b"not a real wav file")
+    assert backend._wav_duration_s(str(p)) is None
+
+
+# ── _scan_audio_inventory() direct tests ────────────────────────────────────────────────
+def test_scan_audio_inventory_missing_out_dir_returns_empty(tmp_path):
+    assert backend._scan_audio_inventory(str(tmp_path / "nope")) == []
+
+
+# ── cmd_history note rows gain base_stamp (audio-inventory feature) ────────────────────
+def test_cmd_history_note_row_gains_base_stamp(tmp_path):
+    out = tmp_path / "vault"; out.mkdir()
+    db = str(tmp_path / "i.db")
+    (out / "meeting-2026-01-01-100000.md").write_text('---\ntitle: "A"\n---\n# x', encoding="utf-8")
+    events = capture(backend.cmd_history, str(out), db)
+    items = [e for e in events if e["event"] == "history"][0]["items"]
+    assert items[0]["base_stamp"] == "2026-01-01-100000"
+
+
+def test_cmd_history_note_row_base_stamp_collapses_lang_and_revision_variants(tmp_path):
+    out = tmp_path / "vault"; out.mkdir()
+    db = str(tmp_path / "i.db")
+    (out / "meeting-2026-01-01-100000.md").write_text('---\ntitle: "Ru"\n---\n# x', encoding="utf-8")
+    (out / "meeting-2026-01-01-100000-en.md").write_text('---\ntitle: "En"\n---\n# x', encoding="utf-8")
+    (out / "meeting-2026-01-01-100000-r2.md").write_text('---\ntitle: "Reprocessed"\n---\n# x', encoding="utf-8")
+    events = capture(backend.cmd_history, str(out), db)
+    items = [e for e in events if e["event"] == "history"][0]["items"]
+    assert {it["base_stamp"] for it in items} == {"2026-01-01-100000"}
+
+
+def test_cmd_history_pending_row_has_no_base_stamp(tmp_path):
+    # base_stamp is a note-row concept (see cmd_history's comment) — pending rows use a
+    # different stamp namespace (_parse_any_stamp's "T"-separated format) and are not part
+    # of the audio-pairing identity yet (retiring the pending merge path is a separate PR).
+    out = tmp_path / "vault"; out.mkdir()
+    db = str(tmp_path / "i.db")
+    pending_file = tmp_path / "pending.json"
+    pending_file.write_text(json.dumps({"recordings": [
+        {"id": "2026-01-01T10-00-00-ab12", "name": "Запись", "stamp": "2026-01-01T10-00-00-ab12",
+         "mixed": "/rec/r1/mixed.wav"},
+    ]}), encoding="utf-8")
+    events = capture(backend.cmd_history, str(out), db, str(pending_file))
+    items = [e for e in events if e["event"] == "history"][0]["items"]
+    assert items[0]["kind"] == "pending"
+    assert "base_stamp" not in items[0]
+
+
+# ── cmd_history audios inventory — surfaces audio invisible to the .md-only _reconcile ─
+# scan (histmap4x analyzer report Q5 / constraint (a): deleting a note's last surviving
+# version orphans its audio with no rail entry today) ──────────────────────────────────
+def test_cmd_history_audios_lists_orphan_audio_with_no_surviving_notes(tmp_path):
+    out = tmp_path / "vault"; out.mkdir()
+    db = str(tmp_path / "i.db")
+    make_wav(out / "meeting-2026-01-01-100000.wav")  # no .md note at all — pure orphan
+    events = capture(backend.cmd_history, str(out), db)
+    result = [e for e in events if e["event"] == "history"][0]
+    assert result["items"] == []  # still invisible to the note-only DB, as before
+    audios = result["audios"]
+    assert len(audios) == 1
+    assert audios[0]["base_stamp"] == "2026-01-01-100000"
+    assert audios[0]["path"].endswith("meeting-2026-01-01-100000.wav")
+
+
+def test_cmd_history_audios_base_stamp_matches_note_base_stamp_for_paired_recording(tmp_path):
+    out = tmp_path / "vault"; out.mkdir()
+    db = str(tmp_path / "i.db")
+    (out / "meeting-2026-01-01-100000.md").write_text('---\ntitle: "A"\n---\n# x', encoding="utf-8")
+    make_wav(out / "meeting-2026-01-01-100000.wav")
+    events = capture(backend.cmd_history, str(out), db)
+    result = [e for e in events if e["event"] == "history"][0]
+    assert result["items"][0]["base_stamp"] == result["audios"][0]["base_stamp"] == "2026-01-01-100000"
+
+
+def test_cmd_history_audios_skips_non_audio_files(tmp_path):
+    out = tmp_path / "vault"; out.mkdir()
+    db = str(tmp_path / "i.db")
+    (out / "notes.txt").write_text("not audio", encoding="utf-8")
+    (out / "meeting-2026-01-01-100000.md").write_text('---\ntitle: "A"\n---\n# x', encoding="utf-8")
+    events = capture(backend.cmd_history, str(out), db)
+    audios = [e for e in events if e["event"] == "history"][0]["audios"]
+    assert audios == []
+
+
+def test_cmd_history_audios_skips_hidden_files_and_dirs(tmp_path):
+    out = tmp_path / "vault"; out.mkdir()
+    db = str(tmp_path / "i.db")
+    hidden_dir = out / ".trash"; hidden_dir.mkdir()
+    make_wav(hidden_dir / "meeting-2026-01-01-999999.wav")  # nested — single-level scan never sees it
+    make_wav(out / ".meeting-2026-01-01-888888.wav")  # hidden FILE, otherwise a valid audio ext
+    make_wav(out / "meeting-2026-01-01-100000.wav")
+    events = capture(backend.cmd_history, str(out), db)
+    audios = [e for e in events if e["event"] == "history"][0]["audios"]
+    assert len(audios) == 1
+    assert audios[0]["base_stamp"] == "2026-01-01-100000"
+
+
+def test_cmd_history_audios_does_not_recurse_into_non_hidden_subdir(tmp_path):
+    # A NON-hidden subdir (e.g. an old export folder, not .trash/.obsidian) must still be
+    # excluded — the inventory is a single-level out_dir scan, not a recursive walk. The
+    # hidden-dir test above only exercises the dotfile-name skip; this locks the separate
+    # is_file() guard (entry.is_file() is False for any directory, hidden or not).
+    out = tmp_path / "vault"; out.mkdir()
+    db = str(tmp_path / "i.db")
+    subdir = out / "exported"; subdir.mkdir()  # ordinary, non-hidden subdirectory
+    make_wav(subdir / "meeting-2026-01-01-999999.wav")
+    make_wav(out / "meeting-2026-01-01-100000.wav")
+    events = capture(backend.cmd_history, str(out), db)
+    audios = [e for e in events if e["event"] == "history"][0]["audios"]
+    assert len(audios) == 1
+    assert audios[0]["base_stamp"] == "2026-01-01-100000"
+
+
+def test_cmd_history_audios_duration_s_parsed_for_valid_wav(tmp_path):
+    out = tmp_path / "vault"; out.mkdir()
+    db = str(tmp_path / "i.db")
+    make_wav(out / "meeting-2026-01-01-100000.wav", seconds=1.5, rate=16000)
+    events = capture(backend.cmd_history, str(out), db)
+    audios = [e for e in events if e["event"] == "history"][0]["audios"]
+    assert audios[0]["duration_s"] == pytest.approx(1.5, abs=0.01)
+
+
+def test_cmd_history_audios_duration_s_null_for_corrupt_wav_entry_still_present(tmp_path):
+    out = tmp_path / "vault"; out.mkdir()
+    db = str(tmp_path / "i.db")
+    (out / "meeting-2026-01-01-100000.wav").write_bytes(b"not a real wav file")
+    events = capture(backend.cmd_history, str(out), db)
+    audios = [e for e in events if e["event"] == "history"][0]["audios"]
+    assert len(audios) == 1  # corrupt file still surfaces — only duration_s degrades
+    assert audios[0]["duration_s"] is None
+
+
+def test_cmd_history_audios_duration_s_null_for_non_wav_extension(tmp_path):
+    out = tmp_path / "vault"; out.mkdir()
+    db = str(tmp_path / "i.db")
+    (out / "meeting-2026-01-01-100000.m4a").write_bytes(b"x" * 50)
+    events = capture(backend.cmd_history, str(out), db)
+    audios = [e for e in events if e["event"] == "history"][0]["audios"]
+    assert len(audios) == 1
+    assert audios[0]["duration_s"] is None
+
+
+def test_cmd_history_audios_present_and_empty_when_out_dir_missing(tmp_path):
+    db = str(tmp_path / "i.db")
+    out = tmp_path / "does-not-exist"
+    events = capture(backend.cmd_history, str(out), db)
+    result = [e for e in events if e["event"] == "history"][0]
+    assert result["audios"] == []
+    assert result["items"] == []
+
+
+# ── backward compatibility lock: existing history fields/sort untouched ────────────────
+def test_cmd_history_existing_note_row_shape_untouched(tmp_path):
+    """Additive-only contract: every field main.js's list-history mapping (and the
+    renderer) already reads off a note row must still be present and correctly typed —
+    base_stamp/audios are new, nothing existing renamed or removed."""
+    out = tmp_path / "vault"; out.mkdir()
+    db = str(tmp_path / "i.db")
+    (out / "meeting-2026-01-01-100000.md").write_text(
+        '---\ntitle: "A"\ntemplate: "Митинг"\nlanguage: "ru"\nsource: "mic"\n---\n# x', encoding="utf-8")
+    make_wav(out / "meeting-2026-01-01-100000.wav")
+    events = capture(backend.cmd_history, str(out), db)
+    item = [e for e in events if e["event"] == "history"][0]["items"][0]
+    for key in ("note", "stamp", "title", "template", "language", "date", "audio",
+                "mtime", "source", "version"):
+        assert key in item
+    assert item["title"] == "A" and item["template"] == "Митинг" and item["language"] == "ru"
+    assert item["audio"].endswith("meeting-2026-01-01-100000.wav")
+
+
+def test_cmd_history_sort_order_unchanged_by_new_fields(tmp_path):
+    out = tmp_path / "vault"; out.mkdir()
+    db = str(tmp_path / "i.db")
+    (out / "meeting-2026-01-01-100000.md").write_text('---\ntitle: "Old"\n---\n# x', encoding="utf-8")
+    (out / "meeting-2026-06-01-100000.md").write_text('---\ntitle: "New"\n---\n# x', encoding="utf-8")
+    events = capture(backend.cmd_history, str(out), db)
+    items = [e for e in events if e["event"] == "history"][0]["items"]
+    assert [it["title"] for it in items] == ["New", "Old"]  # stamp DESC, unchanged

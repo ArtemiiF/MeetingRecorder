@@ -11,7 +11,7 @@
   --accent-fill: #3a6fd0; --accent-fill-hover: #3160b8; --accent-fill-text: #fff;
   --danger-fill: #d3363b;
   --warn: #f5a623; --pre-bg: #0c0f13; --overlay: rgba(0,0,0,.55);
-  --ok-tint: rgba(63,185,80,.1); --danger-tint: rgba(229,72,77,.1);
+  --ok-tint: rgba(63,185,80,.1); --danger-tint: rgba(229,72,77,.1); --rec-tint: rgba(240,106,60,.12);
   --rec: #f06a3c; --rec-fill: #c94318; --selection: #2b4a86;
   --selection-text: #fff; --selection-muted: #cdd9ee;
   --inactive: #6b7480; --sidebar: #161b22;
@@ -315,25 +315,53 @@ main:has(> #view-prompts:not(.hidden)) { max-width: 1200px; }
   text-transform: uppercase; letter-spacing: .02em; padding: 10px 10px 4px; }
 .rail-date-header:first-child { padding-top: 4px; }
 
-/* pending recordings render only here, inline in the История rail (queue-item look,
-   also flagged .rail-item so they sit in the same DOM flow as note rows); they're
-   never clickable as a row (no selectNote/readNote) — only their own ▶/✕ buttons act. */
+/* pending recordings render only here, inline in the История rail at their real
+   chronological position (queue-item look, also flagged .rail-item so they sit in the
+   same DOM flow as note rows); they're never clickable as a row (no selectNote/
+   readNote) — only their own ▶/✕ buttons act. */
 .rail-item.pending { cursor: default; flex-direction: row; align-items: center; margin-bottom: 6px; }
+.rail-pending-meta { display: inline-flex; align-items: center; gap: 6px; color: var(--muted);
+  font-size: 11px; margin-left: 6px; }
 
-/* История: collapsible per-recording version group (note versioning by template on
-   reprocess — see backend.py Pipeline.process's version/-r<seq> scheme). Caret/hidden
-   mechanics mirror the glossary "Мои" category folders (.glossary-caret/.glossary-count
-   below, reused as-is) — same collapse discipline, different section. */
+/* История: collapsible per-recording group (audio-first rail, design "Вариант A" —
+   see buildRecordings/buildNotesRecordingRow in renderer.js). Every recording with ≥1
+   обработка renders this way, including a solitary one — обработки inside are ordered
+   by template (note versioning by template on reprocess — backend.py Pipeline.
+   process's version/-r<seq> scheme). Caret/hidden mechanics mirror the glossary "Мои"
+   category folders (.glossary-caret below, reused as-is) — same collapse discipline,
+   different section. */
 .rail-group { margin-bottom: 2px; }
 .rail-group-header {
   display: flex; align-items: center; gap: 6px; width: 100%; text-align: left;
-  background: transparent; border: none; border-radius: 8px; padding: 8px 12px;
+  background: transparent; border: none; border-radius: 8px; padding: 8px 12px 2px;
   cursor: pointer; color: var(--fg); font-family: inherit; font-size: 13px; font-weight: 500;
 }
 .rail-group-header:hover { background: var(--card2); }
 .rail-group-versions { display: flex; flex-direction: column; }
 .rail-version-row { padding-left: 26px; }
 .rail-latest { color: var(--muted); font-size: 11px; font-weight: 400; }
+
+/* Recording-level meta line (time + duration + status badge) — sits under a group's
+   header (buildNotesRecordingRow) or inside a flat orphan row (buildOrphanRow). Badge
+   tokens reused from the palette above (--rec-tint/--rec/--inactive/--muted) — no
+   hardcoded colors, mirrors the approved design card (history-audio-a.html). */
+.rail-rec-meta { display: flex; align-items: center; gap: 8px; padding: 0 12px 6px 34px;
+  color: var(--muted); font-size: 11.5px; }
+/* Recording-level ✕ (История trash feature) — pinned to the right end of the meta row,
+   same "trailing button, margin-left:auto" pattern as .queue-retry-btn (pending rows). */
+.rec-trash-btn { margin-left: auto; }
+.rail-rec-badge { display: inline-flex; align-items: center; border-radius: 999px;
+  padding: 1px 8px; font-size: 10.5px; font-weight: 600; line-height: 1.6; }
+.rail-rec-badge.wait { background: var(--rec-tint); color: var(--rec); }
+.rail-rec-badge.empty { border: 1px dashed var(--inactive); color: var(--inactive); }
+.rail-rec-badge.count { background: var(--card2); border: 1px solid var(--line); color: var(--muted); font-weight: 500; }
+
+/* «без обработок» orphan row (audios[] entry with zero surviving notes) — same flat,
+   non-clickable-row shape as a pending row (.rail-item.pending above), own modifier so
+   `.rail-item:not(.pending)` selectors elsewhere never accidentally match it. */
+.rail-item.orphan { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; cursor: default; }
+.rail-rec-head { display: flex; align-items: center; gap: 8px; }
+.rail-title-file { font-weight: 400; color: var(--muted); font-size: 12px; }
 
 .note-view {
   flex: 1; min-width: 0; background: var(--grad-card); box-shadow: var(--shadow-card); border: 1px solid var(--line);
