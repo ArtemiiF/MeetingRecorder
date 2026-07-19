@@ -33,7 +33,7 @@ _PUNCT_CHARS = ".,!?;:\"'«»()[]{}—–-…"
 # k2-lmstudio-reasoning-tokens's ≥1500-2500 "thinking room" guidance, but
 # clamped to the actually-measured floor rather than below it) with the
 # chars/3 term added ON TOP of that floor for visible content — chars/3
-# mirrors _estimate_tokens's heuristic above. Timeout floor of 30s covers
+# mirrors the ceil(chars/3) token heuristic of backend.py's _estimate_tokens. Timeout floor of 30s covers
 # prefill+network; the 15 tok/s rate is a conservative floor under the ~25
 # tok/s measured on the same model, so the computed timeout has headroom
 # instead of hugging the measured wall-time.
