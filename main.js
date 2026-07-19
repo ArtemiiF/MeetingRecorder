@@ -15,7 +15,8 @@ const {
   rewriteNoteSpeakers, isOutsideRoot, isNoteDeletable, indexRunReducer, upsertById, diskGuardVerdict, busyVerdict,
   isPathInsideRoots, contentFingerprint, isFileStable,
   isAudioDeletable, trashRootFor, trashDestPath, moveToTrash, purgeTrash,
-  isTrashAudioFile, trashDaysLeft, buildTrashEntry, restoreDestinationFor, deleteTrashEntryFiles,
+  trashDaysLeft, buildTrashEntry, restoreTrashFiles,
+  deleteTrashEntryFiles, trashEntryBreakdown,
   resolveOutDirOnVaultChange, trayMenuTemplate,
   resolvePythonBin, resolveFfmpegBin, resolveResourcePath, resolveAudioTeeBin, resolveAssetPath, backendInstallStatus,
   parseFfmpegVersion,
@@ -2036,14 +2037,7 @@ ipcMain.handle("list-trash", async () => {
   let totalBytes = 0;
   const items = entries.map((e) => {
     const files = Array.isArray(e.files) ? e.files : [];
-    let audioBytes = 0, noteBytes = 0, noteCount = 0;
-    for (const f of files) {
-      let size = 0;
-      try { size = fs.statSync(f).size; } catch {}
-      if (isTrashAudioFile(f)) audioBytes += size;
-      else if (f.endsWith(".md")) { noteBytes += size; noteCount++; }
-    }
-    const bytes = audioBytes + noteBytes;
+    const { audioBytes, noteCount, bytes } = trashEntryBreakdown(files);
     totalBytes += bytes;
     const title = e.title || e.baseStamp || (files[0] ? path.basename(files[0]) : "Без названия");
     return {
@@ -2054,21 +2048,12 @@ ipcMain.handle("list-trash", async () => {
   return { items, totalBytes };
 });
 
-// Restore ONE trash entry back to its original location(s) — origin-mapped for entries
-// trashed after this feature shipped, outDir-fallback for legacy ones (restoreDestinationFor,
-// lib/mainutil.js). Busy-guarded (same busyVerdict pattern para-file uses) because a restore
-// writes INTO outDir/the vault, which a concurrent reprocess run (procProc) is actively
-// reading/writing — the same race delete-history-note/-recording already guard against, just
-// in the opposite direction. Containment mirrors purgeTrash's own trashDir check: every file
-// this entry claims must actually live inside trashDir, or a hand-edited manifest.json could
-// turn this into a move-from-anywhere primitive. A partial failure (2 of 3 files restored
-// before an error) keeps the entry alive for whatever's still in trash — never left half-
-// restored with no manifest entry to track the remainder (same discipline as
-// delete-history-recording's own partial-move handling above).
+// Restore ONE trash entry: source must resolve inside trashDir (below), destination inside outDir/vaultRoot via restoreTrashFiles (not purgeTrash's check — that one has no destination side); busy-guarded against a concurrent reprocess.
 ipcMain.handle("restore-trash-entry", async (_e, { id } = {}) => {
   const busy = busyVerdict([[!!procProc, "Дождитесь окончания обработки"]]);
   if (busy) return { ok: false, error: busy };
   const { outDir, vaultRoot } = currentOutDirAndVault();
+  const roots = [outDir, vaultRoot].filter(Boolean);
   const trashDir = trashRootFor(outDir, vaultRoot);
   const entries = loadTrashManifest(trashDir);
   const idx = entries.findIndex((e) => e && e.id === id);
@@ -2080,22 +2065,7 @@ ipcMain.handle("restore-trash-entry", async (_e, { id } = {}) => {
       return { ok: false, error: "Некорректная запись корзины" };
     }
   }
-  const remaining = [];
-  let moveError = null;
-  for (const f of files) {
-    try {
-      const ideal = restoreDestinationFor(f, entry.origin, outDir);
-      fs.mkdirSync(path.dirname(ideal), { recursive: true });
-      // Collision-safe suffixing reuses trashDestPath as-is (it's dir-agnostic — the
-      // "trashDir" parameter is just "target directory") rather than re-implementing the
-      // same -1/-2 suffix logic for restores.
-      const dest = trashDestPath(path.dirname(ideal), path.basename(ideal), fs.existsSync);
-      moveToTrash(f, dest);
-    } catch (e) {
-      moveError = String((e && e.message) || e);
-      remaining.push(f);
-    }
-  }
+  const { remaining, error: moveError } = restoreTrashFiles(files, entry.origin, outDir, roots);
   if (remaining.length) entries[idx] = { ...entry, files: remaining };
   else entries.splice(idx, 1);
   try { saveTrashManifest(trashDir, entries); } catch {}

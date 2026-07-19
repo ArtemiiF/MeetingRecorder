@@ -10,7 +10,8 @@ const {
   rewriteNoteSpeakers, isOutsideRoot, isNoteDeletable, indexRunReducer, upsertById, diskGuardVerdict, busyVerdict,
   isPathInsideRoots,
   isAudioDeletable, trashRootFor, trashDestPath, moveToTrash, purgeTrash,
-  isTrashAudioFile, trashDaysLeft, buildTrashEntry, restoreDestinationFor, deleteTrashEntryFiles,
+  isTrashAudioFile, trashDaysLeft, buildTrashEntry, restoreDestinationFor, restoreTrashFiles,
+  deleteTrashEntryFiles, trashEntryBreakdown,
   resolveOutDirOnVaultChange, trayMenuTemplate,
   resolvePythonBin, resolveFfmpegBin, resolveResourcePath, resolveAudioTeeBin, resolveAssetPath, backendInstallStatus,
   parseFfmpegVersion,
@@ -657,18 +658,67 @@ test("buildTrashEntry: carries baseStamp/title/origin through unchanged when pro
   });
 });
 
-test("restoreDestinationFor: an origin-mapped file restores to its recorded original path", () => {
+test("restoreDestinationFor: an origin-mapped file inside an allowed root (the vault) restores to its recorded original path", () => {
   const origin = { "/out/.trash/a.wav": "/vault/Projects/a.wav" };
-  assert.equal(restoreDestinationFor("/out/.trash/a.wav", origin, "/out"), "/vault/Projects/a.wav");
+  assert.equal(restoreDestinationFor("/out/.trash/a.wav", origin, "/out", ["/out", "/vault"]), "/vault/Projects/a.wav");
 });
 test("restoreDestinationFor: a legacy file with no origin entry falls back to outDir/basename", () => {
-  assert.equal(restoreDestinationFor("/out/.trash/a.wav", {}, "/out"), path.join("/out", "a.wav"));
-  assert.equal(restoreDestinationFor("/out/.trash/a.wav", undefined, "/out"), path.join("/out", "a.wav"));
-  assert.equal(restoreDestinationFor("/out/.trash/a.wav", null, "/out"), path.join("/out", "a.wav"));
+  assert.equal(restoreDestinationFor("/out/.trash/a.wav", {}, "/out", ["/out"]), path.join("/out", "a.wav"));
+  assert.equal(restoreDestinationFor("/out/.trash/a.wav", undefined, "/out", ["/out"]), path.join("/out", "a.wav"));
+  assert.equal(restoreDestinationFor("/out/.trash/a.wav", null, "/out", ["/out"]), path.join("/out", "a.wav"));
 });
 test("restoreDestinationFor: origin present but missing THIS file's key still falls back to outDir/basename", () => {
   const origin = { "/out/.trash/other.wav": "/vault/other.wav" };
+  assert.equal(restoreDestinationFor("/out/.trash/a.wav", origin, "/out", ["/out", "/vault"]), path.join("/out", "a.wav"));
+});
+test("restoreDestinationFor: an origin pointing OUTSIDE every allowed root falls back to outDir/basename instead of being honored verbatim (tampered/stale manifest.json defense — the origin map comes from a JSON file on disk, a vaultRoot reconfigured after the delete can also strand an old, once-valid origin outside the CURRENT roots)", () => {
+  const origin = { "/out/.trash/a.wav": "/etc/passwd" };
+  assert.equal(restoreDestinationFor("/out/.trash/a.wav", origin, "/out", ["/out", "/vault"]), path.join("/out", "a.wav"));
+});
+test("restoreDestinationFor: no roots passed at all → an origin-mapped path can't be validated and is never trusted verbatim — fails closed to outDir/basename", () => {
+  const origin = { "/out/.trash/a.wav": "/vault/Projects/a.wav" };
   assert.equal(restoreDestinationFor("/out/.trash/a.wav", origin, "/out"), path.join("/out", "a.wav"));
+  assert.equal(restoreDestinationFor("/out/.trash/a.wav", origin, "/out", []), path.join("/out", "a.wav"));
+});
+
+// restoreTrashFiles: the actual restore loop (main.js's restore-trash-entry handler body,
+// extracted so it's behavior-testable without electron) — proves the full pipeline, not
+// just restoreDestinationFor in isolation, respects containment and partial-failure
+// handling end to end.
+test("restoreTrashFiles: happy path — every file moved to its restoreDestinationFor target", () => {
+  const moved = [];
+  const deps = { mkdirSync: () => {}, existsSync: () => false, move: (src, dest) => moved.push([src, dest]) };
+  const origin = { "/out/.trash/a.wav": "/vault/Projects/a.wav" };
+  const { remaining, error } = restoreTrashFiles(["/out/.trash/a.wav", "/out/.trash/b.md"], origin, "/out", ["/out", "/vault"], deps);
+  assert.deepEqual(remaining, []);
+  assert.equal(error, null);
+  assert.deepEqual(moved, [["/out/.trash/a.wav", "/vault/Projects/a.wav"], ["/out/.trash/b.md", path.join("/out", "b.md")]]);
+});
+test("restoreTrashFiles: an origin pointing outside every allowed root is never handed to move() verbatim — restored to outDir instead", () => {
+  const moved = [];
+  const deps = { mkdirSync: () => {}, existsSync: () => false, move: (src, dest) => moved.push([src, dest]) };
+  const origin = { "/out/.trash/a.wav": "/etc/passwd" };
+  const { remaining, error } = restoreTrashFiles(["/out/.trash/a.wav"], origin, "/out", ["/out", "/vault"], deps);
+  assert.deepEqual(remaining, []);
+  assert.equal(error, null);
+  assert.deepEqual(moved, [["/out/.trash/a.wav", path.join("/out", "a.wav")]]);
+});
+test("restoreTrashFiles: one file's move fails — the others still restore, the failing one stays in `remaining`, its error is reported", () => {
+  const moved = [];
+  const move = (src, dest) => {
+    if (src === "/out/.trash/bad.wav") throw new Error("disk full");
+    moved.push([src, dest]);
+  };
+  const deps = { mkdirSync: () => {}, existsSync: () => false, move };
+  const { remaining, error } = restoreTrashFiles(
+    ["/out/.trash/a.md", "/out/.trash/bad.wav", "/out/.trash/c.md"], {}, "/out", ["/out"], deps
+  );
+  assert.deepEqual(remaining, ["/out/.trash/bad.wav"]);
+  assert.match(error, /disk full/);
+  assert.deepEqual(moved.map((m) => m[0]), ["/out/.trash/a.md", "/out/.trash/c.md"]);
+});
+test("restoreTrashFiles: defaults deps to real fs/moveToTrash when none injected (doesn't throw just from being called with no deps arg)", () => {
+  assert.doesNotThrow(() => restoreTrashFiles([], {}, "/out", ["/out"]));
 });
 
 test("deleteTrashEntryFiles: unlinks every existing file inside trashDir", () => {
@@ -1129,4 +1179,22 @@ test("pickUpdateAsset: empty assets array returns null", () => {
 test("pickUpdateAsset: non-array input returns null (defensive, never throws)", () => {
   assert.equal(pickUpdateAsset(null), null);
   assert.equal(pickUpdateAsset(undefined), null);
+});
+
+// ── trashEntryBreakdown (list-trash's per-entry audio/note byte+count split) ────────
+test("trashEntryBreakdown: sums audio bytes and note bytes/count separately for stat-confirmed files", () => {
+  const stats = { "/out/.trash/a.md": { size: 100 }, "/out/.trash/b.wav": { size: 200 } };
+  const statSync = (f) => { if (!stats[f]) throw new Error("ENOENT"); return stats[f]; };
+  const result = trashEntryBreakdown(["/out/.trash/a.md", "/out/.trash/b.wav"], { statSync });
+  assert.deepEqual(result, { audioBytes: 200, noteBytes: 100, noteCount: 1, bytes: 300 });
+});
+test("trashEntryBreakdown: a missing (statSync-throwing) file contributes NOTHING — not bytes, not noteCount", () => {
+  const stats = { "/out/.trash/a.md": { size: 100 } };
+  const statSync = (f) => { if (!stats[f]) throw new Error("ENOENT"); return stats[f]; };
+  const result = trashEntryBreakdown(["/out/.trash/a.md", "/out/.trash/gone.md"], { statSync });
+  assert.deepEqual(result, { audioBytes: 0, noteBytes: 100, noteCount: 1, bytes: 100 });
+});
+test("trashEntryBreakdown: empty/non-array files → all zeros, never throws", () => {
+  assert.deepEqual(trashEntryBreakdown([], {}), { audioBytes: 0, noteBytes: 0, noteCount: 0, bytes: 0 });
+  assert.deepEqual(trashEntryBreakdown(undefined, {}), { audioBytes: 0, noteBytes: 0, noteCount: 0, bytes: 0 });
 });

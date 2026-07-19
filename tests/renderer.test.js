@@ -5912,24 +5912,32 @@ test("main.js: delete-history-note and delete-history-recording now build their 
   }
 });
 
-test("main.js: list-trash computes daysLeft/audioBytes/noteCount per entry and backfills a missing id", () => {
+// The audio/note byte+count split (including the "a missing file must not inflate
+// noteCount" fix) is behavior-tested in tests/mainutil.test.js's "trashEntryBreakdown"
+// suite; this regex lock only verifies list-trash actually delegates to it.
+test("main.js: list-trash computes daysLeft per entry via trashEntryBreakdown, and backfills a missing id", () => {
   const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
   const handler = mainSrc.match(/ipcMain\.handle\("list-trash"[\s\S]*?\n\}\);/);
   assert.ok(handler, "list-trash handler not found");
   assert.match(handler[0], /trashDaysLeft/);
-  assert.match(handler[0], /isTrashAudioFile/);
+  assert.match(handler[0], /trashEntryBreakdown\(files\)/);
   assert.match(handler[0], /crypto\.randomUUID\(\)/, "legacy entries missing an id must get one backfilled");
 });
 
-test("main.js: restore-trash-entry busy-guards via busyVerdict, validates trashDir containment, and reuses restoreDestinationFor/trashDestPath", () => {
+// The actual destination-containment/partial-failure logic now lives in restoreTrashFiles/
+// restoreDestinationFor (lib/mainutil.js) and is behavior-tested there (see
+// tests/mainutil.test.js's "restoreTrashFiles"/"restoreDestinationFor" suites — origin
+// escaping every allowed root, partial-failure remaining/error reporting). This regex
+// lock only verifies the IPC wiring itself: busy-guard, source-containment, and that the
+// handler actually delegates to the behavior-tested helper instead of re-inlining it.
+test("main.js: restore-trash-entry busy-guards via busyVerdict, validates SOURCE containment (trashDir), and delegates destination handling to restoreTrashFiles", () => {
   const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
   const handler = mainSrc.match(/ipcMain\.handle\("restore-trash-entry"[\s\S]*?\n\}\);/);
   assert.ok(handler, "restore-trash-entry handler not found");
   assert.match(handler[0], /busyVerdict\(\[\[!!procProc/);
   assert.match(handler[0], /path\.dirname\(f\) !== trashDir/);
-  assert.match(handler[0], /restoreDestinationFor/);
-  assert.match(handler[0], /trashDestPath/);
-  assert.match(handler[0], /moveToTrash/);
+  assert.match(handler[0], /restoreTrashFiles\(files, entry\.origin, outDir, roots\)/);
+  assert.ok(!/restoreDestinationFor|trashDestPath\(path\.dirname/.test(handler[0]), "destination computation must not be re-inlined here — it lives in restoreTrashFiles");
 });
 
 test("main.js: delete-trash-entry and empty-trash both reuse deleteTrashEntryFiles (same containment-checked unlink as purgeTrash)", () => {
