@@ -13,7 +13,7 @@ const {
   WavWriter, rmsLevel, cacheKey, pairHistory,
   encodeTokenBlob, decodeTokenBlob, isStale,
   rewriteNoteSpeakers, isOutsideRoot, isNoteDeletable, indexRunReducer, upsertById, diskGuardVerdict, busyVerdict,
-  isPathInsideRoots, contentFingerprint, isFileStable,
+  isPathInsideRoots, contentFingerprint, isFileStable, paraDestinationDir,
   isAudioDeletable, trashRootFor, trashDestPath, moveToTrash, purgeTrash,
   trashDaysLeft, buildTrashEntry, restoreTrashFiles,
   deleteTrashEntryFiles, trashEntryBreakdown,
@@ -2144,7 +2144,13 @@ ipcMain.handle("para-tree", async (_e, root) => {
     // dirs first, then notes; alpha within
     return nodes.sort((a, b) => (a.type === b.type ? a.name.localeCompare(b.name) : a.type === "dir" ? -1 : 1));
   };
-  return walk(root, 3);
+  // Depth 3 was already just enough for the new folder hierarchy's deepest shape
+  // (Projects/миссии/<год>. миссия <mission>/meeting-*.md — verified by hand against
+  // the real walk() logic: 3 nested walk() recursions reach the 3rd directory level,
+  // whose own readdirSync listing then shows the note file regardless of depth,
+  // since files bypass the depth gate entirely). Bumped to 4 anyway for headroom —
+  // T4-T6, ux-para-batch — so one more level of nesting doesn't silently go dark.
+  return walk(root, 4);
 });
 
 ipcMain.handle("para-classify", async (_e, arg) => {
@@ -2153,9 +2159,9 @@ ipcMain.handle("para-classify", async (_e, arg) => {
   // process-audio/start-recording, but had no guard at all before.
   const busy = busyVerdict([[!!installBackendProc, "Дождитесь окончания установки бэкенда"]]);
   if (busy) return { error: busy };
-  // arg may be a bare note path (legacy) or { note, root, folders, mainModel }
+  // arg may be a bare note path (legacy) or { note, root, folders, mainModel, language }
   const notePath = typeof arg === "string" ? arg : arg.note;
-  const { root, folders, mainModel } = typeof arg === "string" ? {} : arg;
+  const { root, folders, mainModel, language } = typeof arg === "string" ? {} : arg;
   // Containment check (H2 arch-audit): notePath feeds into backend.py's --note
   // (Path(note_path).read_text()) — same roots/validator as para-extract above.
   const { outDir, vaultRoot } = currentOutDirAndVault();
@@ -2184,12 +2190,16 @@ ipcMain.handle("para-classify", async (_e, arg) => {
   // Main model for this substantive task — same omit-when-empty contract as
   // process-audio's --main-model above.
   if (mainModel) args.push("--main-model", mainModel);
+  // Language pin (T7) — same omit-when-empty contract, mirrors process-audio's own
+  // --language passthrough; cmd_classify only special-cases "ru"/"en" (see backend.py).
+  if (language) args.push("--language", language);
   return new Promise((resolve) => {
     let out = null;
     runBackend(args,
       (ev) => {
-        if (ev.event === EVENTS.CLASSIFIED) out = { category: ev.category, project: ev.project };
-        else if (ev.event === EVENTS.ERROR) out = { error: ev.msg };
+        if (ev.event === EVENTS.CLASSIFIED) {
+          out = { category: ev.category, project: ev.project, kind: ev.kind, person: ev.person, mission: ev.mission };
+        } else if (ev.event === EVENTS.ERROR) out = { error: ev.msg };
       },
       () => resolve(out || { error: "нет ответа от backend" }));
   });
@@ -2250,10 +2260,20 @@ ipcMain.handle("para-extract", async (_e, notePath) => {
   });
 });
 
-// "Разложить" = distil knowledge into a living accumulator file, not just move the
-// raw note. Appends the extracted sections (dated block) into root/<category>/<project>.md,
-// then files the raw note + audio into Archives so nothing is lost and the inbox clears.
-ipcMain.handle("para-file", async (_e, { note, audio, category, project, extracted, title, stamp, root, folders }) => {
+// "Разложить" = classify (category + kind/person/mission) and file the RAW note + its
+// audio into a folder-hierarchy destination (T4-T6, ux-para-batch): archives/areas/
+// resources → <CategoryFolder>/<год>/<месяц>; projects → a one_to_one/mission_daily/
+// per-project folder — see lib/mainutil.js's paraDestinationDir for the exact scheme.
+// Basenames (meeting-<stamp>*.md) are preserved through the move — История's reconcile
+// identity depends on it (backend.py's _iter_vault_notes/_reconcile). This REPLACES the
+// old scheme (accumulate the LLM's distilled extract into one root/<category>/
+// <project>.md, archive the raw note separately into Archives/Исходные встречи) —
+// SEMANTIC CHANGE, see the commit/report: chronology now comes for free from the
+// stamp-sorted basenames, so no separate accumulator file is written anymore.
+// `extracted`/`title` are still sent by the renderer (computed via para-extract before
+// calling this) but are no longer used by this handler — kept out of the destructure
+// below since nothing here reads them.
+ipcMain.handle("para-file", async (_e, { note, audio, category, project, kind, person, mission, stamp, root, folders }) => {
   // Unlike para-classify/para-extract/classify-glossary-terms, this handler never
   // spawns runBackend() (no pythonBin() involved) — its actual race is a concurrent
   // reprocess (procProc) rewriting the SAME note/audio path this handler is about to
@@ -2287,30 +2307,33 @@ ipcMain.handle("para-file", async (_e, { note, audio, category, project, extract
     }
   }
   try {
-    const folder = (folders && folders[category]) || category;
-    const proj = (project || "").trim().replace(/[/\\:]/g, "-") || "Без названия";
-    const accum = path.join(resolvedRoot, folder, proj + ".md");
-    fs.mkdirSync(path.dirname(accum), { recursive: true });
-    if (!fs.existsSync(accum)) fs.writeFileSync(accum, `# ${proj}\n`);
-    // heading date = the meeting date from the file stamp (meeting-YYYY-MM-DD-…),
-    // not the extraction date; title appended only when there is a real one.
-    const m = String(stamp || note || "").match(/(\d{4}-\d{2}-\d{2})/);
-    const date = m ? m[1] : new Date().toISOString().slice(0, 10);
-    const t = (title || "").trim();
-    const heading = t ? `## ${date} — ${t}` : `## ${date}`;
-    fs.appendFileSync(accum, `\n\n${heading}\n\n${(extracted || "").trim()}\n`);
+    const destSegments = paraDestinationDir({ category, folders, project, kind, person, mission, stamp: stamp || note });
+    const destDir = path.join(resolvedRoot, ...destSegments);
+    // Containment re-check of the FINAL computed destination (analyzer: the old accum
+    // path was built off resolvedRoot but never re-verified itself). destSegments are
+    // already sanitized per-segment (paraDestinationDir strips "/", "\\", leading dots),
+    // but this is the actual enforcement boundary — belt-and-suspenders against any
+    // future change to the builder, not a realpath (destDir doesn't exist yet on a
+    // first file into a new folder; isPathInsideRoots/isOutsideRoot are pure string
+    // checks, no fs access), so it's safe to run before mkdirSync below creates it.
+    if (!isPathInsideRoots(destDir, [resolvedRoot])) {
+      return { ok: false, error: "Вычисленный путь назначения вне PARA-корня" };
+    }
+    fs.mkdirSync(destDir, { recursive: true });
 
-    // archive the raw source (note + audio) out of the Meetings inbox
-    const archiveDir = path.join(resolvedRoot, (folders && folders.archives) || "Archives", "Исходные встречи");
-    fs.mkdirSync(archiveDir, { recursive: true });
+    // Move the RAW note + its audio into the classified folder, preserving their own
+    // basenames — История's reconcile identity (meeting-<stamp>*.md, backend.py's
+    // _iter_vault_notes/_reconcile, locked by test_backend.py:552-618) must survive
+    // any move.
     const mv = (src) => {
-      if (!src || !fs.existsSync(src)) return;
-      const d = path.join(archiveDir, path.basename(src));
+      if (!src || !fs.existsSync(src)) return null;
+      const d = path.join(destDir, path.basename(src));
       try { fs.renameSync(src, d); } catch { fs.copyFileSync(src, d); fs.unlinkSync(src); }
+      return d;
     };
-    mv(note);
+    const noteDest = mv(note);
     mv(audio);
-    return { ok: true, dest: accum };
+    return { ok: true, dest: noteDest || destDir };
   } catch (e) { return { ok: false, error: String((e && e.message) || e) }; }
 });
 

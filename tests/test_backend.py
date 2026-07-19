@@ -710,6 +710,98 @@ def test_cmd_classify_rejects_bad_category(monkeypatch, tmp_path):
     assert any(e["event"] == "error" for e in events), f"expected error event, got: {events}"
 
 
+# ── cmd_classify kind/person/mission sub-classification (T4-T6, ux-para-batch —
+# PARA folder-hierarchy filing needs to distinguish one-to-ones and mission dailies
+# from ordinary projects) ───────────────────────────────────────────────────────
+def test_cmd_classify_projects_kind_one_to_one_carries_person(monkeypatch, tmp_path):
+    note = tmp_path / "n.md"; note.write_text("синк с Ильшатом", encoding="utf-8")
+    install_fake_requests(monkeypatch, payload={"choices": [{"message": {"content":
+        '{"category":"projects","project":"Ильшат","kind":"one_to_one","person":"Ильшат"}'}}]})
+    ev = [e for e in capture(backend.cmd_classify, str(note)) if e["event"] == "classified"][0]
+    assert ev["kind"] == "one_to_one" and ev["person"] == "Ильшат" and ev["mission"] == ""
+
+
+def test_cmd_classify_projects_kind_mission_daily_carries_mission(monkeypatch, tmp_path):
+    note = tmp_path / "n.md"; note.write_text("дейли по миссии X", encoding="utf-8")
+    install_fake_requests(monkeypatch, payload={"choices": [{"message": {"content":
+        '{"category":"projects","project":"X","kind":"mission_daily","mission":"X"}'}}]})
+    ev = [e for e in capture(backend.cmd_classify, str(note)) if e["event"] == "classified"][0]
+    assert ev["kind"] == "mission_daily" and ev["mission"] == "X" and ev["person"] == ""
+
+
+def test_cmd_classify_kind_defaults_to_other_when_llm_omits_it(monkeypatch, tmp_path):
+    note = tmp_path / "n.md"; note.write_text("проект лендинг", encoding="utf-8")
+    install_fake_requests(monkeypatch, payload={"choices": [{"message": {
+        "content": '{"category":"projects","project":"Лендинг"}'}}]})
+    ev = [e for e in capture(backend.cmd_classify, str(note)) if e["event"] == "classified"][0]
+    assert ev["kind"] == "other" and ev["person"] == "" and ev["mission"] == ""
+
+
+def test_cmd_classify_one_to_one_without_person_downgrades_to_other(monkeypatch, tmp_path):
+    # Hard code gate (mirrors the category gate / PR #13 pattern): a claimed one_to_one
+    # with no person name is not trustworthy enough to build a "один-на-один с <person>"
+    # folder from — downgrade rather than file under a blank name.
+    note = tmp_path / "n.md"; note.write_text("x", encoding="utf-8")
+    install_fake_requests(monkeypatch, payload={"choices": [{"message": {"content":
+        '{"category":"projects","project":"P","kind":"one_to_one","person":""}'}}]})
+    ev = [e for e in capture(backend.cmd_classify, str(note)) if e["event"] == "classified"][0]
+    assert ev["kind"] == "other" and ev["person"] == ""
+
+
+def test_cmd_classify_mission_daily_without_mission_downgrades_to_other(monkeypatch, tmp_path):
+    note = tmp_path / "n.md"; note.write_text("x", encoding="utf-8")
+    install_fake_requests(monkeypatch, payload={"choices": [{"message": {"content":
+        '{"category":"projects","project":"P","kind":"mission_daily","mission":""}'}}]})
+    ev = [e for e in capture(backend.cmd_classify, str(note)) if e["event"] == "classified"][0]
+    assert ev["kind"] == "other" and ev["mission"] == ""
+
+
+def test_cmd_classify_kind_ignored_for_non_projects_category(monkeypatch, tmp_path):
+    # kind/person/mission only ever mean something for category=="projects" — a
+    # non-projects category must never carry them through, even if the LLM's JSON
+    # (invalidly) includes them.
+    note = tmp_path / "n.md"; note.write_text("x", encoding="utf-8")
+    install_fake_requests(monkeypatch, payload={"choices": [{"message": {"content":
+        '{"category":"areas","project":"P","kind":"one_to_one","person":"Ильшат"}'}}]})
+    ev = [e for e in capture(backend.cmd_classify, str(note)) if e["event"] == "classified"][0]
+    assert ev["category"] == "areas" and ev["kind"] == "" and ev["person"] == "" and ev["mission"] == ""
+
+
+def test_cmd_classify_invalid_kind_value_coerced_to_other(monkeypatch, tmp_path):
+    note = tmp_path / "n.md"; note.write_text("x", encoding="utf-8")
+    install_fake_requests(monkeypatch, payload={"choices": [{"message": {"content":
+        '{"category":"projects","project":"P","kind":"weird"}'}}]})
+    ev = [e for e in capture(backend.cmd_classify, str(note)) if e["event"] == "classified"][0]
+    assert ev["kind"] == "other"
+
+
+# ── cmd_classify language pin (T7, ux-para-batch — mirrors generate_title's own
+# ru/en pin so project/person/mission come back in the meeting's own language) ──
+def test_cmd_classify_language_ru_pins_system_message(monkeypatch, tmp_path):
+    note = tmp_path / "n.md"; note.write_text("x", encoding="utf-8")
+    calls = install_fake_requests(monkeypatch, payload={"choices": [{"message": {
+        "content": '{"category":"projects","project":"P"}'}}]})
+    capture(backend.cmd_classify, str(note), "", "", "ru")
+    assert "русском" in calls["json"]["messages"][0]["content"]
+
+
+def test_cmd_classify_language_en_pins_system_message(monkeypatch, tmp_path):
+    note = tmp_path / "n.md"; note.write_text("x", encoding="utf-8")
+    calls = install_fake_requests(monkeypatch, payload={"choices": [{"message": {
+        "content": '{"category":"projects","project":"P"}'}}]})
+    capture(backend.cmd_classify, str(note), "", "", "en")
+    assert "English" in calls["json"]["messages"][0]["content"]
+
+
+def test_cmd_classify_no_language_arg_leaves_system_message_unpinned(monkeypatch, tmp_path):
+    note = tmp_path / "n.md"; note.write_text("x", encoding="utf-8")
+    calls = install_fake_requests(monkeypatch, payload={"choices": [{"message": {
+        "content": '{"category":"projects","project":"P"}'}}]})
+    capture(backend.cmd_classify, str(note))
+    msg = calls["json"]["messages"][0]["content"]
+    assert "русском" not in msg and "English" not in msg
+
+
 # ── cmd_classify_terms (Словарь tab's «Разложить по категориям» — glossary
 # «Мои» auto-classification into the fixed GLOSSARY_TERM_CATEGORIES buckets) ──
 def test_cmd_classify_terms_happy_path(monkeypatch, tmp_path):

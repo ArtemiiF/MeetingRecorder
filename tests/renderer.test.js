@@ -1877,6 +1877,93 @@ test("mainModel is forwarded to paraClassify during classify-all", async () => {
   assert.equal(capturedArg.mainModel, "qwen/qwen3.5-9b");
 });
 
+// ── T4-T6/T7 (ux-para-batch): kind/person/mission classification + language pin
+// threaded from paraClassify through to paraFile ────────────────────────────────
+test("language is forwarded to paraClassify during classify-all (T7 — project/person/mission answer in the meeting's own language)", async () => {
+  let capturedArg = null;
+  const { window, $ } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru",
+      para: { root: "/v", folders: { projects: "Projects", areas: "Areas", resources: "Resources", archives: "Archives" } },
+    }),
+    listHistory: async () => [{ name: "2026-01-01", title: "T", note: "/n.md", audio: null }],
+    paraClassify: async (arg) => { capturedArg = arg; return { category: "projects", project: "P" }; },
+    paraFile: async () => ({ ok: true }),
+  });
+  window.document.querySelector('.topbtn[data-view="para"]').click();
+  await tick(window);
+  $("paraClassifyAll").click();
+  await tick(window); await tick(window); await tick(window); await tick(window);
+  assert.ok(capturedArg, "paraClassify was not called");
+  assert.equal(capturedArg.language, "ru");
+});
+
+test("classify-all: kind/person/mission from paraClassify's result are threaded through to paraFile", async () => {
+  let filedArg = null;
+  const { window, $ } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru",
+      para: { root: "/v", folders: { projects: "Projects", areas: "Areas", resources: "Resources", archives: "Archives" } },
+    }),
+    listHistory: async () => [{ name: "2026-01-01", title: "T", note: "/n.md", audio: null }],
+    paraClassify: async () => ({ category: "projects", project: "Ильшат", kind: "one_to_one", person: "Ильшат", mission: "" }),
+    paraFile: async (arg) => { filedArg = arg; return { ok: true }; },
+  });
+  window.document.querySelector('.topbtn[data-view="para"]').click();
+  await tick(window);
+  $("paraClassifyAll").click();
+  await tick(window); await tick(window); await tick(window); await tick(window);
+  assert.ok(filedArg, "paraFile was not called");
+  assert.equal(filedArg.kind, "one_to_one");
+  assert.equal(filedArg.person, "Ильшат");
+});
+
+test("single-row 'Разложить' (auto-classify branch): kind/person/mission from paraClassify are threaded through to paraFile", async () => {
+  let filedArg = null;
+  const { window, $ } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru",
+      para: { root: "/v", folders: { projects: "Projects", areas: "Areas", resources: "Resources", archives: "Archives" } },
+    }),
+    listHistory: async () => [{ name: "2026-01-01", title: "T", note: "/n.md", audio: null }],
+    paraClassify: async () => ({ category: "projects", project: "X", kind: "mission_daily", person: "", mission: "X" }),
+    paraFile: async (arg) => { filedArg = arg; return { ok: true }; },
+  });
+  window.document.querySelector('.topbtn[data-view="para"]').click();
+  await tick(window);
+  const row = $("paraInbox").querySelector(".para-row");
+  row.querySelector(".para-file-btn").click();
+  await tick(window); await tick(window); await tick(window); await tick(window);
+  assert.ok(filedArg, "paraFile was not called");
+  assert.equal(filedArg.kind, "mission_daily");
+  assert.equal(filedArg.mission, "X");
+});
+
+test("single-row 'Разложить' with a manually-picked category: paraFile gets no kind/person/mission opinion (no classify call happened)", async () => {
+  let filedArg = null;
+  let classifyCalled = false;
+  const { window, $ } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru",
+      para: { root: "/v", folders: { projects: "Projects", areas: "Areas", resources: "Resources", archives: "Archives" } },
+    }),
+    listHistory: async () => [{ name: "2026-01-01", title: "T", note: "/n.md", audio: null }],
+    paraClassify: async () => { classifyCalled = true; return { category: "projects", project: "P" }; },
+    paraFile: async (arg) => { filedArg = arg; return { ok: true }; },
+  });
+  window.document.querySelector('.topbtn[data-view="para"]').click();
+  await tick(window);
+  const row = $("paraInbox").querySelector(".para-row");
+  row.querySelector(".para-cat").value = "projects";
+  row.querySelector(".para-proj").value = "Ручной проект";
+  row.querySelector(".para-file-btn").click();
+  await tick(window); await tick(window); await tick(window); await tick(window);
+  assert.equal(classifyCalled, false, "a manually-picked category must not trigger an LLM classify call");
+  assert.ok(filedArg, "paraFile was not called");
+  assert.equal(filedArg.kind, undefined);
+  assert.equal(filedArg.project, "Ручной проект");
+});
+
 test("mainModel is forwarded to paraSearch when asking a question", async () => {
   let capturedMainModel;
   const { window, $ } = await boot({
@@ -3287,9 +3374,12 @@ test("main.js: para-file validates root against the server's OWN configured PARA
   assert.match(paraFile, /const configuredVaultRoot = readParaRoot\(\);/);
   assert.match(paraFile, /isPathInsideRoots\(resolvedRoot, \[configuredVaultRoot\]\.filter\(Boolean\)\)/);
   assert.match(paraFile, /isPathInsideRoots\(resolvedSrc, srcRoots\)/);
-  // write destinations must be built off the VALIDATED resolvedRoot, not the raw arg
-  assert.match(paraFile, /path\.join\(resolvedRoot, folder, proj \+ "\.md"\)/);
-  assert.match(paraFile, /path\.join\(resolvedRoot, \(folders && folders\.archives\)/);
+  // write destination must be built off the VALIDATED resolvedRoot, not the raw arg
+  // (T4-T6, ux-para-batch: folder-hierarchy builder replaces the old flat accum path),
+  // and the FINAL computed destDir gets its own containment re-check before mkdirSync.
+  assert.match(paraFile, /paraDestinationDir\(\{ category, folders, project, kind, person, mission, stamp: stamp \|\| note \}\)/);
+  assert.match(paraFile, /path\.join\(resolvedRoot, \.\.\.destSegments\)/);
+  assert.match(paraFile, /if \(!isPathInsideRoots\(destDir, \[resolvedRoot\]\)\)/);
 });
 
 test("main.js: list-lm-models IPC GETs LM Studio's /api/v0/models with a 3s timeout, filters out embeddings, and degrades to [] on failure", () => {

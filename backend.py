@@ -1836,11 +1836,19 @@ def cmd_history(out_dir, db_path, vault_root=None):
     emit("history", items=items, audios=audios)
 
 
-def cmd_classify(note_path, existing_json="", main_model=""):
+def cmd_classify(note_path, existing_json="", main_model="", language=""):
     """Classify a meeting note into a PARA category + project name via the LLM.
     existing_json: optional JSON {category: [project names]} of accumulators that already
     exist — the model is told to REUSE a matching one instead of inventing a sibling,
-    which is what fights the 'one topic scattered across 5 files' fragmentation."""
+    which is what fights the 'one topic scattered across 5 files' fragmentation.
+
+    For category=="projects" also asks the LLM for a `kind` sub-classification
+    (ux-para-batch T4-T6, folder-hierarchy filing): one_to_one (+ person) for a
+    recurring 1:1 with a named person, mission_daily (+ mission) for a recurring
+    "миссия" daily-sync, else other. language mirrors generate_title's own ru/en pin
+    (backend.py's Pipeline.generate_title) — otherwise the model tends to answer in
+    whatever language its own instructions are written in (Russian) regardless of the
+    meeting's actual language."""
     import requests
     import re
     import json
@@ -1862,17 +1870,28 @@ def cmd_classify(note_path, existing_json="", main_model=""):
                 "\nЕсли заметка относится к одному из них — верни ТОЧНО эту category и "
                 "project (имя из списка дословно). Только если ничего не подходит — новый project.\n")
     try:
+        system_msg = "Ты раскладываешь заметки по методу PARA. Отвечай только JSON."
+        if language == "ru":
+            system_msg += " Отвечай на русском языке (project/person/mission — тоже по-русски)."
+        elif language == "en":
+            system_msg += " Answer in English."
         payload = {
             "messages": [
-                {"role": "system", "content": "Ты раскладываешь заметки по методу PARA. Отвечай только JSON."},
+                {"role": "system", "content": system_msg},
                 {"role": "user", "content":
                     "Классифицируй заметку встречи по PARA:\n"
-                    "- projects: активная задача с целью/дедлайном\n"
+                    "- projects: активная задача с целью/дедлайном. Если это регулярная личная "
+                    "встреча один-на-один с конкретным человеком — kind=\"one_to_one\" и укажи "
+                    "person (имя этого человека). Если это часть повторяющейся инициативы "
+                    "(«миссии») с ежедневными синками — kind=\"mission_daily\" и укажи mission "
+                    "(короткое название миссии). Иначе kind=\"other\".\n"
                     "- areas: постоянная зона ответственности\n"
                     "- resources: тема/референс на будущее\n"
                     "- archives: неактуальное/завершённое\n"
                     + existing_block +
-                    'Ответь JSON: {"category":"projects|areas|resources|archives","project":"короткое имя 2-4 слова"}.\n\n'
+                    'Ответь JSON: {"category":"projects|areas|resources|archives","project":"короткое имя 2-4 слова",'
+                    '"kind":"one_to_one|mission_daily|other","person":"имя (только если kind=one_to_one)",'
+                    '"mission":"название миссии (только если kind=mission_daily)"}.\n\n'
                     f"ЗАМЕТКА:\n{text}"},
             ],
             "temperature": 0.2, "max_tokens": 2500,
@@ -1884,12 +1903,14 @@ def cmd_classify(note_path, existing_json="", main_model=""):
             msg = (resp.json().get("choices") or [{}])[0].get("message", {})
             c = (msg.get("content") or "") or (msg.get("reasoning_content") or "")
             # The model may echo the prompt's TEMPLATE json ({"category":"projects|areas|
-            # resources|archives","project":"короткое имя 2-4 слова"}) inside its reasoning.
-            # Scan ALL json objects, take the LAST whose category is a real single value —
-            # the template's pipe-category fails that test, so it is skipped automatically.
+            # resources|archives","project":"короткое имя 2-4 слова", ...}) inside its
+            # reasoning. Scan ALL json objects, take the LAST whose category is a real
+            # single value — the template's pipe-category fails that test, so it is
+            # skipped automatically.
             VALID = ("projects", "areas", "resources", "archives")
+            VALID_KIND = ("one_to_one", "mission_daily", "other")
             PLACEHOLDER = "короткое имя 2-4 слова"
-            cat, project = "", ""
+            cat, project, kind, person, mission = "", "", "", "", ""
             for cand in reversed(re.findall(r"\{[^{}]*\}", c, re.S)):
                 try:
                     data = json.loads(cand)
@@ -1901,9 +1922,30 @@ def cmd_classify(note_path, existing_json="", main_model=""):
                 cat = cc
                 pp = str(data.get("project", "")).strip()
                 project = "" if pp.lower() == PLACEHOLDER else pp
+                kk = str(data.get("kind", "")).lower().strip()
+                kind = kk if kk in VALID_KIND else "other"
+                person = str(data.get("person", "")).strip()
+                mission = str(data.get("mission", "")).strip()
                 break
             if cat:
-                emit("classified", note=note_path, category=cat, project=project[:60])
+                # Hard code gate (mirrors the category gate above / the PR #13 pattern:
+                # inventions dropped, unknown → other) — kind/person/mission only ever
+                # mean something for category=="projects", and a claimed one_to_one/
+                # mission_daily without its required name is downgraded to "other"
+                # rather than trusted as-is.
+                if cat != "projects":
+                    kind, person, mission = "", "", ""
+                else:
+                    if kind == "one_to_one" and not person:
+                        kind = "other"
+                    if kind == "mission_daily" and not mission:
+                        kind = "other"
+                if kind != "one_to_one":
+                    person = ""
+                if kind != "mission_daily":
+                    mission = ""
+                emit("classified", note=note_path, category=cat, project=project[:60],
+                     kind=kind, person=person[:60], mission=mission[:60])
                 return
         emit("error", msg="LLM не вернул классификацию (LM Studio запущен?)")
     except Exception as e:
@@ -2011,10 +2053,15 @@ def cmd_classify_terms(terms_file, fast_model=""):
 
 def cmd_extract(note_path):
     """Distil a meeting note into structured knowledge sections (темы / факты /
-    обсуждения / инсайты / договорённости / прочее) that get appended into a living
-    accumulator file (e.g. «1-1 с Имя.md»). Returns ready Markdown, no date heading —
-    the caller stamps the date. Reasoning models burn the token budget on 'thinking'
-    so content can come back empty → salvage from reasoning_content."""
+    обсуждения / инсайты / договорённости / прочее). Historically this fed a living
+    per-project accumulator file (e.g. «1-1 с Имя.md») that main.js's para-file handler
+    appended it into; since the ux-para-batch folder-hierarchy filing change, para-file
+    moves the RAW note itself instead and no longer writes this extract anywhere — the
+    renderer still calls this first (para-extract IPC) and gates filing on it succeeding,
+    so it's kept as-is here (unaffected either way: the LLM is never told about an
+    accumulator, see the prompt below). Returns ready Markdown, no date heading. Reasoning
+    models burn the token budget on 'thinking' so content can come back empty → salvage
+    from reasoning_content."""
     import requests
     import re
     try:
@@ -2830,6 +2877,9 @@ def main():
     p_cls.add_argument("--existing", default="")  # JSON {category: [names]} for reuse
     # Main model override for this substantive task — see Pipeline.MAIN_MODEL.
     p_cls.add_argument("--main-model", dest="main_model", default="")
+    # Language pin for project/person/mission text (T7, ux-para-batch) — mirrors
+    # generate_title's own ru/en pin (Pipeline.generate_title).
+    p_cls.add_argument("--language", default="")
 
     p_ext = sub.add_parser("extract")
     p_ext.add_argument("--note", required=True)
@@ -2917,7 +2967,7 @@ def main():
     elif args.cmd == "download-models":
         cmd_download_models(args.only)
     elif args.cmd == "classify":
-        cmd_classify(args.note, args.existing, args.main_model)
+        cmd_classify(args.note, args.existing, args.main_model, args.language)
     elif args.cmd == "extract":
         cmd_extract(args.note)
     elif args.cmd == "classify-terms":

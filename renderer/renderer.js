@@ -3433,7 +3433,10 @@ $("paraClassifyAll").addEventListener("click", async () => {
     paraLog(`→ ${name}`);
     setRowProcessing(row, true);
     try {
-      const r = await window.api.paraClassify({ note: it.note, root: state.para.root, folders: state.para.folders, mainModel: state.mainModel });
+      const r = await window.api.paraClassify({
+        note: it.note, root: state.para.root, folders: state.para.folders,
+        mainModel: state.mainModel, language: state.language,
+      });
       if (!r || r.error || !r.category) {
         paraLog(`   ✗ не классифицирована: ${(r && r.error) || "категория не определена"}`);
         errors++;
@@ -3442,7 +3445,9 @@ $("paraClassifyAll").addEventListener("click", async () => {
       }
       row.querySelector(".para-cat").value = r.category;
       row.querySelector(".para-proj").value = r.project || "";
-      // distil knowledge sections, then append into the accumulator + archive the raw note
+      // distil a preview (still shown to the user via extract) — para-file itself now
+      // moves the raw note+audio into the classified folder (T4-T6), it no longer
+      // writes the extract anywhere.
       const ex = await window.api.paraExtract(it.note);
       if (!ex || ex.error || !ex.content) {
         paraLog(`   ✗ ${r.category} подобрана, но выжимка не извлечена: ${(ex && ex.error) || "пусто"}`);
@@ -3452,6 +3457,7 @@ $("paraClassifyAll").addEventListener("click", async () => {
       }
       const res = await window.api.paraFile({
         note: it.note, audio: it.audio, category: r.category, project: r.project || "",
+        kind: r.kind, person: r.person, mission: r.mission,
         extracted: ex.content, title: it.title || "", stamp: it.name,
         root: state.para.root, folders: state.para.folders,
       });
@@ -3503,6 +3509,10 @@ async function fileParaRow(idx, row) {
   const it = paraInboxItems[idx];
   let category = row.querySelector(".para-cat").value;
   let project = row.querySelector(".para-proj").value.trim();
+  // Only ever populated by the auto-classify branch below (T4-T6) — a manually-picked
+  // category/project (no LLM call) has no kind/person/mission opinion, and
+  // paraDestinationDir already treats that as "other" (files under <Projects>/<project>).
+  let kind, person, mission;
   const btn = row.querySelector(".para-file-btn");
   const prev = btn.textContent;
   btn.disabled = true;
@@ -3510,13 +3520,17 @@ async function fileParaRow(idx, row) {
     // No category picked — auto-classify via the same LLM path paraClassifyAll uses
     // (the paraClassify call inside paraClassifyAll above) instead of blocking with an alert.
     btn.textContent = "Категоризирую…";
-    const cl = await window.api.paraClassify({ note: it.note, root: state.para.root, folders: state.para.folders, mainModel: state.mainModel });
+    const cl = await window.api.paraClassify({
+      note: it.note, root: state.para.root, folders: state.para.folders,
+      mainModel: state.mainModel, language: state.language,
+    });
     if (!cl || cl.error || !cl.category) {
       alert("Не удалось определить категорию автоматически — выбери вручную: " + ((cl && cl.error) || "категория не определена"));
       btn.disabled = false; btn.textContent = prev; return;
     }
     category = cl.category;
     row.querySelector(".para-cat").value = category;
+    kind = cl.kind; person = cl.person; mission = cl.mission;
     // Keep a user-entered project as-is; only fill from classify if the field was empty.
     if (!project && cl.project) {
       project = cl.project;
@@ -3530,7 +3544,7 @@ async function fileParaRow(idx, row) {
     btn.disabled = false; btn.textContent = prev; return;
   }
   const res = await window.api.paraFile({
-    note: it.note, audio: it.audio, category, project,
+    note: it.note, audio: it.audio, category, project, kind, person, mission,
     extracted: ex.content, title: it.title || "", stamp: it.name,
     root: state.para.root, folders: state.para.folders,
   });
@@ -3538,7 +3552,7 @@ async function fileParaRow(idx, row) {
     alert("Не удалось разложить: " + res.error);
     btn.disabled = false; btn.textContent = prev; return;
   }
-  markRowFiled(row); // distilled + archived — grey/disabled in place, same as the bulk path
+  markRowFiled(row); // filed into its classified folder — grey/disabled in place, same as the bulk path
 }
 
 function showResult(ev) {
