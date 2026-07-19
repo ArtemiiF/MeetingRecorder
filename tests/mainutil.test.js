@@ -8,7 +8,7 @@ const {
   buildWavHeader, WavWriter, rmsLevel, cacheKey, contentFingerprint, isFileStable,
   pairHistory, encodeTokenBlob, decodeTokenBlob, isStale,
   rewriteNoteSpeakers, isOutsideRoot, isNoteDeletable, indexRunReducer, upsertById, diskGuardVerdict, busyVerdict,
-  isPathInsideRoots,
+  isPathInsideRoots, paraDestinationDir,
   isAudioDeletable, trashRootFor, trashDestPath, moveToTrash, purgeTrash,
   isTrashAudioFile, trashDaysLeft, buildTrashEntry, restoreDestinationFor, restoreTrashFiles,
   deleteTrashEntryFiles, trashEntryBreakdown,
@@ -394,7 +394,7 @@ test("isOutsideRoot: no dir → false", () => {
 
 // ── isPathInsideRoots (general path containment, H2 arch-audit) ─────────────
 // General-purpose primitive behind isNoteDeletable/isAudioDeletable below —
-// main.js's read-note/rename-speakers/reveal/para-extract/para-classify/
+// main.js's read-note/rename-speakers/reveal/para-classify/
 // para-file handlers validate renderer-supplied paths against it directly
 // (no .md/audio-extension requirement, unlike the deletion-specific wrappers).
 test("isPathInsideRoots: path inside out_dir (single root) is inside", () => {
@@ -1197,4 +1197,79 @@ test("trashEntryBreakdown: a missing (statSync-throwing) file contributes NOTHIN
 test("trashEntryBreakdown: empty/non-array files → all zeros, never throws", () => {
   assert.deepEqual(trashEntryBreakdown([], {}), { audioBytes: 0, noteBytes: 0, noteCount: 0, bytes: 0 });
   assert.deepEqual(trashEntryBreakdown(undefined, {}), { audioBytes: 0, noteBytes: 0, noteCount: 0, bytes: 0 });
+});
+
+// ── paraDestinationDir (T4-T6, ux-para-batch — PARA folder-hierarchy filing) ────────
+// Pure builder: no fs, no regression-guarded accumulator behavior — see main.js's
+// para-file handler for how this feeds the actual move + the mkdirSync/containment
+// re-check around it.
+const FOLDERS = { projects: "Projects", areas: "Areas", resources: "Resources", archives: "Archives" };
+
+test("paraDestinationDir: archives/areas/resources file under <CategoryFolder>/<год>/<месяц>", () => {
+  assert.deepEqual(
+    paraDestinationDir({ category: "archives", folders: FOLDERS, stamp: "2026-07-19-100000" }),
+    ["Archives", "2026", "07"]);
+  assert.deepEqual(
+    paraDestinationDir({ category: "areas", folders: FOLDERS, stamp: "2026-01-05-090000" }),
+    ["Areas", "2026", "01"]);
+  assert.deepEqual(
+    paraDestinationDir({ category: "resources", folders: FOLDERS, stamp: "2026-12-31-235959" }),
+    ["Resources", "2026", "12"]);
+});
+
+test("paraDestinationDir: projects/one_to_one files under <Projects>/один-на-один с <person>", () => {
+  assert.deepEqual(
+    paraDestinationDir({ category: "projects", folders: FOLDERS, kind: "one_to_one", person: "Ильшат", stamp: "2026-07-19-100000" }),
+    ["Projects", "один-на-один с Ильшат"]);
+});
+
+test("paraDestinationDir: projects/mission_daily files under <Projects>/миссии/<год>. миссия <mission>", () => {
+  assert.deepEqual(
+    paraDestinationDir({ category: "projects", folders: FOLDERS, kind: "mission_daily", mission: "Спринт", stamp: "2026-07-19-100000" }),
+    ["Projects", "миссии", "2026. миссия Спринт"]);
+});
+
+test("paraDestinationDir: projects/other (or missing kind) files under <Projects>/<project> — per-project folder", () => {
+  assert.deepEqual(
+    paraDestinationDir({ category: "projects", folders: FOLDERS, kind: "other", project: "Лендинг", stamp: "2026-07-19-100000" }),
+    ["Projects", "Лендинг"]);
+  assert.deepEqual(
+    paraDestinationDir({ category: "projects", folders: FOLDERS, project: "Лендинг", stamp: "2026-07-19-100000" }),
+    ["Projects", "Лендинг"], "kind omitted entirely (e.g. manual category pick, no LLM classify) falls back to other");
+});
+
+test("paraDestinationDir: missing project name falls back to 'Без названия', never an empty segment", () => {
+  assert.deepEqual(
+    paraDestinationDir({ category: "projects", folders: FOLDERS, project: "", stamp: "2026-07-19-100000" }),
+    ["Projects", "Без названия"]);
+});
+
+test("paraDestinationDir: missing/malformed stamp falls back to a 'без даты' bucket instead of throwing or producing an empty segment", () => {
+  assert.deepEqual(
+    paraDestinationDir({ category: "archives", folders: FOLDERS, stamp: "not-a-stamp" }),
+    ["Archives", "без даты", "без даты"]);
+  assert.deepEqual(
+    paraDestinationDir({ category: "archives", folders: FOLDERS }),
+    ["Archives", "без даты", "без даты"]);
+});
+
+test("paraDestinationDir: every segment is sanitized separately — a '/' or '\\\\' in project/person/mission can only widen one folder name, never inject a path separator", () => {
+  assert.deepEqual(
+    paraDestinationDir({ category: "projects", folders: FOLDERS, project: "a/b\\c:d", stamp: "2026-07-19-100000" }),
+    ["Projects", "a-b-c-d"]);
+  assert.deepEqual(
+    paraDestinationDir({ category: "projects", folders: FOLDERS, kind: "one_to_one", person: "../../etc", stamp: "2026-07-19-100000" }),
+    ["Projects", "один-на-один с ..-..-etc"]);
+});
+
+test("paraDestinationDir: a leading-dot project/person/mission can't produce a hidden (dot-prefixed) folder — История's vault walk skips dot-dirs", () => {
+  assert.deepEqual(
+    paraDestinationDir({ category: "projects", folders: FOLDERS, project: "...secret", stamp: "2026-07-19-100000" }),
+    ["Projects", "secret"]);
+});
+
+test("paraDestinationDir: missing folders map falls back to the raw category key as the folder name", () => {
+  assert.deepEqual(
+    paraDestinationDir({ category: "archives", stamp: "2026-07-19-100000" }),
+    ["archives", "2026", "07"]);
 });

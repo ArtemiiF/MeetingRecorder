@@ -1361,9 +1361,11 @@ function buildPendingRow(item, idx) {
   if (canProcess) {
     // Closure over idx only (never the item's name/paths) — same rationale as
     // renderImportQueue's retry button: no user/LLM string in an HTML attribute.
+    // T1 redesign: labeled to match the explicit-actions style used elsewhere in the
+    // rail now (rail-action-btn sizing only — behaviour/handler untouched).
     const playBtn = document.createElement("button");
-    playBtn.className = "btn small pending-play-btn queue-retry-btn";
-    playBtn.textContent = "▶";
+    playBtn.className = "btn small rail-action-btn pending-play-btn queue-retry-btn";
+    playBtn.textContent = "▶ Обработать";
     playBtn.title = "Обработать";
     playBtn.addEventListener("click", () => processPendingRecording(idx));
     row.appendChild(playBtn);
@@ -2262,8 +2264,14 @@ function buildNotesRecordingRow(rec) {
       // code (L9 arch-audit): only the old solitary flat row, retired by the
       // audio-first rail, ever called it. The design reference (history-audio-a.html)
       // doesn't show a source icon on обработка rows either.
-      return `<button type="button" class="rail-item rail-version-row">` +
-        `<span class="rail-title">${escapeHtml(tmpl || "Без шаблона")} · v${v}${latest}</span></button>`;
+      // T1 redesign (history-buttons-a.html вариант A): the row itself keeps the
+      // selectNote click listener (unchanged below — same element, same dataset.idx
+      // discipline), but now also carries a 🗑 delete button — deleteHistoryNote's
+      // existing flow (previously reachable only via the opened note's nvDelete),
+      // stopPropagation'd so it doesn't also fire selectNote on the same click.
+      return `<div class="rail-item rail-version-row">` +
+        `<span class="rail-title">${escapeHtml(tmpl || "Без шаблона")} · v${v}${latest}</span>` +
+        `<button type="button" class="rail-version-del" title="Удалить заметку (в корзину)">🗑</button></div>`;
     }).join("");
   }).join("");
 
@@ -2274,9 +2282,12 @@ function buildNotesRecordingRow(rec) {
   const metaText = [time, dur].filter(Boolean).join(" · ");
   wrap.innerHTML =
     `<button type="button" class="rail-group-header">` +
-    `<span class="glossary-caret">${collapsed ? "▸" : "▾"}</span> 🎙 ${escapeHtml(title)}</button>` +
-    `<div class="rail-rec-meta">${escapeHtml(metaText)}${recordingBadge("notes", notes.length)}` +
-    `<button type="button" class="btn small ghost rec-trash-btn" title="Удалить (в корзину)">✕</button></div>` +
+    `<span class="glossary-caret">${collapsed ? "▸" : "▾"}</span>` +
+    `<span class="rail-group-title">🎙 ${escapeHtml(title)}</span></button>` +
+    `<div class="rail-rec-meta"><span class="rail-rec-meta-text">${escapeHtml(metaText)}</span>${recordingBadge("notes", notes.length)}</div>` +
+    `<div class="rail-actions">` +
+    `<button type="button" class="btn small rail-action-btn danger rec-trash-btn" title="Удалить (в корзину)">🗑 В корзину</button>` +
+    `</div>` +
     `<div class="rail-group-versions${collapsed ? " hidden" : ""}">${rowsHtml}</div>`;
 
   wrap.querySelector(".rail-group-header").addEventListener("click", () => {
@@ -2284,10 +2295,15 @@ function buildNotesRecordingRow(rec) {
     else historyGroupCollapsed.add(rec.baseStamp);
     renderRail();
   });
-  wrap.querySelectorAll(".rail-version-row").forEach((btn, i) => {
+  wrap.querySelectorAll(".rail-version-row").forEach((row, i) => {
     const idx = historyItems.indexOf(rowOrder[i]);
-    btn.dataset.idx = idx; // selectNote's `.rail-item` active-highlight match relies on this
-    btn.addEventListener("click", () => selectNote(idx));
+    row.dataset.idx = idx; // selectNote's `.rail-item` active-highlight match relies on this
+    row.addEventListener("click", () => selectNote(idx));
+    const delBtn = row.querySelector(".rail-version-del");
+    delBtn.addEventListener("click", (e) => {
+      e.stopPropagation(); // don't also select the row via the listener just above
+      deleteHistoryNote(rowOrder[i], delBtn);
+    });
   });
   const trashBtn = wrap.querySelector(".rec-trash-btn");
   trashBtn.addEventListener("click", () => deleteRecording(rec, trashBtn));
@@ -2309,15 +2325,18 @@ function buildOrphanRow(rec) {
   const time = formatStampTime(rec.baseStamp);
   const dur = formatDurationMin(rec.audio.duration_s);
   const name = (rec.audio.path || "").split("/").pop();
+  // T1 redesign: the recording-level ✕ moves into a labeled .rail-actions row
+  // alongside the existing "▶ Обработать" action (unchanged behaviour/handler,
+  // .btn.primary kept so tests/CSS relying on that class still match — rail-action-btn
+  // only adds the row's compact sizing).
   el.innerHTML =
     `<div class="rail-rec-head"><span>🎙</span><span class="rail-title rail-title-file">${escapeHtml(name)}</span></div>` +
-    `<div class="rail-rec-meta">${escapeHtml([time, dur].filter(Boolean).join(" · "))}${recordingBadge("orphan")}` +
-    `<button type="button" class="btn small ghost rec-trash-btn" title="Удалить (в корзину)">✕</button></div>`;
-  const btn = document.createElement("button");
-  btn.className = "btn small primary";
-  btn.textContent = "▶ Обработать";
-  btn.addEventListener("click", () => processOrphanAudio(rec.audio));
-  el.appendChild(btn);
+    `<div class="rail-rec-meta"><span class="rail-rec-meta-text">${escapeHtml([time, dur].filter(Boolean).join(" · "))}</span>${recordingBadge("orphan")}</div>` +
+    `<div class="rail-actions">` +
+    `<button type="button" class="btn small primary rail-action-btn process-orphan-btn">▶ Обработать</button>` +
+    `<button type="button" class="btn small rail-action-btn danger rec-trash-btn" title="Удалить (в корзину)">🗑 В корзину</button>` +
+    `</div>`;
+  el.querySelector(".process-orphan-btn").addEventListener("click", () => processOrphanAudio(rec.audio));
   const trashBtn = el.querySelector(".rec-trash-btn");
   trashBtn.addEventListener("click", () => deleteRecording(rec, trashBtn));
   return el;
@@ -2565,16 +2584,15 @@ async function openHistoryNote(item) {
 
 // Deletes ONE note (its .md file only — the audio stays on disk, versioned
 // siblings are untouched) — moves it into корзина (.trash/, 30-day retention) rather
-// than a permanent delete (История trash feature). item is always the note currently
-// open in #noteView (nvDelete only exists there — no per-row/rail delete affordance for
-// a single обработка, by design; see deleteRecording below for the recording-level ✕).
-// Always confirms first (same native confirm() pattern as onResetApp above);
-// on success, marks #noteView back to the ".history-placeholder" state BEFORE
-// calling refreshHistory() so updateNoteViewDefault() picks the marker up and
-// auto-opens whatever note now sorts first (or renders the empty state if none
-// are left) — reusing the exact same reload path every other История mutation uses.
-async function deleteHistoryNote(item) {
-  const btn = $("nvDelete");
+// than a permanent delete (История trash feature). Two callers now (T1 redesign,
+// ux-para-batch): the opened note's own #nvDelete (btn omitted → defaults to it, exact
+// prior behaviour), and each rail-version-row's own 🗑 (btn passed explicitly — see
+// buildNotesRecordingRow) — the latter can fire while a DIFFERENT note is open, so the
+// noteView-clearing below is now gated to "was the deleted note the one showing", same
+// discipline deleteRecording already uses for its own trashedNotePaths check.
+// Always confirms first (same native confirm() pattern as onResetApp above).
+async function deleteHistoryNote(item, btn) {
+  btn = btn || $("nvDelete");
   if (btn.disabled) return;
   const ok = confirm(
     `Вы точно хотите удалить заметку «${item.title || item.name}»? ` +
@@ -2585,8 +2603,10 @@ async function deleteHistoryNote(item) {
   try {
     const res = await window.api.deleteHistoryNote(item.note, recordingBaseStamp(item), item.title || item.name);
     if (res && res.ok === false) { alert(res.error); return; }
-    openNoteIdx = null;
-    $("noteView").innerHTML = '<p class="hint history-placeholder">Заметка удалена.</p>';
+    if (openNoteIdx != null && historyItems[openNoteIdx] && historyItems[openNoteIdx].note === item.note) {
+      openNoteIdx = null;
+      $("noteView").innerHTML = '<p class="hint history-placeholder">Заметка удалена.</p>';
+    }
     await refreshHistory();
   } finally {
     btn.disabled = false;
@@ -3413,7 +3433,10 @@ $("paraClassifyAll").addEventListener("click", async () => {
     paraLog(`→ ${name}`);
     setRowProcessing(row, true);
     try {
-      const r = await window.api.paraClassify({ note: it.note, root: state.para.root, folders: state.para.folders, mainModel: state.mainModel });
+      const r = await window.api.paraClassify({
+        note: it.note, root: state.para.root, folders: state.para.folders,
+        mainModel: state.mainModel, language: state.language,
+      });
       if (!r || r.error || !r.category) {
         paraLog(`   ✗ не классифицирована: ${(r && r.error) || "категория не определена"}`);
         errors++;
@@ -3422,17 +3445,10 @@ $("paraClassifyAll").addEventListener("click", async () => {
       }
       row.querySelector(".para-cat").value = r.category;
       row.querySelector(".para-proj").value = r.project || "";
-      // distil knowledge sections, then append into the accumulator + archive the raw note
-      const ex = await window.api.paraExtract(it.note);
-      if (!ex || ex.error || !ex.content) {
-        paraLog(`   ✗ ${r.category} подобрана, но выжимка не извлечена: ${(ex && ex.error) || "пусто"}`);
-        errors++;
-        setRowProcessing(row, false);
-        continue;
-      }
       const res = await window.api.paraFile({
         note: it.note, audio: it.audio, category: r.category, project: r.project || "",
-        extracted: ex.content, title: it.title || "", stamp: it.name,
+        kind: r.kind, person: r.person, mission: r.mission,
+        stamp: it.name,
         root: state.para.root, folders: state.para.folders,
       });
       if (res && res.ok === false) {
@@ -3483,6 +3499,10 @@ async function fileParaRow(idx, row) {
   const it = paraInboxItems[idx];
   let category = row.querySelector(".para-cat").value;
   let project = row.querySelector(".para-proj").value.trim();
+  // Only ever populated by the auto-classify branch below (T4-T6) — a manually-picked
+  // category/project (no LLM call) has no kind/person/mission opinion, and
+  // paraDestinationDir already treats that as "other" (files under <Projects>/<project>).
+  let kind, person, mission;
   const btn = row.querySelector(".para-file-btn");
   const prev = btn.textContent;
   btn.disabled = true;
@@ -3490,35 +3510,33 @@ async function fileParaRow(idx, row) {
     // No category picked — auto-classify via the same LLM path paraClassifyAll uses
     // (the paraClassify call inside paraClassifyAll above) instead of blocking with an alert.
     btn.textContent = "Категоризирую…";
-    const cl = await window.api.paraClassify({ note: it.note, root: state.para.root, folders: state.para.folders, mainModel: state.mainModel });
+    const cl = await window.api.paraClassify({
+      note: it.note, root: state.para.root, folders: state.para.folders,
+      mainModel: state.mainModel, language: state.language,
+    });
     if (!cl || cl.error || !cl.category) {
       alert("Не удалось определить категорию автоматически — выбери вручную: " + ((cl && cl.error) || "категория не определена"));
       btn.disabled = false; btn.textContent = prev; return;
     }
     category = cl.category;
     row.querySelector(".para-cat").value = category;
+    kind = cl.kind; person = cl.person; mission = cl.mission;
     // Keep a user-entered project as-is; only fill from classify if the field was empty.
     if (!project && cl.project) {
       project = cl.project;
       row.querySelector(".para-proj").value = project;
     }
   }
-  btn.textContent = "Извлекаю…";
-  const ex = await window.api.paraExtract(it.note);
-  if (!ex || ex.error || !ex.content) {
-    alert("Не удалось извлечь выжимку: " + ((ex && ex.error) || "пусто"));
-    btn.disabled = false; btn.textContent = prev; return;
-  }
   const res = await window.api.paraFile({
-    note: it.note, audio: it.audio, category, project,
-    extracted: ex.content, title: it.title || "", stamp: it.name,
+    note: it.note, audio: it.audio, category, project, kind, person, mission,
+    stamp: it.name,
     root: state.para.root, folders: state.para.folders,
   });
   if (res && res.ok === false) {
     alert("Не удалось разложить: " + res.error);
     btn.disabled = false; btn.textContent = prev; return;
   }
-  markRowFiled(row); // distilled + archived — grey/disabled in place, same as the bulk path
+  markRowFiled(row); // filed into its classified folder — grey/disabled in place, same as the bulk path
 }
 
 function showResult(ev) {

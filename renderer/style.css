@@ -265,18 +265,24 @@ main:has(> #view-prompts:not(.hidden)) { max-width: 1200px; }
 }
 .note-view-empty-icon { font-size: 40px; }
 .note-view-empty-title { font-size: 16px; font-weight: 600; color: var(--fg); }
-.para-layout { display: flex; gap: 16px; align-items: flex-start; }
-/* top rebased alongside .history-rail above — same reasoning (old chrome gone). */
-.para-subnav { flex: 0 0 160px; display: flex; flex-direction: column; gap: 4px;
-  position: sticky; top: 16px; }
+.para-layout { display: flex; align-items: flex-start; }
+.para-main { flex: 1; min-width: 0; }
+/* T3 (design ref: para-horizontal-a.html вариант A — сегмент-контрол): the old
+   vertical .para-subnav aside (160px column) is retired — Разбор/Поиск/Хранилище now
+   switch via a horizontal pill group at the top of para-main. Same .subbtn class and
+   data-sub attribute as before (subSwitchPara/click-wiring in renderer.js untouched);
+   only the container's own layout changed from a column of rows to an inline pill bar. */
+.para-seg { display: inline-flex; gap: 2px; background: var(--card2); border: 1px solid var(--line);
+  border-radius: 999px; padding: 3px; margin-bottom: 14px; }
+.para-seg .subbtn { padding: 6px 16px; border-radius: 999px; }
+.para-seg .subbtn:hover:not(.active):not(:disabled) { background: var(--line); color: var(--fg); }
 .subbtn { text-align: left; background: transparent; color: var(--muted); border: none;
   border-radius: 8px; padding: 8px 12px; cursor: pointer; font-size: 13px; font-family: inherit; }
 .subbtn:hover:not(:disabled) { background: var(--card2); color: var(--fg); }
 .subbtn.active { background: var(--selection); color: var(--selection-text); }
 .subbtn:disabled { opacity: .4; cursor: default; }
-.para-main { flex: 1; min-width: 0; }
 .para-tree-split { display: flex; gap: 16px; align-items: flex-start; }
-.para-tree { font-size: 13px; flex: 0 0 38%; min-width: 0; overflow: auto; max-height: 70vh; }
+.para-tree { font-size: 13px; flex: 0 0 220px; min-width: 0; overflow: auto; max-height: 70vh; }
 .para-treeview { flex: 1; min-width: 0; border-left: 1px solid var(--line); padding-left: 16px;
   max-height: 70vh; overflow: auto; }
 .tree-note.active { color: var(--accent); font-weight: 600; }
@@ -337,31 +343,60 @@ main:has(> #view-prompts:not(.hidden)) { max-width: 1200px; }
   cursor: pointer; color: var(--fg); font-family: inherit; font-size: 13px; font-weight: 500;
 }
 .rail-group-header:hover { background: var(--card2); }
+/* Group-header title text (T2 narrow-width overflow fix, ux-para-batch): a long meeting
+   title used to sit as raw text next to the caret with no shrink/ellipsis rule of its own
+   — inside the header's flex row it could force the whole card wider than the rail column.
+   flex:1+min-width:0 lets it shrink and ellipsis instead of escaping the card. */
+.rail-group-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rail-group-versions { display: flex; flex-direction: column; }
-.rail-version-row { padding-left: 26px; }
+/* Version row (buildNotesRecordingRow): flex ROW override of .rail-item's column default
+   — a title cell + its own 🗑 delete button now share the line (design ref:
+   history-buttons-a.html вариант A, .vrow/.rowdel). */
+.rail-version-row { padding-left: 26px; display: flex; flex-direction: row; align-items: center; gap: 6px; }
+.rail-version-row .rail-title { flex: 1; min-width: 0; }
+/* Per-обработка delete (T1: "Version-row ✕ (delete note) → 🗑 glyph") — reuses the
+   existing deleteHistoryNote flow (same one nvDelete already calls), wired with
+   stopPropagation so clicking it doesn't also select the row (rail-version-row itself
+   carries the selectNote click listener, unchanged from before this redesign). */
+.rail-version-del {
+  flex: 0 0 auto; background: none; border: none; border-radius: 6px; padding: 2px 6px;
+  color: var(--muted); font-size: 12px; cursor: pointer; font-family: inherit;
+}
+.rail-version-del:hover { color: #fff; background: var(--danger-fill); }
 .rail-latest { color: var(--muted); font-size: 11px; font-weight: 400; }
 
 /* Recording-level meta line (time + duration + status badge) — sits under a group's
    header (buildNotesRecordingRow) or inside a flat orphan row (buildOrphanRow). Badge
    tokens reused from the palette above (--rec-tint/--rec/--inactive/--muted) — no
-   hardcoded colors, mirrors the approved design card (history-audio-a.html). */
-.rail-rec-meta { display: flex; align-items: center; gap: 8px; padding: 0 12px 6px 34px;
+   hardcoded colors, mirrors the approved design card (history-audio-a.html). flex-wrap
+   (T2) lets the badge drop to its own line rather than push the row wider than the card. */
+.rail-rec-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 0 12px 6px 34px;
   color: var(--muted); font-size: 11.5px; }
-/* Recording-level ✕ (История trash feature) — pinned to the right end of the meta row,
-   same "trailing button, margin-left:auto" pattern as .queue-retry-btn (pending rows). */
-.rec-trash-btn { margin-left: auto; }
+.rail-rec-meta-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rail-rec-badge { display: inline-flex; align-items: center; border-radius: 999px;
   padding: 1px 8px; font-size: 10.5px; font-weight: 600; line-height: 1.6; }
 .rail-rec-badge.wait { background: var(--rec-tint); color: var(--rec); }
 .rail-rec-badge.empty { border: 1px dashed var(--inactive); color: var(--inactive); }
 .rail-rec-badge.count { background: var(--card2); border: 1px solid var(--line); color: var(--muted); font-weight: 500; }
 
+/* Card-level actions row (История redesign вариант A, design ref: history-buttons-a.html)
+   — explicit labeled buttons under the meta line, replacing the old bare ✕ pinned via
+   margin-left:auto. flex-wrap:wrap is the T2 fix: at a narrow rail width the buttons drop
+   to their own line instead of forcing the card wider than its column. */
+.rail-actions { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 12px 10px 34px; }
+.btn.small.rail-action-btn { padding: 4px 10px; font-size: 12px; }
+/* Danger variant (🗑 В корзину) — tinted fill at rest, solid danger fill + white text on
+   hover; border-color pinned to transparent on hover too so .btn:hover's generic
+   border-color:accent never shows through (matches the design card's .abtn.danger). */
+.btn.small.rail-action-btn.danger { background: var(--danger-tint); border-color: transparent; color: var(--danger); }
+.btn.small.rail-action-btn.danger:hover { background: var(--danger-fill); border-color: transparent; color: #fff; }
+
 /* «без обработок» orphan row (audios[] entry with zero surviving notes) — same flat,
    non-clickable-row shape as a pending row (.rail-item.pending above), own modifier so
    `.rail-item:not(.pending)` selectors elsewhere never accidentally match it. */
 .rail-item.orphan { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; cursor: default; }
 .rail-rec-head { display: flex; align-items: center; gap: 8px; }
-.rail-title-file { font-weight: 400; color: var(--muted); font-size: 12px; }
+.rail-title-file { font-weight: 400; color: var(--muted); font-size: 12px; flex: 1; min-width: 0; }
 
 .note-view {
   flex: 1; min-width: 0; background: var(--grad-card); box-shadow: var(--shadow-card); border: 1px solid var(--line);

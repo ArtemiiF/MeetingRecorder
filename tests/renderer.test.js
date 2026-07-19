@@ -75,7 +75,9 @@ async function boot(apiOverrides = {}) {
     }),
     downloadAndInstallUpdate: async () => ({ ok: true }),
     cancelAppUpdate: async () => ({ ok: true }),
-    paraExtract: async () => ({ content: "x" }),
+    // extract retired with the accumulator scheme — filing must never call it again.
+    // Throwing sentinel (not a removal): any resurrected call site fails loudly here.
+    paraExtract: async () => { throw new Error("paraExtract retired — filing must not call it"); },
     paraReindex: async () => ({ indexed: 0, skipped: 0, removed: 0 }),
     paraSearch: async (_root, _messages) => ({ found: false, answer: "Не нашёл по этому вопросу записей в заметках.", citations: [] }),
     cancelSearch: async () => ({ ok: true }),
@@ -996,7 +998,7 @@ test("PARA: classify fills rows, manual file marks row filed (grey, disabled, no
   await tick(window);
   const rows = $("paraInbox").querySelectorAll(".para-row");
   assert.equal(rows.length, 1);
-  // paraClassifyAll does classify → extract → file → markRowFiled (all in one pipeline).
+  // paraClassifyAll does classify → file → markRowFiled (extract retired with the accumulator).
   // Assert that classify filled category/project fields by setting them directly (same contract).
   const catSel = rows[0].querySelector(".para-cat");
   const projIn = rows[0].querySelector(".para-proj");
@@ -1004,8 +1006,9 @@ test("PARA: classify fills rows, manual file marks row filed (grey, disabled, no
   projIn.value = "Лендинг";
   assert.equal(catSel.value, "projects");
   assert.equal(projIn.value, "Лендинг");
-  // Now click file-btn: paraExtract → paraFile → markRowFiled (consistent with the bulk path —
-  // stays in place, greyed and disabled, not removed).
+  // Now click file-btn: paraFile → markRowFiled (consistent with the bulk path —
+  // stays in place, greyed and disabled, not removed). The default paraExtract mock throws,
+  // so this test also locks «filing works without any extract call».
   rows[0].querySelector(".para-file-btn").click(); await tick(window); await tick(window);
   assert.equal($("paraInbox").querySelectorAll(".para-row").length, 1);
   assert.ok(rows[0].classList.contains("filed"));
@@ -1109,6 +1112,24 @@ test("PARA sub-tabs: switch to Хранилище renders the vault tree, collap
   assert.ok(dir.classList.contains("collapsed"));
   dir.querySelector(".tree-dir-head").click();
   assert.ok(!dir.classList.contains("collapsed")); // existing toggle behavior, unchanged
+});
+
+// T3: PARA flat navigation (design ref: para-horizontal-a.html вариант A —
+// сегмент-контрол). The old vertical .para-subnav aside is retired in favor of a
+// horizontal pill group living inside .para-main; subSwitchPara/data-sub switching
+// itself is covered by the ~15 existing "click .subbtn[data-sub=...]" tests above and
+// below — this locks the structural move only.
+test("PARA flat nav: vertical .para-subnav aside is gone, .subbtn/data-sub buttons now live in a horizontal .para-seg group inside .para-main", async () => {
+  const { window, $ } = await boot({});
+  window.document.querySelector('.topbtn[data-view="para"]').click();
+  await tick(window);
+  assert.ok(!window.document.querySelector(".para-subnav"), "the old vertical subnav aside must be gone");
+  const seg = window.document.querySelector(".para-seg");
+  assert.ok(seg, "a segmented pill group must exist");
+  assert.ok($("para-pane-inbox").closest(".para-main").contains(seg),
+    "the segment group must be nested inside para-main, not a separate sidebar column");
+  const subs = Array.from(seg.querySelectorAll(".subbtn")).map((b) => b.dataset.sub);
+  assert.deepEqual(subs, ["inbox", "search", "tree"], "all three subviews present, same order as before");
 });
 
 // ── copy note path (PARA Хранилище/tree note view) ───────────────────────────
@@ -1857,6 +1878,93 @@ test("mainModel is forwarded to paraClassify during classify-all", async () => {
   await tick(window); await tick(window); await tick(window); await tick(window);
   assert.ok(capturedArg, "paraClassify was not called");
   assert.equal(capturedArg.mainModel, "qwen/qwen3.5-9b");
+});
+
+// ── T4-T6/T7 (ux-para-batch): kind/person/mission classification + language pin
+// threaded from paraClassify through to paraFile ────────────────────────────────
+test("language is forwarded to paraClassify during classify-all (T7 — project/person/mission answer in the meeting's own language)", async () => {
+  let capturedArg = null;
+  const { window, $ } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru",
+      para: { root: "/v", folders: { projects: "Projects", areas: "Areas", resources: "Resources", archives: "Archives" } },
+    }),
+    listHistory: async () => [{ name: "2026-01-01", title: "T", note: "/n.md", audio: null }],
+    paraClassify: async (arg) => { capturedArg = arg; return { category: "projects", project: "P" }; },
+    paraFile: async () => ({ ok: true }),
+  });
+  window.document.querySelector('.topbtn[data-view="para"]').click();
+  await tick(window);
+  $("paraClassifyAll").click();
+  await tick(window); await tick(window); await tick(window); await tick(window);
+  assert.ok(capturedArg, "paraClassify was not called");
+  assert.equal(capturedArg.language, "ru");
+});
+
+test("classify-all: kind/person/mission from paraClassify's result are threaded through to paraFile", async () => {
+  let filedArg = null;
+  const { window, $ } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru",
+      para: { root: "/v", folders: { projects: "Projects", areas: "Areas", resources: "Resources", archives: "Archives" } },
+    }),
+    listHistory: async () => [{ name: "2026-01-01", title: "T", note: "/n.md", audio: null }],
+    paraClassify: async () => ({ category: "projects", project: "Ильшат", kind: "one_to_one", person: "Ильшат", mission: "" }),
+    paraFile: async (arg) => { filedArg = arg; return { ok: true }; },
+  });
+  window.document.querySelector('.topbtn[data-view="para"]').click();
+  await tick(window);
+  $("paraClassifyAll").click();
+  await tick(window); await tick(window); await tick(window); await tick(window);
+  assert.ok(filedArg, "paraFile was not called");
+  assert.equal(filedArg.kind, "one_to_one");
+  assert.equal(filedArg.person, "Ильшат");
+});
+
+test("single-row 'Разложить' (auto-classify branch): kind/person/mission from paraClassify are threaded through to paraFile", async () => {
+  let filedArg = null;
+  const { window, $ } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru",
+      para: { root: "/v", folders: { projects: "Projects", areas: "Areas", resources: "Resources", archives: "Archives" } },
+    }),
+    listHistory: async () => [{ name: "2026-01-01", title: "T", note: "/n.md", audio: null }],
+    paraClassify: async () => ({ category: "projects", project: "X", kind: "mission_daily", person: "", mission: "X" }),
+    paraFile: async (arg) => { filedArg = arg; return { ok: true }; },
+  });
+  window.document.querySelector('.topbtn[data-view="para"]').click();
+  await tick(window);
+  const row = $("paraInbox").querySelector(".para-row");
+  row.querySelector(".para-file-btn").click();
+  await tick(window); await tick(window); await tick(window); await tick(window);
+  assert.ok(filedArg, "paraFile was not called");
+  assert.equal(filedArg.kind, "mission_daily");
+  assert.equal(filedArg.mission, "X");
+});
+
+test("single-row 'Разложить' with a manually-picked category: paraFile gets no kind/person/mission opinion (no classify call happened)", async () => {
+  let filedArg = null;
+  let classifyCalled = false;
+  const { window, $ } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru",
+      para: { root: "/v", folders: { projects: "Projects", areas: "Areas", resources: "Resources", archives: "Archives" } },
+    }),
+    listHistory: async () => [{ name: "2026-01-01", title: "T", note: "/n.md", audio: null }],
+    paraClassify: async () => { classifyCalled = true; return { category: "projects", project: "P" }; },
+    paraFile: async (arg) => { filedArg = arg; return { ok: true }; },
+  });
+  window.document.querySelector('.topbtn[data-view="para"]').click();
+  await tick(window);
+  const row = $("paraInbox").querySelector(".para-row");
+  row.querySelector(".para-cat").value = "projects";
+  row.querySelector(".para-proj").value = "Ручной проект";
+  row.querySelector(".para-file-btn").click();
+  await tick(window); await tick(window); await tick(window); await tick(window);
+  assert.equal(classifyCalled, false, "a manually-picked category must not trigger an LLM classify call");
+  assert.ok(filedArg, "paraFile was not called");
+  assert.equal(filedArg.kind, undefined);
+  assert.equal(filedArg.project, "Ручной проект");
 });
 
 test("mainModel is forwarded to paraSearch when asking a question", async () => {
@@ -3218,10 +3326,9 @@ test("main.js: para-classify refuses while a backend install is in flight (spawn
   const paraClassify = mainSrc.match(/ipcMain\.handle\("para-classify"[\s\S]*?\n\}\);/)[0];
   assert.match(paraClassify, /\[!!installBackendProc, "Дождитесь окончания установки бэкенда"\]/);
 });
-test("main.js: para-extract refuses while a backend install is in flight (spawns runBackend())", () => {
+test("main.js: para-extract handler is fully removed (extract retired with the accumulator scheme)", () => {
   const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
-  const paraExtract = mainSrc.match(/ipcMain\.handle\("para-extract"[\s\S]*?\n\}\);/)[0];
-  assert.match(paraExtract, /\[!!installBackendProc, "Дождитесь окончания установки бэкенда"\]/);
+  assert.doesNotMatch(mainSrc, /ipcMain\.handle\("para-extract"/);
 });
 test("main.js: classify-glossary-terms refuses while a backend install is in flight (spawns runBackend())", () => {
   const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
@@ -3254,12 +3361,9 @@ test("main.js: reveal validates the path via isPathInsideRoots before shell.show
   assert.match(reveal, /isPathInsideRoots\(resolved, roots\)/);
   assert.match(reveal, /shell\.showItemInFolder\(resolved\)/);
 });
-test("main.js: para-extract/para-classify validate their --note arg via isPathInsideRoots before spawning the backend", () => {
+test("main.js: para-classify validates its --note arg via isPathInsideRoots before spawning the backend", () => {
   const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
-  const paraExtract = mainSrc.match(/ipcMain\.handle\("para-extract"[\s\S]*?\n\}\);/)[0];
   const paraClassify = mainSrc.match(/ipcMain\.handle\("para-classify"[\s\S]*?\n\}\);/)[0];
-  assert.match(paraExtract, /isPathInsideRoots\(resolvedNote, roots\)/);
-  assert.match(paraExtract, /"extract", "--note", resolvedNote/);
   assert.match(paraClassify, /isPathInsideRoots\(resolvedNote, roots\)/);
   assert.match(paraClassify, /"classify", "--note", resolvedNote/);
 });
@@ -3269,9 +3373,12 @@ test("main.js: para-file validates root against the server's OWN configured PARA
   assert.match(paraFile, /const configuredVaultRoot = readParaRoot\(\);/);
   assert.match(paraFile, /isPathInsideRoots\(resolvedRoot, \[configuredVaultRoot\]\.filter\(Boolean\)\)/);
   assert.match(paraFile, /isPathInsideRoots\(resolvedSrc, srcRoots\)/);
-  // write destinations must be built off the VALIDATED resolvedRoot, not the raw arg
-  assert.match(paraFile, /path\.join\(resolvedRoot, folder, proj \+ "\.md"\)/);
-  assert.match(paraFile, /path\.join\(resolvedRoot, \(folders && folders\.archives\)/);
+  // write destination must be built off the VALIDATED resolvedRoot, not the raw arg
+  // (T4-T6, ux-para-batch: folder-hierarchy builder replaces the old flat accum path),
+  // and the FINAL computed destDir gets its own containment re-check before mkdirSync.
+  assert.match(paraFile, /paraDestinationDir\(\{ category, folders, project, kind, person, mission, stamp: stamp \|\| note \}\)/);
+  assert.match(paraFile, /path\.join\(resolvedRoot, \.\.\.destSegments\)/);
+  assert.match(paraFile, /if \(!isPathInsideRoots\(destDir, \[resolvedRoot\]\)\)/);
 });
 
 test("main.js: list-lm-models IPC GETs LM Studio's /api/v0/models with a 3s timeout, filters out embeddings, and degrades to [] on failure", () => {
@@ -5475,7 +5582,9 @@ test("История groups a multi-version recording into a collapsible block: 
   const header = group.querySelector(".rail-group-header");
   assert.match(header.textContent, /Планёрка/);
   assert.equal(header.querySelector(".glossary-caret").textContent, "▾", "expanded by default");
-  const labels = Array.from(group.querySelectorAll(".rail-version-row")).map((r) => r.textContent.trim());
+  // .rail-title only — the row itself now also carries a 🗑 delete button (T1 redesign,
+  // ux-para-batch) whose own text would otherwise pollute a whole-row textContent match.
+  const labels = Array.from(group.querySelectorAll(".rail-version-row .rail-title")).map((r) => r.textContent.trim());
   assert.deepEqual(labels, ["Митинг · v2 (latest)", "Митинг · v1", "Интервью · v1 (latest)"],
     "template stable order (first-seen), versions descending within a template, each template's own top marked latest");
 
@@ -5863,6 +5972,100 @@ test("recording ✕: excluded on pending rows — no .rec-trash-btn, existing re
   assert.ok(pendingRow, "pending row must render");
   assert.ok(!pendingRow.querySelector(".rec-trash-btn"), "pending keeps its own ✕ (remove-pending-recording) only — no trash button");
   assert.ok(pendingRow.querySelector(".pending-del-btn"), "the existing pending ✕ must still be present");
+});
+
+// ── T1+T2: История card action buttons redesign (design ref: history-buttons-a.html,
+// вариант A — explicit labeled actions instead of a bare ✕) + narrow-width overflow
+// fix (ux-para-batch). Structure/containment only — actual flex-wrap layout isn't
+// observable under jsdom (no real layout engine), so these assert the DOM shape the
+// CSS relies on: an .rail-actions row nested INSIDE the card container (never a sibling
+// appended after it, which is how a button could visually escape the card), holding the
+// labeled buttons, plus the text cells that carry the ellipsis classes. ───────────────
+test("История card redesign: a notes-bearing group's 🗑 В корзину lives in a labeled .rail-actions row nested inside .rail-group, not the old bare ✕", async () => {
+  const { window, $ } = await boot({
+    listHistory: async () => [{ name: "2026-07-11-100000", base_stamp: "2026-07-11-100000", title: "Планёрка", template: "Митинг", version: 1, note: "/o/a.md", audio: "/o/a.wav" }],
+  });
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  const group = $("historyList").querySelector(".rail-group");
+  const actions = group.querySelector(".rail-actions");
+  assert.ok(actions, "actions row must exist");
+  assert.ok(group.contains(actions), "actions row must be nested inside the card, not appended after it");
+  const trashBtn = actions.querySelector(".rec-trash-btn");
+  assert.ok(trashBtn, "trash button must live inside .rail-actions");
+  assert.match(trashBtn.textContent, /🗑 В корзину/, "labeled, not a bare ✕");
+  assert.ok(trashBtn.classList.contains("danger"), "danger-styled per design card A");
+  assert.ok(!group.querySelector(".rail-rec-meta .rec-trash-btn"), "the bare ✕ must no longer sit inside the meta line");
+});
+
+test("История card redesign: an orphan row's ▶ Обработать and 🗑 В корзину share one .rail-actions row, both nested inside the card", async () => {
+  const { window, $ } = await boot({
+    listHistory: async () => Object.assign([], {
+      audios: [{ base_stamp: "2026-07-14-140300", path: "/out/meeting-2026-07-14-140300.wav", size: 100, mtime: 1, duration_s: 120 }],
+    }),
+  });
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  const orphan = $("historyList").querySelector(".rail-item.orphan");
+  const actions = orphan.querySelector(".rail-actions");
+  assert.ok(actions, "actions row must exist");
+  assert.ok(orphan.contains(actions), "actions row must be nested inside the orphan card");
+  assert.ok(actions.querySelector(".process-orphan-btn"), "▶ Обработать must live in the actions row");
+  assert.ok(actions.querySelector(".rec-trash-btn.danger"), "🗑 В корзину must live in the actions row, danger-styled");
+});
+
+test("История card redesign (T2 overflow lock): actions row and meta text carry the wrap/ellipsis classes the narrow-width fix relies on", async () => {
+  const { window, $ } = await boot({
+    listHistory: async () => [{ name: "2026-07-11-100000", base_stamp: "2026-07-11-100000", title: "Планёрка", template: "Митинг", version: 1, note: "/o/a.md", audio: "/o/a.wav" }],
+  });
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  const group = $("historyList").querySelector(".rail-group");
+  assert.ok(group.querySelector(".rail-group-title"), "group-header title must be its own shrinkable/ellipsis cell, not raw text next to the caret");
+  assert.ok(group.querySelector(".rail-rec-meta-text"), "meta text must be its own shrinkable/ellipsis cell");
+  assert.ok(group.querySelector(".rail-actions"), "buttons must sit in a dedicated wrap-capable row");
+});
+
+test("История card redesign: version-row 🗑 deletes THAT note via the existing deleteHistoryNote flow, without selecting the row (stopPropagation)", async () => {
+  let deletedNote = null;
+  let selectNoteCalls = 0;
+  const { window, $ } = await boot({
+    listHistory: async () => [
+      { name: "2026-07-11-100000", base_stamp: "2026-07-11-100000", title: "Планёрка", template: "Митинг", version: 1, note: "/o/a.md", audio: "/o/a.wav" },
+      { name: "2026-07-11-100000-r1", base_stamp: "2026-07-11-100000", title: "Планёрка", template: "Митинг", version: 2, note: "/o/b.md", audio: "/o/a.wav" },
+    ],
+    deleteHistoryNote: async (notePath) => { deletedNote = notePath; return { ok: true }; },
+    readNote: async () => {
+      selectNoteCalls++;
+      return '---\ntitle: "T"\n---\n\ntext';
+    },
+  });
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  const callsBeforeDelete = selectNoteCalls;
+  const rows = Array.from($("historyList").querySelectorAll(".rail-version-row"));
+  assert.equal(rows.length, 2);
+  rows[1].querySelector(".rail-version-del").click();
+  await tick(window); await tick(window);
+  // rows are version-descending (v2 "latest" first, v1 second) — rows[1] is /o/a.md (v1).
+  assert.equal(deletedNote, "/o/a.md", "deletes the row's own note, not the auto-opened (latest) one");
+  assert.equal(selectNoteCalls, callsBeforeDelete, "clicking 🗑 must not also select/open the row (stopPropagation)");
+});
+
+test("История card redesign: deleting a version row that is NOT the currently open note leaves the open note view untouched", async () => {
+  const notes = [
+    { name: "2026-07-11-100000", base_stamp: "2026-07-11-100000", title: "Планёрка", template: "Митинг", version: 2, note: "/o/latest.md", audio: "/o/a.wav" },
+    { name: "2026-07-11-100000-r1", base_stamp: "2026-07-11-100000", title: "Планёрка", template: "Митинг", version: 1, note: "/o/old.md", audio: "/o/a.wav" },
+  ];
+  const { window, $ } = await boot({
+    listHistory: async () => notes,
+    deleteHistoryNote: async () => ({ ok: true }),
+  });
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  // auto-open picks the topmost (latest) row — /o/latest.md — as covered elsewhere;
+  // deleting the OTHER (older) row's note must not blank out the still-open latest note.
+  assert.ok(!$("noteView").querySelector(".history-placeholder"), "a note must already be open (auto-open)");
+  const rows = Array.from($("historyList").querySelectorAll(".rail-version-row"));
+  rows[1].querySelector(".rail-version-del").click();
+  await tick(window); await tick(window);
+  assert.ok(!$("noteView").querySelector(".history-placeholder"),
+    "noteView must NOT be cleared — the deleted note (/o/old.md) wasn't the one open (/o/latest.md)");
 });
 
 // main.js requires("electron") and can't be loaded headless under plain node --test
