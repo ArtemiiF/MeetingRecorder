@@ -25,7 +25,8 @@ const APP_BINARY = path.join(APP_BUNDLE, "Contents", "MacOS", "Meeting Recorder"
 // Generous — CI runners (and a cold local disk cache) are slower than a dev
 // machine to get the first window on screen; boot-smoke cares about "does it
 // come up at all", not startup latency.
-const LAUNCH_TIMEOUT_MS = 30_000;
+// Холодный CI-раннер может грузиться дольше дев-машины — таймаут переопределяем env'ом.
+const LAUNCH_TIMEOUT_MS = Number(process.env.E2E_LAUNCH_TIMEOUT_MS) || 30_000;
 
 test("boot-smoke: packaged app launches, shows a window, survives packaging (preload + renderer alive)", async (t) => {
   if (!fs.existsSync(APP_BINARY)) {
