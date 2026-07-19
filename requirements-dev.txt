@@ -1,0 +1,11 @@
+# Developer/mutation-testing tooling — NOT the user-machine backend install
+# (requirements.txt) and NOT the minimal CI test env (requirements-ci.txt).
+# Installs everything requirements-ci.txt needs (pytest + the pure-core's
+# runtime deps) plus mutmut, for running mutation testing locally against
+# backend_core.py (see setup.cfg's [mutmut] section and CLAUDE.md for the
+# local command). mutmut must never leak into requirements.txt — that file
+# is pip-installed on the END USER's machine by main.js's backend-install
+# flow (BACKEND_ENV under userData), which has no business bundling a
+# testing tool.
+-r requirements-ci.txt
+mutmut==3.6.0

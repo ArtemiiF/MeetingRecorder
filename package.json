@@ -1,6 +1,6 @@
 {
   "name": "meeting-recorder",
-  "version": "1.4.7",
+  "version": "1.4.8",
   "description": "Локальная запись встреч: микрофон + системный звук → транскрипт → сводка по промпту",
   "main": "main.js",
   "scripts": {
@@ -39,6 +39,10 @@
       {
         "from": "backend.py",
         "to": "backend.py"
+      },
+      {
+        "from": "backend_core.py",
+        "to": "backend_core.py"
       },
       {
         "from": "events.json",
