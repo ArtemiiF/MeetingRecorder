@@ -41,6 +41,25 @@ jobs:
       # exist in CI).
       - run: python -m pytest tests/ -q
 
+  # Boot-smoke against the PACKAGED app (--dir build), not the dev checkout —
+  # catches the whole "asar-packaging drops/misroutes a runtime path, main
+  # process crashes at require-time before any window appears" bug class
+  # (v1.4.5: events.json missing from the asar; 903 unit/integration tests
+  # stayed green because none of them ever launch the real .app). Parallel to
+  # js-tests/py-tests, not required by them.
+  e2e-boot:
+    name: e2e-boot
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx electron-builder --mac --arm64 --dir
+      - run: npm run test:e2e
+
   # Only meaningful on push to main: decides whether package.json's version
   # is new (no matching GitHub release yet) and therefore whether the
   # release job below should run.
