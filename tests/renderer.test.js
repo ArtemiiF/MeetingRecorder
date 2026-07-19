@@ -39,6 +39,11 @@ async function boot(apiOverrides = {}) {
     listHistory: async () => [{ name: "2026-01-01", base_stamp: "2026-01-01", title: "Синк", note: "/o/meeting-x.md", audio: "/o/meeting-x.wav" }],
     readNote: async () => '---\ntitle: "T"\n---\n\n## Резюме\n\nтекст\n\n**[Спикер 1]**: привет',
     deleteHistoryNote: async () => ({ ok: true }),
+    deleteHistoryRecording: async () => ({ ok: true }),
+    listTrash: async () => ({ items: [], totalBytes: 0 }),
+    restoreTrashEntry: async () => ({ ok: true }),
+    deleteTrashEntry: async () => ({ ok: true }),
+    emptyTrash: async () => ({ ok: true }),
     paraCreateVault: async () => ({ ok: true }),
     paraClassify: async () => ({ category: "projects", project: "P" }),
     classifyGlossaryTerms: async () => ({ categories: {} }),
@@ -5890,4 +5895,238 @@ test("main.js: delete-history-recording validates EVERY note/audio path before m
   assert.match(handler[0], /kind: "recording"/);
   assert.ok(!/fs\.unlinkSync/.test(handler[0]), "must move to trash, not permanently unlink");
   assert.ok(!/rmSync|rm\(/.test(handler[0]), "must never use a recursive/directory-capable delete");
+});
+
+// ── Корзина tab (main.js: list-trash / restore-trash-entry / delete-trash-entry /
+// empty-trash) — main.js requires("electron") and can't load headless, same source-text
+// assertion discipline as the delete-history-note/-recording checks above.
+test("main.js: delete-history-note and delete-history-recording now build their manifest entry via buildTrashEntry, carrying title + an origin map (Корзина tab restore support)", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const noteHandler = mainSrc.match(/ipcMain\.handle\("delete-history-note"[\s\S]*?\n\}\);/)[0];
+  const recHandler = mainSrc.match(/ipcMain\.handle\("delete-history-recording"[\s\S]*?\n\}\);/)[0];
+  for (const handler of [noteHandler, recHandler]) {
+    assert.match(handler, /buildTrashEntry/);
+    assert.match(handler, /origin/);
+    assert.match(handler, /title/);
+    assert.match(handler, /crypto\.randomUUID\(\)/);
+  }
+});
+
+test("main.js: list-trash computes daysLeft/audioBytes/noteCount per entry and backfills a missing id", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const handler = mainSrc.match(/ipcMain\.handle\("list-trash"[\s\S]*?\n\}\);/);
+  assert.ok(handler, "list-trash handler not found");
+  assert.match(handler[0], /trashDaysLeft/);
+  assert.match(handler[0], /isTrashAudioFile/);
+  assert.match(handler[0], /crypto\.randomUUID\(\)/, "legacy entries missing an id must get one backfilled");
+});
+
+test("main.js: restore-trash-entry busy-guards via busyVerdict, validates trashDir containment, and reuses restoreDestinationFor/trashDestPath", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const handler = mainSrc.match(/ipcMain\.handle\("restore-trash-entry"[\s\S]*?\n\}\);/);
+  assert.ok(handler, "restore-trash-entry handler not found");
+  assert.match(handler[0], /busyVerdict\(\[\[!!procProc/);
+  assert.match(handler[0], /path\.dirname\(f\) !== trashDir/);
+  assert.match(handler[0], /restoreDestinationFor/);
+  assert.match(handler[0], /trashDestPath/);
+  assert.match(handler[0], /moveToTrash/);
+});
+
+test("main.js: delete-trash-entry and empty-trash both reuse deleteTrashEntryFiles (same containment-checked unlink as purgeTrash)", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const delHandler = mainSrc.match(/ipcMain\.handle\("delete-trash-entry"[\s\S]*?\n\}\);/);
+  const emptyHandler = mainSrc.match(/ipcMain\.handle\("empty-trash"[\s\S]*?\n\}\);/);
+  assert.ok(delHandler, "delete-trash-entry handler not found");
+  assert.ok(emptyHandler, "empty-trash handler not found");
+  assert.match(delHandler[0], /deleteTrashEntryFiles/);
+  assert.match(emptyHandler[0], /deleteTrashEntryFiles/);
+  assert.ok(!/fs\.rmSync|fs\.rm\(/.test(delHandler[0] + emptyHandler[0]), "must never use a recursive/directory-capable delete");
+});
+
+// ── Корзина tab (trash-tab feature, renderer) ────────────────────────────────
+test("switchView('trash'): shows the trash view, hides the others, sets the shared header title", async () => {
+  const { window, $ } = await boot();
+  window.document.querySelector('.topbtn[data-view="trash"]').click(); await tick(window);
+  assert.ok(!$("view-trash").classList.contains("hidden"));
+  assert.ok($("view-record").classList.contains("hidden"));
+  assert.ok($("view-history").classList.contains("hidden"));
+  assert.equal($("contentTitle").textContent, "Корзина");
+  assert.ok($("contentTag").classList.contains("hidden"));
+});
+
+test("trash view: empty trash shows the «Корзина пуста» empty state and a 0-count toolbar", async () => {
+  const { window, $ } = await boot({ listTrash: async () => ({ items: [], totalBytes: 0 }) });
+  window.document.querySelector('.topbtn[data-view="trash"]').click(); await tick(window);
+  assert.match($("trashList").textContent, /Корзина пуста/);
+  assert.match($("trashCount").textContent, /0 записей/);
+  assert.ok($("trashEmptyBtn").disabled, "Очистить корзину must be disabled when there's nothing to clear");
+});
+
+test("trash view: recording-kind row with notes — 🎙 icon, 'аудио X МБ + N заметок' meta, non-warn days pill", async () => {
+  const deletedAt = Date.UTC(2026, 6, 18); // 18 июля
+  const { window, $ } = await boot({
+    listTrash: async () => ({
+      items: [{ id: "r1", kind: "recording", title: "Синк по миграции Eapteka", deletedAt, daysLeft: 29, bytes: 100 * 1024 * 1024, audioBytes: 96 * 1024 * 1024, noteCount: 2 }],
+      totalBytes: 100 * 1024 * 1024,
+    }),
+  });
+  window.document.querySelector('.topbtn[data-view="trash"]').click(); await tick(window);
+  const row = $("trashList").querySelector(".trash-row");
+  assert.ok(row, "a trash row must render");
+  assert.match(row.querySelector(".trash-row-icon").textContent, /🎙/);
+  assert.equal(row.querySelector(".trash-row-title").textContent, "Синк по миграции Eapteka");
+  assert.match(row.querySelector(".trash-row-meta").textContent, /аудио 96 МБ \+ 2 заметки · удалено/);
+  const pill = row.querySelector(".trash-days");
+  assert.match(pill.textContent, /осталось 29 дн/);
+  assert.ok(!pill.classList.contains("warn"));
+});
+
+test("trash view: recording-kind row with ZERO notes uses ', без заметок' (not '+ 0 заметок')", async () => {
+  const { window, $ } = await boot({
+    listTrash: async () => ({
+      items: [{ id: "r2", kind: "recording", title: "meeting-2026-06-21-091502", deletedAt: Date.now(), daysLeft: 2, bytes: 118 * 1024 * 1024, audioBytes: 118 * 1024 * 1024, noteCount: 0 }],
+      totalBytes: 118 * 1024 * 1024,
+    }),
+  });
+  window.document.querySelector('.topbtn[data-view="trash"]').click(); await tick(window);
+  const row = $("trashList").querySelector(".trash-row");
+  assert.match(row.querySelector(".trash-row-meta").textContent, /аудио 118 МБ, без заметок · удалено/);
+});
+
+test("trash view: note-kind row (single note, no audio) shows 📄 icon and 'только заметка'", async () => {
+  const { window, $ } = await boot({
+    listTrash: async () => ({
+      items: [{ id: "n1", kind: "note", title: "Планёрка трайба — полная заметка", deletedAt: Date.now(), daysLeft: 23, bytes: 4096, audioBytes: 0, noteCount: 1 }],
+      totalBytes: 4096,
+    }),
+  });
+  window.document.querySelector('.topbtn[data-view="trash"]').click(); await tick(window);
+  const row = $("trashList").querySelector(".trash-row");
+  assert.match(row.querySelector(".trash-row-icon").textContent, /📄/);
+  assert.match(row.querySelector(".trash-row-meta").textContent, /только заметка · удалено/);
+});
+
+test("trash view: daysLeft < 7 marks the pill .warn", async () => {
+  const { window, $ } = await boot({
+    listTrash: async () => ({
+      items: [{ id: "r3", kind: "recording", title: "x", deletedAt: Date.now(), daysLeft: 2, bytes: 100, audioBytes: 100, noteCount: 0 }],
+      totalBytes: 100,
+    }),
+  });
+  window.document.querySelector('.topbtn[data-view="trash"]').click(); await tick(window);
+  const pill = $("trashList").querySelector(".trash-days");
+  assert.ok(pill.classList.contains("warn"));
+});
+
+test("trash view: toolbar shows 'N записей · M МБ' aggregate", async () => {
+  const { window, $ } = await boot({
+    listTrash: async () => ({
+      items: [
+        { id: "a", kind: "recording", title: "a", deletedAt: Date.now(), daysLeft: 29, bytes: 1, audioBytes: 1, noteCount: 0 },
+        { id: "b", kind: "recording", title: "b", deletedAt: Date.now(), daysLeft: 23, bytes: 1, audioBytes: 1, noteCount: 0 },
+        { id: "c", kind: "recording", title: "c", deletedAt: Date.now(), daysLeft: 2, bytes: 1, audioBytes: 1, noteCount: 0 },
+      ],
+      totalBytes: 214 * 1024 * 1024,
+    }),
+  });
+  window.document.querySelector('.topbtn[data-view="trash"]').click(); await tick(window);
+  assert.equal($("trashCount").textContent, "3 записи · 214 МБ");
+  assert.ok(!$("trashEmptyBtn").disabled);
+});
+
+test("trash view: ↩ Восстановить calls restoreTrashEntry(id) and refreshes the list", async () => {
+  let restoredId = null;
+  let calls = 0;
+  const { window, $ } = await boot({
+    listTrash: async () => { calls++; return { items: calls === 1 ? [{ id: "r1", kind: "note", title: "x", deletedAt: Date.now(), daysLeft: 10, bytes: 1, audioBytes: 0, noteCount: 1 }] : [], totalBytes: 0 }; },
+    restoreTrashEntry: async (id) => { restoredId = id; return { ok: true }; },
+  });
+  window.document.querySelector('.topbtn[data-view="trash"]').click(); await tick(window);
+  $("trashList").querySelector(".trash-restore-btn").click(); await tick(window);
+  assert.equal(restoredId, "r1");
+  assert.match($("trashList").textContent, /Корзина пуста/, "list must refresh after a successful restore");
+});
+
+test("trash view: 'Удалить навсегда' confirms first — cancel means deleteTrashEntry is never called", async () => {
+  let called = false;
+  const { window, $ } = await boot({
+    listTrash: async () => ({ items: [{ id: "n1", kind: "note", title: "x", deletedAt: Date.now(), daysLeft: 10, bytes: 1, audioBytes: 0, noteCount: 1 }], totalBytes: 1 }),
+    deleteTrashEntry: async () => { called = true; return { ok: true }; },
+  });
+  window.confirm = () => false;
+  window.document.querySelector('.topbtn[data-view="trash"]').click(); await tick(window);
+  $("trashList").querySelector(".trash-del-btn").click(); await tick(window);
+  assert.equal(called, false);
+});
+
+test("trash view: 'Удалить навсегда' confirmed → deleteTrashEntry(id) called, list refreshed", async () => {
+  let deletedId = null;
+  let calls = 0;
+  const { window, $ } = await boot({
+    listTrash: async () => { calls++; return { items: calls === 1 ? [{ id: "n1", kind: "note", title: "x", deletedAt: Date.now(), daysLeft: 10, bytes: 1, audioBytes: 0, noteCount: 1 }] : [], totalBytes: 0 }; },
+    deleteTrashEntry: async (id) => { deletedId = id; return { ok: true }; },
+  });
+  window.confirm = () => true;
+  window.document.querySelector('.topbtn[data-view="trash"]').click(); await tick(window);
+  $("trashList").querySelector(".trash-del-btn").click(); await tick(window);
+  assert.equal(deletedId, "n1");
+  assert.match($("trashList").textContent, /Корзина пуста/);
+});
+
+test("trash view: 'Очистить корзину' confirms with the itemized count/size — cancel means emptyTrash is never called", async () => {
+  let called = false;
+  let confirmMsg = null;
+  const { window, $ } = await boot({
+    listTrash: async () => ({ items: [{ id: "n1", kind: "note", title: "x", deletedAt: Date.now(), daysLeft: 10, bytes: 1024 * 1024, audioBytes: 0, noteCount: 1 }], totalBytes: 1024 * 1024 }),
+    emptyTrash: async () => { called = true; return { ok: true }; },
+  });
+  window.confirm = (msg) => { confirmMsg = msg; return false; };
+  window.document.querySelector('.topbtn[data-view="trash"]').click(); await tick(window);
+  $("trashEmptyBtn").click(); await tick(window);
+  assert.equal(called, false);
+  assert.match(confirmMsg, /1 запись/);
+  assert.match(confirmMsg, /1 МБ/);
+});
+
+test("trash view: 'Очистить корзину' confirmed → emptyTrash called, list refreshed to empty", async () => {
+  let called = false;
+  let calls = 0;
+  const { window, $ } = await boot({
+    listTrash: async () => { calls++; return { items: calls === 1 ? [{ id: "n1", kind: "note", title: "x", deletedAt: Date.now(), daysLeft: 10, bytes: 1, audioBytes: 0, noteCount: 1 }] : [], totalBytes: 0 }; },
+    emptyTrash: async () => { called = true; return { ok: true }; },
+  });
+  window.confirm = () => true;
+  window.document.querySelector('.topbtn[data-view="trash"]').click(); await tick(window);
+  $("trashEmptyBtn").click(); await tick(window);
+  assert.equal(called, true);
+  assert.match($("trashList").textContent, /Корзина пуста/);
+});
+
+test("История note delete: title is now passed through to deleteHistoryNote (Корзина tab title plumbing)", async () => {
+  let gotTitle;
+  const { window, $ } = await boot({
+    listHistory: async () => [{ name: "2026-01-01", base_stamp: "2026-01-01-100000", title: "Синк", note: "/o/meeting-x.md", audio: "/o/meeting-x.wav" }],
+    deleteHistoryNote: async (notePath, baseStamp, title) => { gotTitle = title; return { ok: true }; },
+  });
+  window.confirm = () => true;
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  $("historyList").querySelector(".rail-item").click(); await tick(window);
+  $("noteView").querySelector("#nvDelete").click(); await tick(window);
+  assert.equal(gotTitle, "Синк");
+});
+
+test("recording ✕: title is now passed through to deleteHistoryRecording (Корзина tab title plumbing)", async () => {
+  let gotTitle;
+  const notes = [
+    { name: "2026-07-11-100000", base_stamp: "2026-07-11-100000", title: "Планёрка", template: "Митинг", version: 1, note: "/o/a.md", audio: "/o/a.wav" },
+  ];
+  const audios = [{ base_stamp: "2026-07-11-100000", path: "/o/meeting-2026-07-11-100000.wav", size: 100, mtime: 1, duration_s: 60 }];
+  const { window, $ } = await boot({
+    listHistory: async () => Object.assign([...notes], { audios }),
+    deleteHistoryRecording: async (p) => { gotTitle = p.title; return { ok: true }; },
+  });
+  window.confirm = () => true;
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  $("historyList").querySelector(".rec-trash-btn").click(); await tick(window);
+  assert.equal(gotTitle, "Планёрка");
 });

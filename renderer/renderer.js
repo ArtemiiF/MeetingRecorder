@@ -1993,14 +1993,15 @@ window.api.onProcessEvent((ev) => {
 // Per-view slim content-header title; the "локально · MLX Whisper · pyannote ·
 // LM Studio" subtitle (#contentTag) only makes sense on Запись — every other
 // view hides it.
-const VIEW_TITLES = { record: "Запись", history: "История", para: "PARA", glossary: "Словарь", prompts: "Промпты" };
+const VIEW_TITLES = { record: "Запись", history: "История", para: "PARA", glossary: "Словарь", prompts: "Промпты", trash: "Корзина" };
 function switchView(v) {
   document.querySelectorAll(".topbtn").forEach((b) => b.classList.toggle("active", b.dataset.view === v));
-  ["record", "history", "para", "glossary", "prompts"].forEach((id) => $("view-" + id).classList.toggle("hidden", id !== v));
+  ["record", "history", "para", "glossary", "prompts", "trash"].forEach((id) => $("view-" + id).classList.toggle("hidden", id !== v));
   $("contentTitle").textContent = VIEW_TITLES[v] || "";
   $("contentTag").classList.toggle("hidden", v !== "record");
   if (v === "history") refreshHistory();
   if (v === "para") renderPara();
+  if (v === "trash") refreshTrash();
 }
 document.querySelectorAll(".topbtn").forEach((b) => b.addEventListener("click", () => switchView(b.dataset.view)));
 $("historyRefresh").addEventListener("click", refreshHistory);
@@ -2582,7 +2583,7 @@ async function deleteHistoryNote(item) {
   if (!ok) return;
   btn.disabled = true;
   try {
-    const res = await window.api.deleteHistoryNote(item.note, recordingBaseStamp(item));
+    const res = await window.api.deleteHistoryNote(item.note, recordingBaseStamp(item), item.title || item.name);
     if (res && res.ok === false) { alert(res.error); return; }
     openNoteIdx = null;
     $("noteView").innerHTML = '<p class="hint history-placeholder">Заметка удалена.</p>';
@@ -2637,6 +2638,7 @@ async function deleteRecording(rec, btn) {
       baseStamp: rec.baseStamp,
       notePaths: notes.map((n) => n.note),
       audioPaths: audios.map((a) => a.path),
+      title,
     });
     if (res && res.ok === false) {
       alert(res.error);
@@ -2663,6 +2665,124 @@ async function deleteRecording(rec, btn) {
     if (btn) btn.disabled = false;
   }
 }
+
+// ── Корзина tab (trash-tab feature, design ref: trash-tab-a.html, variant A) ────────────
+// list-trash's raw items ({id, kind, title, deletedAt, daysLeft, bytes, audioBytes,
+// noteCount}) — re-fetched on every refreshTrash() call (view switch, or after any
+// restore/delete/empty mutation), same "always re-fetch, never patch in place" discipline
+// refreshHistory already uses.
+let trashItems = [];
+async function refreshTrash() {
+  const res = await window.api.listTrash();
+  trashItems = (res && res.items) || [];
+  renderTrashList((res && res.totalBytes) || 0);
+}
+
+// Per-row meta line — three shapes depending on kind/noteCount (design card's exact
+// copy): a note-only trash (single .md, delete-history-note) never has audio at all;
+// a recording trash (delete-history-recording) always has audio, plus its notes IF any
+// survived (an orphan-audio delete has zero). ", без заметок" (not "+ 0 заметок") is the
+// design's own wording for the zero-notes case.
+function trashRowMeta(item) {
+  const dateStr = RAIL_GROUP_DATE_FMT.format(new Date(item.deletedAt));
+  if (item.kind === "note") return `только заметка · удалено ${dateStr}`;
+  const audioStr = `аудио ${formatModelSize(item.audioBytes) || "0 МБ"}`;
+  const notesStr = item.noteCount
+    ? `${item.noteCount} ${ruPlural(item.noteCount, "заметка", "заметки", "заметок")}`
+    : null;
+  return `${audioStr}${notesStr ? " + " + notesStr : ", без заметок"} · удалено ${dateStr}`;
+}
+
+// Built via innerHTML (not createElement/textContent) like buildOrphanRow/
+// buildNotesRecordingRow above — every interpolated string goes through escapeHtml first,
+// same discipline those rows already follow (title is user-authored: comes from История's
+// own note title / the recording's filename, never trusted raw).
+function buildTrashRow(item) {
+  const el = document.createElement("div");
+  el.className = "trash-row";
+  const icon = item.kind === "recording" ? "🎙" : "📄";
+  const warn = item.daysLeft < 7 ? " warn" : "";
+  el.innerHTML =
+    `<span class="trash-row-icon">${icon}</span>` +
+    `<div class="trash-row-main">` +
+      `<div class="trash-row-title">${escapeHtml(item.title)}</div>` +
+      `<div class="trash-row-meta">${escapeHtml(trashRowMeta(item))}</div>` +
+    `</div>` +
+    `<span class="trash-days${warn}">осталось ${item.daysLeft} дн</span>` +
+    `<div class="trash-acts">` +
+      `<button type="button" class="btn small trash-restore-btn">↩ Восстановить</button>` +
+      `<button type="button" class="btn small ghost danger trash-del-btn">Удалить навсегда</button>` +
+    `</div>`;
+  el.querySelector(".trash-restore-btn").addEventListener("click", (e) => restoreTrashItem(item, e.currentTarget));
+  el.querySelector(".trash-del-btn").addEventListener("click", (e) => deleteTrashItem(item, e.currentTarget));
+  return el;
+}
+
+function renderTrashList(totalBytes) {
+  $("trashCount").textContent =
+    `${trashItems.length} ${ruPlural(trashItems.length, "запись", "записи", "записей")} · ${formatModelSize(totalBytes) || "0 МБ"}`;
+  $("trashEmptyBtn").disabled = trashItems.length === 0;
+  const list = $("trashList");
+  if (!trashItems.length) {
+    list.innerHTML = '<p class="hint">Корзина пуста</p>';
+    return;
+  }
+  list.innerHTML = "";
+  trashItems.forEach((item) => list.appendChild(buildTrashRow(item)));
+}
+
+// Restore is non-destructive (unlike delete/empty below) — no confirm(), same reasoning
+// applied/save actions elsewhere in this app never confirm either; only irreversible
+// mutations do (project convention: любое удаление → confirm окно).
+async function restoreTrashItem(item, btn) {
+  if (btn.disabled) return;
+  btn.disabled = true;
+  try {
+    const res = await window.api.restoreTrashEntry(item.id);
+    if (res && res.ok === false) { alert(res.error); return; }
+    await refreshTrash();
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function deleteTrashItem(item, btn) {
+  if (btn.disabled) return;
+  const ok = confirm(`Удалить навсегда «${item.title}»? Это необратимо.`);
+  if (!ok) return;
+  btn.disabled = true;
+  try {
+    const res = await window.api.deleteTrashEntry(item.id);
+    if (res && res.ok === false) alert(res.error);
+    await refreshTrash();
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// Itemizes count+size before wiping everything (same "list what dies before you commit"
+// confirm discipline as deleteRecording above).
+async function emptyTrash() {
+  const btn = $("trashEmptyBtn");
+  if (btn.disabled) return;
+  const n = trashItems.length;
+  const totalBytes = trashItems.reduce((sum, it) => sum + (it.bytes || 0), 0);
+  const ok = confirm(
+    `Удалить навсегда всё содержимое корзины?\n` +
+    `${n} ${ruPlural(n, "запись", "записи", "записей")} · ${formatModelSize(totalBytes) || "0 МБ"}.\n` +
+    "Это необратимо."
+  );
+  if (!ok) return;
+  btn.disabled = true;
+  try {
+    const res = await window.api.emptyTrash();
+    if (res && res.ok === false) alert(res.error);
+    await refreshTrash();
+  } finally {
+    btn.disabled = false;
+  }
+}
+$("trashEmptyBtn").addEventListener("click", emptyTrash);
 
 // Small inline panel inserted above the transcript in #noteView (not a full modal) letting the user pick
 // which template to reprocess with, instead of silently reusing whatever the record
