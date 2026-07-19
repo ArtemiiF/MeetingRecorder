@@ -15,6 +15,7 @@
       <button class="topbtn" data-view="para">🗂 PARA</button>
       <button class="topbtn" data-view="glossary">📖 Словарь</button>
       <button class="topbtn" data-view="prompts">📝 Промпты</button>
+      <button class="topbtn" data-view="trash">🗑 Корзина</button>
     </nav>
     <div id="recIndicator" class="sidebar-rec hidden">
       <span class="rec-dot"></span>
@@ -301,6 +302,19 @@
           </div>
         </section>
       </div>
+    </div>
+
+    <!-- TRASH VIEW (Корзина — design ref: trash-tab-a.html, variant A / flat list rows) -->
+    <div id="view-trash" class="hidden">
+      <section class="card">
+        <h2>Корзина</h2>
+        <p class="hint">Хранится 30 дней, потом удаляется навсегда</p>
+        <div class="trash-toolbar">
+          <span id="trashCount" class="trash-count"></span>
+          <button id="trashEmptyBtn" class="btn small ghost danger">Очистить корзину</button>
+        </div>
+        <div id="trashList"></div>
+      </section>
     </div>
   </main>
 

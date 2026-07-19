@@ -15,6 +15,8 @@ const {
   rewriteNoteSpeakers, isOutsideRoot, isNoteDeletable, indexRunReducer, upsertById, diskGuardVerdict, busyVerdict,
   isPathInsideRoots, contentFingerprint, isFileStable,
   isAudioDeletable, trashRootFor, trashDestPath, moveToTrash, purgeTrash,
+  trashDaysLeft, buildTrashEntry, restoreTrashFiles,
+  deleteTrashEntryFiles, trashEntryBreakdown,
   resolveOutDirOnVaultChange, trayMenuTemplate,
   resolvePythonBin, resolveFfmpegBin, resolveResourcePath, resolveAudioTeeBin, resolveAssetPath, backendInstallStatus,
   parseFfmpegVersion,
@@ -1909,7 +1911,12 @@ ipcMain.handle("read-note", async (_e, notePath) => {
 // (symlinks followed via fs.realpathSync) inside out_dir or the PARA vault root —
 // same out_dir/vault duality triggerAutoIndex already handles — so this can never
 // be pointed at an arbitrary path.
-ipcMain.handle("delete-history-note", async (_e, { notePath, baseStamp } = {}) => {
+// `title` (Корзина tab addition — the История card's note title at delete time, sent by
+// the renderer's own deleteHistoryNote call) is stored on the manifest entry via
+// buildTrashEntry so the trash-tab row can show it directly instead of falling back to
+// baseStamp/filename; `origin` records this ONE file's original location (dest → resolved)
+// so a later restore puts it back exactly where it came from (see restoreDestinationFor).
+ipcMain.handle("delete-history-note", async (_e, { notePath, baseStamp, title } = {}) => {
   if (procProc) return { ok: false, error: "Дождитесь окончания обработки" };
   const { outDir, vaultRoot } = currentOutDirAndVault();
   const roots = [outDir, vaultRoot].filter(Boolean);
@@ -1924,7 +1931,10 @@ ipcMain.handle("delete-history-note", async (_e, { notePath, baseStamp } = {}) =
     const dest = trashDestPath(trashDir, path.basename(resolved), fs.existsSync);
     moveToTrash(resolved, dest);
     const entries = loadTrashManifest(trashDir);
-    entries.push({ deletedAt: Date.now(), kind: "note", files: [dest], baseStamp: baseStamp || null });
+    entries.push(buildTrashEntry({
+      id: crypto.randomUUID(), deletedAt: Date.now(), kind: "note", files: [dest],
+      baseStamp, title, origin: { [dest]: resolved },
+    }));
     saveTrashManifest(trashDir, entries);
     return { ok: true };
   } catch (e) {
@@ -1942,7 +1952,10 @@ ipcMain.handle("delete-history-note", async (_e, { notePath, baseStamp } = {}) =
 // Guarded identically to delete-history-note (global procProc busy-guard) — this app
 // only ever runs one processing job at a time, so this already refuses while ANY
 // recording (including this one) is being processed.
-ipcMain.handle("delete-history-recording", async (_e, { baseStamp, notePaths, audioPaths } = {}) => {
+// `title` (Корзина tab addition) is the recording's display title computed by the
+// renderer's deleteRecording (its own notes[0].title/orphan-filename fallback chain) —
+// stored on the manifest entry as-is via buildTrashEntry, same as delete-history-note.
+ipcMain.handle("delete-history-recording", async (_e, { baseStamp, notePaths, audioPaths, title } = {}) => {
   if (procProc) return { ok: false, error: "Дождитесь окончания обработки" };
   const { outDir, vaultRoot } = currentOutDirAndVault();
   const roots = [outDir, vaultRoot].filter(Boolean);
@@ -1968,6 +1981,7 @@ ipcMain.handle("delete-history-recording", async (_e, { baseStamp, notePaths, au
 
   const trashDir = trashRootFor(outDir, vaultRoot);
   const moved = [];
+  const origin = {};
   let moveError = null;
   try {
     fs.mkdirSync(trashDir, { recursive: true });
@@ -1975,6 +1989,7 @@ ipcMain.handle("delete-history-recording", async (_e, { baseStamp, notePaths, au
       const dest = trashDestPath(trashDir, path.basename(resolved), fs.existsSync);
       moveToTrash(resolved, dest);
       moved.push(dest);
+      origin[dest] = resolved;
     }
   } catch (e) {
     moveError = String((e && e.message) || e);
@@ -1987,11 +2002,102 @@ ipcMain.handle("delete-history-recording", async (_e, { baseStamp, notePaths, au
   if (moved.length) {
     try {
       const entries = loadTrashManifest(trashDir);
-      entries.push({ deletedAt: Date.now(), kind: "recording", files: moved, baseStamp: baseStamp || null });
+      entries.push(buildTrashEntry({
+        id: crypto.randomUUID(), deletedAt: Date.now(), kind: "recording", files: moved,
+        baseStamp, title, origin,
+      }));
       saveTrashManifest(trashDir, entries);
     } catch {}
   }
   if (moveError) return { ok: false, error: moveError };
+  return { ok: true };
+});
+
+// ── Корзина tab (trash-tab feature) ──────────────────────────────────────────
+// Full trash listing for the sidebar's «🗑 Корзина» view: entries + per-entry computed
+// display fields the renderer needs (sizes/notes aren't stored in the manifest itself —
+// only real file paths are — so they're recomputed here via fs.statSync on read) plus the
+// toolbar's aggregate count+size. Legacy entries (moved before this feature shipped) have
+// no `id` — backfilled here and persisted once, same opportunistic-migration pattern
+// save-presets already uses for preset ids (see the presets.map(...crypto.randomUUID()...)
+// call near this file's top).
+ipcMain.handle("list-trash", async () => {
+  const { outDir, vaultRoot } = currentOutDirAndVault();
+  const trashDir = trashRootFor(outDir, vaultRoot);
+  if (!fs.existsSync(trashDir)) return { items: [], totalBytes: 0 };
+  let entries = loadTrashManifest(trashDir);
+  let migrated = false;
+  entries = entries.map((e) => {
+    if (e && !e.id) { migrated = true; return { ...e, id: crypto.randomUUID() }; }
+    return e;
+  });
+  if (migrated) { try { saveTrashManifest(trashDir, entries); } catch {} }
+
+  const now = Date.now();
+  let totalBytes = 0;
+  const items = entries.map((e) => {
+    const files = Array.isArray(e.files) ? e.files : [];
+    const { audioBytes, noteCount, bytes } = trashEntryBreakdown(files);
+    totalBytes += bytes;
+    const title = e.title || e.baseStamp || (files[0] ? path.basename(files[0]) : "Без названия");
+    return {
+      id: e.id, kind: e.kind, title, deletedAt: e.deletedAt,
+      daysLeft: trashDaysLeft(e.deletedAt, now), bytes, audioBytes, noteCount,
+    };
+  });
+  return { items, totalBytes };
+});
+
+// Restore ONE trash entry: source must resolve inside trashDir (below), destination inside outDir/vaultRoot via restoreTrashFiles (not purgeTrash's check — that one has no destination side); busy-guarded against a concurrent reprocess.
+ipcMain.handle("restore-trash-entry", async (_e, { id } = {}) => {
+  const busy = busyVerdict([[!!procProc, "Дождитесь окончания обработки"]]);
+  if (busy) return { ok: false, error: busy };
+  const { outDir, vaultRoot } = currentOutDirAndVault();
+  const roots = [outDir, vaultRoot].filter(Boolean);
+  const trashDir = trashRootFor(outDir, vaultRoot);
+  const entries = loadTrashManifest(trashDir);
+  const idx = entries.findIndex((e) => e && e.id === id);
+  if (idx === -1) return { ok: false, error: "Запись не найдена в корзине" };
+  const entry = entries[idx];
+  const files = Array.isArray(entry.files) ? entry.files : [];
+  for (const f of files) {
+    if (typeof f !== "string" || path.dirname(f) !== trashDir) {
+      return { ok: false, error: "Некорректная запись корзины" };
+    }
+  }
+  const { remaining, error: moveError } = restoreTrashFiles(files, entry.origin, outDir, roots);
+  if (remaining.length) entries[idx] = { ...entry, files: remaining };
+  else entries.splice(idx, 1);
+  try { saveTrashManifest(trashDir, entries); } catch {}
+  if (moveError) return { ok: false, error: moveError };
+  return { ok: true };
+});
+
+// Permanently deletes ONE trash entry (Корзина tab's per-row "Удалить навсегда") —
+// reuses deleteTrashEntryFiles (lib/mainutil.js), the exact same containment-checked
+// unlink logic purgeTrash's 30-day sweep uses, so a hand-edited manifest.json can't turn
+// this into a delete-anywhere primitive either.
+ipcMain.handle("delete-trash-entry", async (_e, { id } = {}) => {
+  const { outDir, vaultRoot } = currentOutDirAndVault();
+  const trashDir = trashRootFor(outDir, vaultRoot);
+  const entries = loadTrashManifest(trashDir);
+  const idx = entries.findIndex((e) => e && e.id === id);
+  if (idx === -1) return { ok: false, error: "Запись не найдена в корзине" };
+  deleteTrashEntryFiles(entries[idx], trashDir);
+  entries.splice(idx, 1);
+  try { saveTrashManifest(trashDir, entries); } catch {}
+  return { ok: true };
+});
+
+// Permanently empties the ENTIRE trash (Корзина tab's toolbar "Очистить корзину") — same
+// per-entry deleteTrashEntryFiles reuse as delete-trash-entry above, just looped over
+// every entry instead of one.
+ipcMain.handle("empty-trash", async () => {
+  const { outDir, vaultRoot } = currentOutDirAndVault();
+  const trashDir = trashRootFor(outDir, vaultRoot);
+  const entries = loadTrashManifest(trashDir);
+  for (const entry of entries) deleteTrashEntryFiles(entry, trashDir);
+  try { saveTrashManifest(trashDir, []); } catch {}
   return { ok: true };
 });
 
