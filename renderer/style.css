@@ -326,8 +326,14 @@ main:has(> #view-prompts:not(.hidden)) { max-width: 1200px; }
    same DOM flow as note rows); they're never clickable as a row (no selectNote/
    readNote) — only their own ▶/✕ buttons act. */
 .rail-item.pending { cursor: default; flex-direction: row; align-items: center; margin-bottom: 6px; }
+/* Rail is a rigid 280px column and the pending row's ▶-button became labeled in the T1
+   redesign («▶ Обработать») — without an ellipsis the shared .queue-name's
+   word-break:break-all (sized for the wide import queue on Запись) collapses the title
+   into a one-letter-per-line vertical strip. Regression v1.4.10, owner-reported. */
+.rail-item.pending .queue-name { flex: 1; min-width: 0; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; word-break: normal; }
 .rail-pending-meta { display: inline-flex; align-items: center; gap: 6px; color: var(--muted);
-  font-size: 11px; margin-left: 6px; }
+  font-size: 11px; margin-left: 6px; flex: none; }
 
 /* История: collapsible per-recording group (audio-first rail, design "Вариант A" —
    see buildRecordings/buildNotesRecordingRow in renderer.js). Every recording with ≥1
@@ -374,7 +380,7 @@ main:has(> #view-prompts:not(.hidden)) { max-width: 1200px; }
   color: var(--muted); font-size: 11.5px; }
 .rail-rec-meta-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rail-rec-badge { display: inline-flex; align-items: center; border-radius: 999px;
-  padding: 1px 8px; font-size: 10.5px; font-weight: 600; line-height: 1.6; }
+  padding: 1px 8px; font-size: 10.5px; font-weight: 600; line-height: 1.6; white-space: nowrap; }
 .rail-rec-badge.wait { background: var(--rec-tint); color: var(--rec); }
 .rail-rec-badge.empty { border: 1px dashed var(--inactive); color: var(--inactive); }
 .rail-rec-badge.count { background: var(--card2); border: 1px solid var(--line); color: var(--muted); font-weight: 500; }
@@ -402,7 +408,10 @@ main:has(> #view-prompts:not(.hidden)) { max-width: 1200px; }
   flex: 1; min-width: 0; background: var(--grad-card); box-shadow: var(--shadow-card); border: 1px solid var(--line);
   border-radius: 12px; padding: 20px 24px; min-height: 300px;
 }
-.note-actions { display: flex; gap: 8px; margin-bottom: 8px; }
+/* wrap, not overflow: at narrow window widths the header button row (Obsidian/К записи/
+   Аудио/Путь/Переобработать/Удалить) is wider than the note view — same fix class as
+   the rail card actions (v1.4.10 follow-up). */
+.note-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
 .note-meta { font-size: 12px; color: var(--muted); margin-bottom: 14px; }
 .reprocess-picker { margin: 14px 0; padding-top: 14px; border-top: 1px solid var(--line); }
 .reprocess-picker label { margin-bottom: 10px; }
@@ -677,9 +686,9 @@ pre {
 .result-actions { display: flex; gap: 8px; margin-bottom: 12px; }
 .speaker-map { background: var(--card2); border: 1px solid var(--line); border-radius: 8px; padding: 12px; margin-bottom: 12px; }
 .speaker-title { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
-.speaker-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.speaker-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; flex-wrap: wrap; }
 .speaker-old { flex: 0 0 130px; font-size: 13px; }
-.speaker-row input { flex: 1; }
+.speaker-row input { flex: 1; min-width: 120px; }
 
 /* PARA search pane */
 .search-row { display: flex; gap: 10px; align-items: center; margin: 12px 0; }

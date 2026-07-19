@@ -1,6 +1,6 @@
 {
   "name": "meeting-recorder",
-  "version": "1.4.10",
+  "version": "1.4.11",
   "description": "Локальная запись встреч: микрофон + системный звук → транскрипт → сводка по промпту",
   "main": "main.js",
   "scripts": {
