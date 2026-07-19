@@ -10,6 +10,7 @@ const {
   rewriteNoteSpeakers, isOutsideRoot, isNoteDeletable, indexRunReducer, upsertById, diskGuardVerdict, busyVerdict,
   isPathInsideRoots,
   isAudioDeletable, trashRootFor, trashDestPath, moveToTrash, purgeTrash,
+  isTrashAudioFile, trashDaysLeft, buildTrashEntry, restoreDestinationFor, deleteTrashEntryFiles,
   resolveOutDirOnVaultChange, trayMenuTemplate,
   resolvePythonBin, resolveFfmpegBin, resolveResourcePath, resolveAudioTeeBin, resolveAssetPath, backendInstallStatus,
   parseFfmpegVersion,
@@ -600,6 +601,94 @@ test("purgeTrash: a file outside trashDir in the manifest is skipped (never dele
   const kept = purgeTrash([entry], trashDir, maxAge, now, deps);
   assert.deepEqual(kept, [], "entry is still dropped from the manifest — the purge decision is time-based, not per-file-success-based");
   assert.deepEqual(unlinked, [path.join(trashDir, "a.wav")], "only the file actually inside trashDir gets deleted; the out-of-trashDir path is skipped");
+});
+
+// ── Корзина tab (trash-tab feature) ─────────────────────────────────────────
+test("isTrashAudioFile: recognized audio extension (case-insensitive) is true", () => {
+  assert.equal(isTrashAudioFile("/out/.trash/a.wav"), true);
+  assert.equal(isTrashAudioFile("/out/.trash/a.WAV"), true);
+  assert.equal(isTrashAudioFile("/out/.trash/a.mp3"), true);
+});
+test("isTrashAudioFile: a .md (or any non-audio) path is false", () => {
+  assert.equal(isTrashAudioFile("/out/.trash/a.md"), false);
+  assert.equal(isTrashAudioFile("/out/.trash/a.txt"), false);
+});
+
+test("trashDaysLeft: default 30-day window, deletedAt === now → 30 days left", () => {
+  const now = 1_000_000_000_000;
+  assert.equal(trashDaysLeft(now, now), 30);
+});
+test("trashDaysLeft: exactly at the 30-day boundary → 0 (not yet negative)", () => {
+  const now = 1_000_000_000_000;
+  const maxAge = 30 * 24 * 3600 * 1000;
+  assert.equal(trashDaysLeft(now - maxAge, now), 0);
+});
+test("trashDaysLeft: 7 whole days elapsed out of 30 → 23 left", () => {
+  const dayMs = 24 * 3600 * 1000;
+  const now = 1_000_000_000_000;
+  assert.equal(trashDaysLeft(now - 7 * dayMs, now), 23);
+});
+test("trashDaysLeft: a partial day remaining still rounds up to 1 (never shows 0 while anything remains)", () => {
+  const now = 1_000_000_000_000;
+  const maxAge = 30 * 24 * 3600 * 1000;
+  assert.equal(trashDaysLeft(now - maxAge + 1, now), 1);
+});
+test("trashDaysLeft: custom maxAgeMs is honored instead of the 30-day default", () => {
+  const dayMs = 24 * 3600 * 1000;
+  const now = 1_000_000_000_000;
+  assert.equal(trashDaysLeft(now - dayMs, now, 5 * dayMs), 4);
+});
+
+test("buildTrashEntry: fills baseStamp/title/origin defaults when omitted", () => {
+  const entry = buildTrashEntry({ id: "id1", deletedAt: 123, kind: "note", files: ["/out/.trash/a.md"] });
+  assert.deepEqual(entry, {
+    id: "id1", deletedAt: 123, kind: "note", files: ["/out/.trash/a.md"],
+    baseStamp: null, title: null, origin: {},
+  });
+});
+test("buildTrashEntry: carries baseStamp/title/origin through unchanged when provided", () => {
+  const entry = buildTrashEntry({
+    id: "id2", deletedAt: 456, kind: "recording", files: ["/out/.trash/a.wav", "/out/.trash/a.md"],
+    baseStamp: "s1", title: "Синк", origin: { "/out/.trash/a.wav": "/out/a.wav" },
+  });
+  assert.deepEqual(entry, {
+    id: "id2", deletedAt: 456, kind: "recording", files: ["/out/.trash/a.wav", "/out/.trash/a.md"],
+    baseStamp: "s1", title: "Синк", origin: { "/out/.trash/a.wav": "/out/a.wav" },
+  });
+});
+
+test("restoreDestinationFor: an origin-mapped file restores to its recorded original path", () => {
+  const origin = { "/out/.trash/a.wav": "/vault/Projects/a.wav" };
+  assert.equal(restoreDestinationFor("/out/.trash/a.wav", origin, "/out"), "/vault/Projects/a.wav");
+});
+test("restoreDestinationFor: a legacy file with no origin entry falls back to outDir/basename", () => {
+  assert.equal(restoreDestinationFor("/out/.trash/a.wav", {}, "/out"), path.join("/out", "a.wav"));
+  assert.equal(restoreDestinationFor("/out/.trash/a.wav", undefined, "/out"), path.join("/out", "a.wav"));
+  assert.equal(restoreDestinationFor("/out/.trash/a.wav", null, "/out"), path.join("/out", "a.wav"));
+});
+test("restoreDestinationFor: origin present but missing THIS file's key still falls back to outDir/basename", () => {
+  const origin = { "/out/.trash/other.wav": "/vault/other.wav" };
+  assert.equal(restoreDestinationFor("/out/.trash/a.wav", origin, "/out"), path.join("/out", "a.wav"));
+});
+
+test("deleteTrashEntryFiles: unlinks every existing file inside trashDir", () => {
+  const entry = { files: ["/out/.trash/a.wav", "/out/.trash/a.md"] };
+  const unlinked = [];
+  const deps = { existsSync: () => true, unlinkSync: (p) => unlinked.push(p) };
+  deleteTrashEntryFiles(entry, "/out/.trash", deps);
+  assert.deepEqual(unlinked, ["/out/.trash/a.wav", "/out/.trash/a.md"]);
+});
+test("deleteTrashEntryFiles: a file outside trashDir is skipped (same containment as purgeTrash)", () => {
+  const entry = { files: ["/etc/passwd", "/out/.trash/a.wav"] };
+  const unlinked = [];
+  const deps = { existsSync: () => true, unlinkSync: (p) => unlinked.push(p) };
+  deleteTrashEntryFiles(entry, "/out/.trash", deps);
+  assert.deepEqual(unlinked, ["/out/.trash/a.wav"]);
+});
+test("deleteTrashEntryFiles: a missing file is skipped silently (no throw)", () => {
+  const entry = { files: ["/out/.trash/gone.wav"] };
+  const deps = { existsSync: () => false, unlinkSync: () => { throw new Error("must not be called on a missing file"); } };
+  assert.doesNotThrow(() => deleteTrashEntryFiles(entry, "/out/.trash", deps));
 });
 
 // ── out-dir auto-follow (settings "Куда сохранять", Variant A) ──────────────
