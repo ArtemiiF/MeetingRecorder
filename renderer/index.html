@@ -175,12 +175,16 @@
     <!-- PARA VIEW -->
     <div id="view-para" class="hidden">
       <div class="para-layout">
-        <aside class="para-subnav">
+        <div class="para-main">
+        <!-- Flat navigation (T3, design ref: para-horizontal-a.html вариант A —
+             сегмент-контрол): the old vertical .para-subnav aside is gone, same
+             .subbtn/data-sub buttons now sit in a horizontal pill group at the top
+             of para-main — subSwitchPara/the click-wiring below are unchanged. -->
+        <div class="para-seg">
           <button class="subbtn active" data-sub="inbox">📥 Разбор</button>
           <button class="subbtn" data-sub="search">🔍 Поиск</button>
           <button class="subbtn" data-sub="tree">🗂 Хранилище</button>
-        </aside>
-        <div class="para-main">
+        </div>
         <div id="para-pane-inbox">
       <section class="card" id="paraSetup" style="display:none">
         <h2>PARA-vault</h2>

@@ -265,18 +265,24 @@ main:has(> #view-prompts:not(.hidden)) { max-width: 1200px; }
 }
 .note-view-empty-icon { font-size: 40px; }
 .note-view-empty-title { font-size: 16px; font-weight: 600; color: var(--fg); }
-.para-layout { display: flex; gap: 16px; align-items: flex-start; }
-/* top rebased alongside .history-rail above — same reasoning (old chrome gone). */
-.para-subnav { flex: 0 0 160px; display: flex; flex-direction: column; gap: 4px;
-  position: sticky; top: 16px; }
+.para-layout { display: flex; align-items: flex-start; }
+.para-main { flex: 1; min-width: 0; }
+/* T3 (design ref: para-horizontal-a.html вариант A — сегмент-контрол): the old
+   vertical .para-subnav aside (160px column) is retired — Разбор/Поиск/Хранилище now
+   switch via a horizontal pill group at the top of para-main. Same .subbtn class and
+   data-sub attribute as before (subSwitchPara/click-wiring in renderer.js untouched);
+   only the container's own layout changed from a column of rows to an inline pill bar. */
+.para-seg { display: inline-flex; gap: 2px; background: var(--card2); border: 1px solid var(--line);
+  border-radius: 999px; padding: 3px; margin-bottom: 14px; }
+.para-seg .subbtn { padding: 6px 16px; border-radius: 999px; }
+.para-seg .subbtn:hover:not(.active):not(:disabled) { background: var(--line); color: var(--fg); }
 .subbtn { text-align: left; background: transparent; color: var(--muted); border: none;
   border-radius: 8px; padding: 8px 12px; cursor: pointer; font-size: 13px; font-family: inherit; }
 .subbtn:hover:not(:disabled) { background: var(--card2); color: var(--fg); }
 .subbtn.active { background: var(--selection); color: var(--selection-text); }
 .subbtn:disabled { opacity: .4; cursor: default; }
-.para-main { flex: 1; min-width: 0; }
 .para-tree-split { display: flex; gap: 16px; align-items: flex-start; }
-.para-tree { font-size: 13px; flex: 0 0 38%; min-width: 0; overflow: auto; max-height: 70vh; }
+.para-tree { font-size: 13px; flex: 0 0 220px; min-width: 0; overflow: auto; max-height: 70vh; }
 .para-treeview { flex: 1; min-width: 0; border-left: 1px solid var(--line); padding-left: 16px;
   max-height: 70vh; overflow: auto; }
 .tree-note.active { color: var(--accent); font-weight: 600; }

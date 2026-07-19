@@ -1111,6 +1111,24 @@ test("PARA sub-tabs: switch to Хранилище renders the vault tree, collap
   assert.ok(!dir.classList.contains("collapsed")); // existing toggle behavior, unchanged
 });
 
+// T3: PARA flat navigation (design ref: para-horizontal-a.html вариант A —
+// сегмент-контрол). The old vertical .para-subnav aside is retired in favor of a
+// horizontal pill group living inside .para-main; subSwitchPara/data-sub switching
+// itself is covered by the ~15 existing "click .subbtn[data-sub=...]" tests above and
+// below — this locks the structural move only.
+test("PARA flat nav: vertical .para-subnav aside is gone, .subbtn/data-sub buttons now live in a horizontal .para-seg group inside .para-main", async () => {
+  const { window, $ } = await boot({});
+  window.document.querySelector('.topbtn[data-view="para"]').click();
+  await tick(window);
+  assert.ok(!window.document.querySelector(".para-subnav"), "the old vertical subnav aside must be gone");
+  const seg = window.document.querySelector(".para-seg");
+  assert.ok(seg, "a segmented pill group must exist");
+  assert.ok($("para-pane-inbox").closest(".para-main").contains(seg),
+    "the segment group must be nested inside para-main, not a separate sidebar column");
+  const subs = Array.from(seg.querySelectorAll(".subbtn")).map((b) => b.dataset.sub);
+  assert.deepEqual(subs, ["inbox", "search", "tree"], "all three subviews present, same order as before");
+});
+
 // ── copy note path (PARA Хранилище/tree note view) ───────────────────────────
 test("ptvCopyPath: copies the tree note's absolute path and shows brief feedback", async () => {
   const { window, $ } = await boot({
