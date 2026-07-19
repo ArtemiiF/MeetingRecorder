@@ -5,9 +5,10 @@ const os = require("os");
 const path = require("path");
 
 const {
-  buildWavHeader, WavWriter, rmsLevel, cacheKey,
+  buildWavHeader, WavWriter, rmsLevel, cacheKey, contentFingerprint, isFileStable,
   pairHistory, encodeTokenBlob, decodeTokenBlob, isStale,
-  rewriteNoteSpeakers, isOutsideRoot, isNoteDeletable, indexRunReducer, upsertById, diskGuardVerdict,
+  rewriteNoteSpeakers, isOutsideRoot, isNoteDeletable, indexRunReducer, upsertById, diskGuardVerdict, busyVerdict,
+  isPathInsideRoots,
   isAudioDeletable, trashRootFor, trashDestPath, moveToTrash, purgeTrash,
   resolveOutDirOnVaultChange, trayMenuTemplate,
   resolvePythonBin, resolveFfmpegBin, resolveResourcePath, resolveAudioTeeBin, resolveAssetPath, backendInstallStatus,
@@ -16,6 +17,31 @@ const {
   modelCacheDirsFor, cleanupPartialModelCache, dirSizeBytes,
   compareVersions, pickUpdateAsset,
 } = require("../lib/mainutil");
+const { EVENT_NAMES, EVENTS } = require("../lib/events");
+
+// ── lib/events.js (M4 arch-audit — event-name contract) ─────────────────────
+// events.json is the shared source of truth read by BOTH this module and
+// backend.py's own EVENT_NAMES frozenset (tests/test_backend.py has the
+// cross-lock test on the Python side, scanning main.js for EVENTS.* usage).
+test("EVENT_NAMES: non-empty array of unique strings, sourced from events.json", () => {
+  assert.ok(Array.isArray(EVENT_NAMES) && EVENT_NAMES.length > 0);
+  assert.equal(new Set(EVENT_NAMES).size, EVENT_NAMES.length, "no duplicate event names in the contract");
+  for (const name of EVENT_NAMES) assert.equal(typeof name, "string");
+});
+test("EVENTS: every contract name gets its own constant (no naming collisions after the uppercase/underscore transform)", () => {
+  assert.equal(Object.keys(EVENTS).length, EVENT_NAMES.length);
+});
+test("EVENTS: spot-check known constants resolve to their exact contract string", () => {
+  assert.equal(EVENTS.CLASSIFIED, "classified");
+  assert.equal(EVENTS.CLASSIFIED_TERMS, "classified-terms");
+  assert.equal(EVENTS.SEARCH_RESULT, "search_result");
+  assert.equal(EVENTS.STAGE_END, "stage_end");
+  assert.equal(EVENTS.ERROR, "error");
+  assert.equal(EVENTS.LOG, "log");
+});
+test("EVENTS: an unknown constant name resolves to undefined, not a throw (a typo like EVENTS.CLASIFIED must never silently match every ev.event string)", () => {
+  assert.equal(EVENTS.NOT_A_REAL_EVENT, undefined);
+});
 
 // ── WAV header ──────────────────────────────────────────────────────────────
 test("buildWavHeader: 44 bytes, correct markers and sizes", () => {
@@ -74,6 +100,92 @@ test("cacheKey: deterministic, 16 hex chars", () => {
 });
 test("cacheKey: different tag → different key", () => {
   assert.notEqual(cacheKey("a:1:2"), cacheKey("a:1:3"));
+});
+
+// ── contentFingerprint (H3b arch-audit — cache staleness content check) ─────
+test("contentFingerprint: identical content produces the identical fingerprint", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fp-test-"));
+  const a = path.join(dir, "a.wav"); const b = path.join(dir, "b.wav");
+  fs.writeFileSync(a, "hello world");
+  fs.writeFileSync(b, "hello world");
+  assert.equal(contentFingerprint(a), contentFingerprint(b));
+});
+test("contentFingerprint: different content, SAME size, produces a DIFFERENT fingerprint — the whole point, catches an in-place rewrite path+size+mtime alone would miss", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fp-test-"));
+  const a = path.join(dir, "a.wav"); const b = path.join(dir, "b.wav");
+  fs.writeFileSync(a, "aaaaaaaaaa");
+  fs.writeFileSync(b, "bbbbbbbbbb");
+  assert.notEqual(contentFingerprint(a), contentFingerprint(b));
+});
+test("contentFingerprint: missing file returns '' rather than throwing", () => {
+  assert.equal(contentFingerprint(path.join(os.tmpdir(), `does-not-exist-${process.pid}.wav`)), "");
+});
+test("contentFingerprint: empty file (0 bytes) doesn't throw and returns a stable, non-empty hash string", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fp-test-"));
+  const p = path.join(dir, "empty.wav");
+  fs.writeFileSync(p, "");
+  const fp = contentFingerprint(p);
+  assert.equal(typeof fp, "string");
+  assert.notEqual(fp, "");
+  assert.equal(fp, contentFingerprint(p)); // deterministic
+});
+test("contentFingerprint: a change at the very start (inside the 64KB head window) IS detected, even on a large file", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fp-test-"));
+  const size = 200 * 1024; // bigger than the 64KB head/tail window on both ends
+  const bufA = Buffer.alloc(size, "x");
+  const bufB = Buffer.from(bufA);
+  bufB.write("CHANGED", 10);
+  const a = path.join(dir, "a.bin"); const b = path.join(dir, "b.bin");
+  fs.writeFileSync(a, bufA);
+  fs.writeFileSync(b, bufB);
+  assert.notEqual(contentFingerprint(a), contentFingerprint(b));
+});
+test("contentFingerprint: a middle-only change (head+tail+size unchanged) is NOT detected — documents the 64KB-window tradeoff", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fp-test-"));
+  const size = 200 * 1024;
+  const bufA = Buffer.alloc(size, "x");
+  const bufB = Buffer.from(bufA);
+  bufB.write("CHANGED", Math.floor(size / 2)); // mutate only the middle
+  const a = path.join(dir, "a.bin"); const b = path.join(dir, "b.bin");
+  fs.writeFileSync(a, bufA);
+  fs.writeFileSync(b, bufB);
+  assert.equal(contentFingerprint(a), contentFingerprint(b),
+    "middle-only edits are invisible to the 64KB head+tail window by design — a deliberate tradeoff, not a bug");
+});
+
+// ── isFileStable (H3a arch-audit — file-stability gate before processing) ───
+test("isFileStable: size unchanged across the wait → stable (true)", async () => {
+  const statFn = () => 1000; // same every call
+  const waitFn = () => Promise.resolve();
+  assert.equal(await isFileStable("/x", 10, statFn, waitFn), true);
+});
+test("isFileStable: size changed between the two samples → not stable (false) — mirrors the TODO.md incident's exact numbers (12KB → 48MB mid-write)", async () => {
+  const sizes = [12000, 48000000];
+  let i = 0;
+  const statFn = () => sizes[i++];
+  const waitFn = () => Promise.resolve();
+  assert.equal(await isFileStable("/x", 10, statFn, waitFn), false);
+});
+test("isFileStable: missing/unreadable file (statFn returns null) on the FIRST sample → not stable, waitFn never even called", async () => {
+  let waited = false;
+  const statFn = () => null;
+  const waitFn = () => { waited = true; return Promise.resolve(); };
+  assert.equal(await isFileStable("/x", 10, statFn, waitFn), false);
+  assert.equal(waited, false, "no point waiting on a file that doesn't exist at all");
+});
+test("isFileStable: file vanishes between samples (2nd statFn call returns null) → not stable", async () => {
+  const results = [1000, null];
+  let i = 0;
+  const statFn = () => results[i++];
+  const waitFn = () => Promise.resolve();
+  assert.equal(await isFileStable("/x", 10, statFn, waitFn), false);
+});
+test("isFileStable: waitFn is called with exactly the requested waitMs", async () => {
+  let seenMs = null;
+  const statFn = () => 5;
+  const waitFn = (ms) => { seenMs = ms; return Promise.resolve(); };
+  await isFileStable("/x", 250, statFn, waitFn);
+  assert.equal(seenMs, 250);
 });
 
 // ── history pairing ─────────────────────────────────────────────────────────
@@ -196,6 +308,26 @@ test("diskGuardVerdict: custom threshold refuse message reflects the given thres
   assert.doesNotMatch(v.msg, /≥1 ГБ/);
 });
 
+// ── busyVerdict (centralized concurrent-operation refusal, H1 arch-audit) ────
+test("busyVerdict: nothing busy → null", () => {
+  assert.equal(busyVerdict([[false, "a"], [false, "b"]]), null);
+});
+test("busyVerdict: single busy check returns its message", () => {
+  assert.equal(busyVerdict([[true, "занято"]]), "занято");
+});
+test("busyVerdict: first-match-wins — earlier entries take priority over later ones", () => {
+  assert.equal(busyVerdict([[true, "первый"], [true, "второй"]]), "первый");
+});
+test("busyVerdict: skips false entries, returns the first true one regardless of position", () => {
+  assert.equal(busyVerdict([[false, "a"], [false, "b"], [true, "c"], [true, "d"]]), "c");
+});
+test("busyVerdict: empty checks array → null", () => {
+  assert.equal(busyVerdict([]), null);
+});
+test("busyVerdict: no argument at all → null (defensive default)", () => {
+  assert.equal(busyVerdict(), null);
+});
+
 // ── rewriteNoteSpeakers ───────────────────────────────────────────────────────
 test("rewriteNoteSpeakers: rewrites body mentions", () => {
   const text = "---\ntype: meeting\n---\n\n**[Спикер 1]**: привет\n**[Спикер 2]**: пока";
@@ -256,6 +388,42 @@ test("isOutsideRoot: no root configured → false (nothing to compare)", () => {
 });
 test("isOutsideRoot: no dir → false", () => {
   assert.equal(isOutsideRoot("", "/vault"), false);
+});
+
+// ── isPathInsideRoots (general path containment, H2 arch-audit) ─────────────
+// General-purpose primitive behind isNoteDeletable/isAudioDeletable below —
+// main.js's read-note/rename-speakers/reveal/para-extract/para-classify/
+// para-file handlers validate renderer-supplied paths against it directly
+// (no .md/audio-extension requirement, unlike the deletion-specific wrappers).
+test("isPathInsideRoots: path inside out_dir (single root) is inside", () => {
+  assert.equal(isPathInsideRoots("/out/meeting.md", ["/out"]), true);
+});
+test("isPathInsideRoots: path inside the PARA vault root (2nd root) is inside", () => {
+  assert.equal(isPathInsideRoots("/vault/Projects/meeting.md", ["/out", "/vault"]), true);
+});
+test("isPathInsideRoots: path equal to a root itself is inside (directory-target case, e.g. para-file's root arg)", () => {
+  assert.equal(isPathInsideRoots("/vault", ["/vault"]), true);
+});
+test("isPathInsideRoots: path outside every allowed root is refused", () => {
+  assert.equal(isPathInsideRoots("/elsewhere/meeting.md", ["/out", "/vault"]), false);
+});
+test("isPathInsideRoots: traversal ('..') resolving outside the root is refused (symlink-escape shape — caller passes the REALPATH-resolved target)", () => {
+  // Mirrors isNoteDeletable's own traversal test: main.js resolves symlinks via
+  // fs.realpathSync BEFORE calling in, so a symlink named "x" inside an allowed
+  // root that points outside it arrives here already resolved to the escaped
+  // path — exactly like a literal ".." traversal would.
+  const resolved = path.resolve("/out/../../etc/passwd");
+  assert.equal(isPathInsideRoots(resolved, ["/out"]), false);
+});
+test("isPathInsideRoots: missing/unresolvable path (null) is refused", () => {
+  assert.equal(isPathInsideRoots(null, ["/out"]), false);
+});
+test("isPathInsideRoots: no allowed roots configured is refused", () => {
+  assert.equal(isPathInsideRoots("/out/meeting.md", []), false);
+  assert.equal(isPathInsideRoots("/out/meeting.md", [null, ""]), false);
+});
+test("isPathInsideRoots: no argument at all (undefined roots) → refused, not a throw", () => {
+  assert.equal(isPathInsideRoots("/out/meeting.md"), false);
 });
 
 // ── История note deletion (path validation before unlink) ───────────────────

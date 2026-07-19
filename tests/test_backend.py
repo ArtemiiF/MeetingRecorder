@@ -7,7 +7,6 @@ import signal
 import sys
 import threading
 import types
-from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -57,6 +56,133 @@ def test_stage_sets_current_and_emits():
 def test_stage_end_emits_status():
     assert capture(backend.stage_end, "llm", "fail", "no summary")[0] == {
         "event": "stage_end", "stage": "llm", "status": "fail", "msg": "no summary"}
+
+
+# ── event-name contract (M4 arch-audit) ─────────────────────────────────────
+# events.json (repo root) is the single source of truth shared with main.js's
+# lib/events.js — backend.EVENT_NAMES (loaded at import time) is the SAME file,
+# and emit() asserts every event it ever sends is a member of it. This section
+# locks the OTHER direction: every EVENTS.* constant main.js's dispatch actually
+# references must resolve to a name present in the SAME contract — main.js
+# can't require() from here (this is Python), so the mapping ("classified-terms"
+# -> "CLASSIFIED_TERMS") is reproduced from events.json directly, mirroring
+# lib/events.js's own transform, rather than requiring a JS runtime.
+APP_DIR = Path(__file__).resolve().parent.parent
+EVENTS_JSON_PATH = APP_DIR / "events.json"
+MAIN_JS_PATH = APP_DIR / "main.js"
+
+
+def _event_name_to_const(name):
+    """Mirrors lib/events.js's own transform exactly: uppercase, "-" -> "_"."""
+    return name.upper().replace("-", "_")
+
+
+def test_backend_event_names_loaded_from_the_shared_contract_file():
+    assert backend.EVENT_NAMES is not None, "events.json must be present and valid for the contract to be enforced"
+    data = json.loads(EVENTS_JSON_PATH.read_text(encoding="utf-8"))
+    assert backend.EVENT_NAMES == frozenset(data["events"])
+
+
+def test_emit_rejects_an_event_name_outside_the_contract():
+    with pytest.raises(AssertionError):
+        capture(backend.emit, "totally-not-a-real-event", msg="x")
+
+
+def test_emit_accepts_every_name_actually_in_the_contract():
+    # Belt-and-suspenders: every cataloged name must be a valid emit() call, not
+    # just the ones backend.py happens to call today — keeps the contract file
+    # itself honest as a superset, not just a lucky match of current usage.
+    for name in backend.EVENT_NAMES:
+        capture(backend.emit, name)  # must not raise
+
+
+def test_cross_lock_every_EVENTS_constant_main_js_dispatches_on_resolves_to_a_cataloged_event_name():
+    """The actual cross-lock (M4 arch-audit): scans main.js's source for every
+    `EVENTS.SOME_NAME` token, maps each back to the event-name string it must
+    resolve to (lib/events.js's transform), and asserts that string is present in
+    events.json. A stale/renamed main.js reference (e.g. a typo like
+    EVENTS.CLASIFIED, which lib/events.js would silently resolve to `undefined`
+    and NEVER match any real ev.event string) fails HERE instead of silently
+    dropping every occurrence of that event at runtime."""
+    contract = frozenset(json.loads(EVENTS_JSON_PATH.read_text(encoding="utf-8"))["events"])
+    const_to_name = {_event_name_to_const(name): name for name in contract}
+    assert len(const_to_name) == len(contract), "two contract names collided onto the same constant — pick a less ambiguous event name"
+
+    main_js_src = MAIN_JS_PATH.read_text(encoding="utf-8")
+    referenced_consts = set(re.findall(r"EVENTS\.([A-Z_0-9]+)", main_js_src))
+    assert referenced_consts, "sanity check: main.js should reference at least one EVENTS.* constant"
+
+    unknown = referenced_consts - set(const_to_name.keys())
+    assert not unknown, (
+        f"main.js references EVENTS.{{{', '.join(sorted(unknown))}}} — no such constant exists in "
+        f"events.json's contract (lib/events.js would silently resolve it to undefined, and "
+        f"ev.event === undefined never matches a real string)"
+    )
+
+
+# ── model-cache path mirror lock (M5 arch-audit) ────────────────────────────
+# lib/mainutil.js's hfCacheDir/whisperModelDir/vadJitPath/PYANNOTE_REPO_IDS must
+# stay byte-identical to backend.py's own _WHISPER_MODEL_DIR/_VAD_JIT_PATH/
+# _PYANNOTE_REPO_IDS (both sides' own comments already say so — see
+# lib/mainutil.js:546-547) — the JS side pins these via hand-typed literal tests
+# (tests/mainutil.test.js), but nothing previously locked backend.py's side to
+# the SAME literals.
+#
+# Chose a regex-extraction test over a shared models-spec.json contract file
+# (unlike M4's events.json): mainutil.js's functions take `homedir` as an
+# explicit parameter (pure, computed per-call) while backend.py's are
+# module-level absolute-path constants computed once via Path.home() —
+# unifying the two behind a shared spec would mean restructuring backend.py's
+# constant computation (a real, model-loading-critical code path) purely to
+# serve a drift-lock. A zero-runtime-cost text-extraction test (no node
+# subprocess, no CI dependency on a working `node` binary) buys the same
+# protection against accidental drift without touching that code at all —
+# reading backend.py's side via its LIVE imported attributes (not a second
+# layer of source-text regex) keeps this test itself honest.
+MAINUTIL_JS_PATH = APP_DIR / "lib" / "mainutil.js"
+
+
+def _mainutil_js_source():
+    return MAINUTIL_JS_PATH.read_text(encoding="utf-8")
+
+
+def test_mirror_lock_whisper_repo_id_matches_backend_WHISPER_MODEL_DIR():
+    src = _mainutil_js_source()
+    m = re.search(r'function whisperModelDir\(homedir\) \{\s*\n\s*return hfCacheDir\(homedir, "([^"]+)"\);', src)
+    assert m, "whisperModelDir's body shape changed in lib/mainutil.js — update this test's regex alongside it"
+    js_repo_id = m.group(1)
+    expected_dirname = "models--" + js_repo_id.replace("/", "--")
+    assert backend._WHISPER_MODEL_DIR.name == expected_dirname, (
+        f"lib/mainutil.js's whisperModelDir repo id ({js_repo_id!r}) no longer matches "
+        f"backend.py's _WHISPER_MODEL_DIR ({backend._WHISPER_MODEL_DIR.name!r})"
+    )
+
+
+def test_mirror_lock_vad_jit_path_matches_backend_VAD_JIT_PATH():
+    src = _mainutil_js_source()
+    m = re.search(
+        r"function vadJitPath\(homedir\) \{\s*\n\s*return path\.join\(\s*\n\s*homedir, (.+?)\s*\n\s*\);\s*\n\}",
+        src,
+    )
+    assert m, "vadJitPath's body shape changed in lib/mainutil.js — update this test's regex alongside it"
+    segments = re.findall(r'"([^"]+)"', m.group(1))
+    js_relative = "/".join(segments)
+    backend_relative = str(backend._VAD_JIT_PATH.relative_to(Path.home())).replace(os.sep, "/")
+    assert js_relative == backend_relative, (
+        f"lib/mainutil.js's vadJitPath ({js_relative!r}) no longer matches "
+        f"backend.py's _VAD_JIT_PATH ({backend_relative!r})"
+    )
+
+
+def test_mirror_lock_pyannote_repo_ids_match_backend_PYANNOTE_REPO_IDS():
+    src = _mainutil_js_source()
+    m = re.search(r"const PYANNOTE_REPO_IDS = \[(.*?)\];", src, re.S)
+    assert m, "PYANNOTE_REPO_IDS's literal shape changed in lib/mainutil.js — update this test's regex alongside it"
+    js_ids = re.findall(r'"([^"]+)"', m.group(1))
+    assert js_ids == list(backend._PYANNOTE_REPO_IDS), (
+        f"lib/mainutil.js's PYANNOTE_REPO_IDS ({js_ids!r}) no longer matches "
+        f"backend.py's _PYANNOTE_REPO_IDS ({list(backend._PYANNOTE_REPO_IDS)!r})"
+    )
 
 
 # ── str2bool ────────────────────────────────────────────────────────────────
@@ -535,7 +661,7 @@ def test_cmd_history_passes_vault_root_through_to_reconcile(tmp_path):
     archive = vault / "Archives"; archive.mkdir()
     (archive / "meeting-2026-07-08-184655.md").write_text('---\ntitle: "Filed"\n---\n# x', encoding="utf-8")
     db = str(tmp_path / "i.db")
-    events = capture(backend.cmd_history, str(out), db, None, str(vault))
+    events = capture(backend.cmd_history, str(out), db, str(vault))
     items = [e for e in events if e["event"] == "history"][0]["items"]
     assert len(items) == 1 and items[0]["title"] == "Filed"
 
@@ -585,75 +711,6 @@ def test_db_connect_sets_busy_timeout(tmp_path):
     timeout_ms = conn.execute("PRAGMA busy_timeout").fetchone()[0]
     conn.close()
     assert timeout_ms == 10000
-
-
-# ── _load_pending_manifest (read-only mirror of main.js's loadPendingManifest) ──
-def test_load_pending_manifest_missing_file_returns_empty(tmp_path):
-    assert backend._load_pending_manifest(str(tmp_path / "nope.json")) == []
-
-
-def test_load_pending_manifest_corrupt_file_returns_empty(tmp_path):
-    f = tmp_path / "pending.json"; f.write_text("{not json", encoding="utf-8")
-    assert backend._load_pending_manifest(str(f)) == []
-
-
-def test_load_pending_manifest_reads_recordings_array(tmp_path):
-    f = tmp_path / "pending.json"
-    f.write_text(json.dumps({"recordings": [{"id": "r1", "name": "Запись 1"}]}), encoding="utf-8")
-    assert backend._load_pending_manifest(str(f)) == [{"id": "r1", "name": "Запись 1"}]
-
-
-def test_load_pending_manifest_non_list_recordings_returns_empty(tmp_path):
-    f = tmp_path / "pending.json"
-    f.write_text(json.dumps({"recordings": "oops"}), encoding="utf-8")
-    assert backend._load_pending_manifest(str(f)) == []
-
-
-# ── cmd_history merges pending recordings, sorted chronologically ──────────────
-def test_cmd_history_merges_pending_in_chronological_order(tmp_path):
-    out = tmp_path / "vault"; out.mkdir()
-    db = str(tmp_path / "i.db")
-    # a real note recorded at 12:00
-    (out / "meeting-2026-07-07-120000.md").write_text(
-        '---\ntitle: "Митинг"\n---\n# x', encoding="utf-8")
-    # a pending recording started at 13:00 (note stamp format vs pending's "T"-separated
-    # format with a random suffix — cmd_history must parse both to interleave correctly)
-    pending_file = tmp_path / "pending.json"
-    pending_file.write_text(json.dumps({"recordings": [
-        {"id": "2026-07-07T13-00-00-ab12", "name": "Запись 07.07 13:00",
-         "stamp": "2026-07-07T13-00-00-ab12", "mixed": "/rec/r1/mixed.wav"},
-    ]}), encoding="utf-8")
-    events = capture(backend.cmd_history, str(out), db, str(pending_file))
-    items = [e for e in events if e["event"] == "history"][0]["items"]
-    assert len(items) == 2
-    # newest first, same convention as _db_list's ORDER BY stamp DESC
-    assert items[0]["kind"] == "pending" and items[0]["name"] == "Запись 07.07 13:00"
-    assert items[1]["title"] == "Митинг"
-
-
-def test_cmd_history_without_pending_file_is_unaffected(tmp_path):
-    out = tmp_path / "vault"; out.mkdir()
-    db = str(tmp_path / "i.db")
-    (out / "meeting-2026-07-07-120000.md").write_text('---\ntitle: "A"\n---\n# x', encoding="utf-8")
-    events = capture(backend.cmd_history, str(out), db)
-    items = [e for e in events if e["event"] == "history"][0]["items"]
-    assert len(items) == 1 and "kind" not in items[0]
-
-
-def test_cmd_history_tolerates_missing_pending_file(tmp_path):
-    out = tmp_path / "vault"; out.mkdir()
-    db = str(tmp_path / "i.db")
-    (out / "meeting-2026-07-07-120000.md").write_text('---\ntitle: "A"\n---\n# x', encoding="utf-8")
-    events = capture(backend.cmd_history, str(out), db, str(tmp_path / "nope.json"))
-    items = [e for e in events if e["event"] == "history"][0]["items"]
-    assert len(items) == 1  # missing manifest → zero pending items merged, no crash
-
-
-def test_parse_any_stamp_handles_both_formats():
-    assert backend._parse_any_stamp("2026-07-07-120000") == datetime(2026, 7, 7, 12, 0, 0)
-    assert backend._parse_any_stamp("2026-07-07T13-00-00-ab12") == datetime(2026, 7, 7, 13, 0, 0)
-    assert backend._parse_any_stamp("garbage") is None
-    assert backend._parse_any_stamp(None) is None
 
 
 def test_process_records_template_in_index_and_frontmatter(monkeypatch, tmp_path):
@@ -4459,22 +4516,6 @@ def test_cmd_history_note_row_base_stamp_collapses_lang_and_revision_variants(tm
     items = [e for e in events if e["event"] == "history"][0]["items"]
     assert {it["base_stamp"] for it in items} == {"2026-01-01-100000"}
 
-
-def test_cmd_history_pending_row_has_no_base_stamp(tmp_path):
-    # base_stamp is a note-row concept (see cmd_history's comment) — pending rows use a
-    # different stamp namespace (_parse_any_stamp's "T"-separated format) and are not part
-    # of the audio-pairing identity yet (retiring the pending merge path is a separate PR).
-    out = tmp_path / "vault"; out.mkdir()
-    db = str(tmp_path / "i.db")
-    pending_file = tmp_path / "pending.json"
-    pending_file.write_text(json.dumps({"recordings": [
-        {"id": "2026-01-01T10-00-00-ab12", "name": "Запись", "stamp": "2026-01-01T10-00-00-ab12",
-         "mixed": "/rec/r1/mixed.wav"},
-    ]}), encoding="utf-8")
-    events = capture(backend.cmd_history, str(out), db, str(pending_file))
-    items = [e for e in events if e["event"] == "history"][0]["items"]
-    assert items[0]["kind"] == "pending"
-    assert "base_stamp" not in items[0]
 
 
 # ── cmd_history audios inventory — surfaces audio invisible to the .md-only _reconcile ─

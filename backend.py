@@ -37,11 +37,38 @@ from pathlib import Path
 warnings.filterwarnings("ignore", category=UserWarning)
 
 
+# ──────────────────────────────────────────────────────────────────────────
+# Event-name contract (M4 arch-audit) — single source of truth shared with
+# main.js's lib/events.js (see that file's own comment for the full picture).
+# Loaded once at import time from the repo-root events.json; emit() below
+# asserts every event name it ever sends is a member of this set, so a
+# typo/rename here fails LOUDLY at runtime instead of silently drifting out of
+# sync with main.js's dispatch. The cross-lock test (tests/test_backend.py)
+# checks the OTHER direction: every EVENTS.* constant main.js's dispatch
+# actually references resolves to a name present in this same events.json.
+def _load_event_names():
+    contract_path = Path(__file__).parent / "events.json"
+    try:
+        data = json.loads(contract_path.read_text(encoding="utf-8"))
+        return frozenset(data["events"])
+    except Exception:
+        # A missing/corrupt contract file must not crash the whole backend —
+        # None disables emit()'s assertion below (an empty frozenset would
+        # reject EVERY event) rather than break every single command; the
+        # cross-lock test still catches a missing/corrupt file directly.
+        return None
+
+
+EVENT_NAMES = _load_event_names()
+
 _CURRENT_STAGE = "general"  # which stage subsequent log() lines belong to
 
 
 def emit(event, **kwargs):
     """Print one json line to stdout and flush."""
+    assert EVENT_NAMES is None or event in EVENT_NAMES, (
+        f"unknown event name {event!r} — not in events.json contract (M4 arch-audit)"
+    )
     payload = {"event": event}
     payload.update(kwargs)
     sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
@@ -2397,55 +2424,20 @@ def _db_list(conn, limit=None):
     return [dict(zip(_DB_COLS, r)) for r in rows]
 
 
-def _load_pending_manifest(pending_file):
-    """Read-only mirror of main.js's loadPendingManifest — tolerate a missing or
-    corrupt manifest file (returns [])."""
-    try:
-        data = json.loads(Path(pending_file).read_text(encoding="utf-8"))
-    except Exception:
-        return []
-    recordings = data.get("recordings")
-    return recordings if isinstance(recordings, list) else []
-
-
-def _parse_any_stamp(stamp):
-    """Parse either stamp format into a real datetime for chronological merging:
-    - note stamp: "2026-07-07-123456" (main.js/backend timestamp, first 17 chars)
-    - pending stamp: "2026-07-07T12-34-56-x9k2" (main.js start-recording, first 19
-      chars — a "T" at index 10 distinguishes it from the note format above).
-    Returns None on anything unparseable (caller sorts those last)."""
-    if not stamp or len(stamp) < 17:
-        return None
-    try:
-        if len(stamp) >= 19 and stamp[10] == "T":
-            return datetime.strptime(stamp[:19], "%Y-%m-%dT%H-%M-%S")
-        return datetime.strptime(stamp[:17], "%Y-%m-%d-%H%M%S")
-    except ValueError:
-        return None
-
-
-def cmd_history(out_dir, db_path, pending_file=None, vault_root=None):
+def cmd_history(out_dir, db_path, vault_root=None):
+    # L9 arch-audit: the pending-recordings merge (kind:"pending" synthetic rows,
+    # --pending-file/_load_pending_manifest/_parse_any_stamp) was retired as dead
+    # code — main.js's renderer already filtered every kind:"pending" row out
+    # everywhere it consumed list-history's result (buildRecordings/nextVersionFor),
+    # never rendering them; still-pending recordings are tracked and merged into
+    # the rail entirely client-side via state.pendingRecordings instead.
     conn = _db_connect(db_path)
     _reconcile(conn, out_dir, vault_root)
     items = _db_list(conn)
     conn.close()
-    # Additive field, note rows only (pending rows use a different stamp namespace — see
-    # _parse_any_stamp — and aren't part of the audio-pairing identity yet).
     for it in items:
         it["base_stamp"] = _base_stamp(it["stamp"])
     audios = _scan_audio_inventory(out_dir)
-    if pending_file:
-        pending_items = []
-        for r in _load_pending_manifest(pending_file):
-            if not isinstance(r, dict) or not r.get("id"):
-                continue
-            pending_items.append({
-                "kind": "pending", "id": r["id"], "name": r.get("name") or r["id"],
-                "stamp": r.get("stamp") or r["id"], "audio": r.get("mixed")})
-        items = items + pending_items
-        # chronological merge (recording time), not just an append — an unparseable
-        # stamp sorts last rather than crashing the whole history list.
-        items.sort(key=lambda it: _parse_any_stamp(it.get("stamp")) or datetime.min, reverse=True)
     emit("history", items=items, audios=audios)
 
 
@@ -3502,7 +3494,6 @@ def main():
     p_hist = sub.add_parser("history")
     p_hist.add_argument("--out-dir", dest="out_dir", default=default_obsidian)
     p_hist.add_argument("--db", required=True)
-    p_hist.add_argument("--pending-file", dest="pending_file", default=None)
     # optional PARA vault root — when given, История also picks up notes that were
     # filed (moved) out of out_dir, instead of dropping them the moment they're filed.
     p_hist.add_argument("--vault-root", dest="vault_root", default=None)
@@ -3541,7 +3532,7 @@ def main():
     elif args.cmd == "classify-terms":
         cmd_classify_terms(args.terms_file, args.fast_model)
     elif args.cmd == "history":
-        cmd_history(args.out_dir, args.db, args.pending_file, args.vault_root)
+        cmd_history(args.out_dir, args.db, args.vault_root)
     elif args.cmd == "record":
         cmd_record(args.out, args.device)
     elif args.cmd == "mix":

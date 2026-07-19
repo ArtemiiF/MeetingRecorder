@@ -1,0 +1,24 @@
+{
+  "_comment": "Single source of truth for backend.py's stdout event-name protocol (M4 arch-audit). Every line backend.py prints to stdout is {\"event\": \"<name>\", ...} — see backend.py's own module docstring. lib/events.js (main.js's dispatch) and backend.py's own EVENT_NAMES frozenset both load this file, so a typo/rename on either side either fails backend.py's own emit() assertion at runtime, or is caught by tests/test_backend.py's cross-lock test (main.js's EVENTS.* usage vs this list) — never a silent drop.",
+  "events": [
+    "classified",
+    "classified-terms",
+    "devices",
+    "done",
+    "elapsed",
+    "error",
+    "extracted",
+    "history",
+    "indexed",
+    "level",
+    "log",
+    "mixed",
+    "model-progress",
+    "models",
+    "preflight",
+    "recorded",
+    "search_result",
+    "stage",
+    "stage_end"
+  ]
+}

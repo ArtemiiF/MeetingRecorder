@@ -12,7 +12,8 @@ const readline = require("readline");
 const {
   WavWriter, rmsLevel, cacheKey, pairHistory,
   encodeTokenBlob, decodeTokenBlob, isStale,
-  rewriteNoteSpeakers, isOutsideRoot, isNoteDeletable, indexRunReducer, upsertById, diskGuardVerdict,
+  rewriteNoteSpeakers, isOutsideRoot, isNoteDeletable, indexRunReducer, upsertById, diskGuardVerdict, busyVerdict,
+  isPathInsideRoots, contentFingerprint, isFileStable,
   isAudioDeletable, trashRootFor, trashDestPath, moveToTrash, purgeTrash,
   resolveOutDirOnVaultChange, trayMenuTemplate,
   resolvePythonBin, resolveFfmpegBin, resolveResourcePath, resolveAudioTeeBin, resolveAssetPath, backendInstallStatus,
@@ -20,6 +21,10 @@ const {
   whisperModelDir, vadJitPath, diarizationModelDirs, appReadinessStatus,
   cleanupPartialModelCache, modelCacheDirsFor, dirSizeBytes, compareVersions, pickUpdateAsset,
 } = require("./lib/mainutil");
+// M4 arch-audit: single source of truth for backend.py's event-name protocol —
+// see lib/events.js's own comment for the cross-lock this closes.
+const { EVENT_NAMES, EVENTS } = require("./lib/events");
+const EVENT_NAMES_SET = new Set(EVENT_NAMES);
 
 // audiotee is ESM-only — load it lazily via dynamic import() from this CommonJS module.
 let AudioTeeClass = null;
@@ -174,7 +179,7 @@ function shutdownChildren() {
   }
   if (tee) {
     tee.stop().catch(() => {});
-    try { if (sysWav) sysWav.close(); } catch {}
+    try { if (sysWav) sysWav.close(); } catch {} /* best-effort */
     tee = null; sysWav = null;
   }
   if (procProc) procProc.kill();
@@ -206,11 +211,26 @@ function runBackend(args, onEvent, onClose, extraEnv = {}) {
   rl.on("line", (line) => {
     line = line.trim();
     if (!line) return;
+    let ev;
     try {
-      onEvent(JSON.parse(line));
+      ev = JSON.parse(line);
     } catch {
-      onEvent({ event: "log", msg: line });
+      ev = { event: EVENTS.LOG, msg: line };
     }
+    // M4 arch-audit: backend.py's own emit() asserts every event it sends against
+    // the SAME events.json contract (backend.py can never emit outside it) — this
+    // is the main.js-side half of the lock. An event name that isn't in the
+    // contract at all (a stale main.js listening for a renamed/removed event, or a
+    // version-mismatched backend.py) gets surfaced loudly here instead of silently
+    // vanishing into whichever handler's narrower if/else-if chain happened to
+    // receive it. Deliberately NOT warning for a cataloged event a given handler
+    // simply doesn't special-case (e.g. a "log" line arriving during para-classify)
+    // — that's normal, not a protocol violation, so this check is centralized here
+    // (once per line) rather than repeated per-handler.
+    if (ev && typeof ev.event === "string" && !EVENT_NAMES_SET.has(ev.event)) {
+      console.warn(`[backend] неизвестное событие "${ev.event}" — нет в контракте events.json:`, ev);
+    }
+    onEvent(ev);
   });
   let stderr = "";
   proc.stderr.on("data", (d) => (stderr += d.toString()));
@@ -338,7 +358,7 @@ app.on("before-quit", async (e) => {
   // mic.wav is finalized by python only after it sees "stop" — must await before exit
   if (recordProc || tee) {
     e.preventDefault();
-    if (tee) { try { await tee.stop(); } catch {} try { if (sysWav) sysWav.close(); } catch {} tee = null; sysWav = null; }
+    if (tee) { try { await tee.stop(); } catch {} /* best-effort */ try { if (sysWav) sysWav.close(); } catch {} /* best-effort */ tee = null; sysWav = null; }
     if (recordProc) {
       try { recordProc.stdin.write("stop\n"); } catch { recordProc.kill(); }
       // align with stop-recording: wait for the WAV to finalize, generous bound
@@ -393,7 +413,7 @@ ipcMain.handle("preflight", async () => {
   const token = loadToken();
   const be = await new Promise((resolve) => {
     let out = {};
-    runBackend(["preflight"], (ev) => { if (ev.event === "preflight") out = ev; },
+    runBackend(["preflight"], (ev) => { if (ev.event === EVENTS.PREFLIGHT) out = ev; },
       () => resolve(out), token ? { HF_TOKEN: token } : {});
   });
   return {
@@ -466,7 +486,7 @@ ipcMain.handle("list-devices", async () => {
   return new Promise((resolve) => {
     let devices = [];
     runBackend(["devices"], (ev) => {
-      if (ev.event === "devices") devices = ev.devices;
+      if (ev.event === EVENTS.DEVICES) devices = ev.devices;
     }, () => resolve(devices));
   });
 });
@@ -556,14 +576,31 @@ function encryptionAvailable() {
   return _encAvailableCache;
 }
 
+// L7 arch-audit: returns null on success, or a user-facing error string on
+// failure — a failed keychain/file write used to vanish into this function's
+// own catch with no way for save-presets (its only caller) to tell the
+// renderer the token silently didn't persist. Returns null (not throw): every
+// existing caller pre-dates this change and expects a plain call, not a
+// try/catch — the NEW save-presets handler below is the one that reads this.
 function saveToken(token) {
   try {
-    if (!token) { try { fs.unlinkSync(SECRET_FILE); } catch {} _tokenCache = null; return; }
+    if (!token) {
+      // Best-effort: an already-missing/permission-denied unlink still leaves
+      // the app in the intended "no token" state via _tokenCache below — a
+      // failure to physically remove an already-irrelevant file has no
+      // user-facing consequence worth surfacing.
+      try { fs.unlinkSync(SECRET_FILE); } catch {}
+      _tokenCache = null;
+      return null;
+    }
     const blob = encodeTokenBlob(token, encryptionAvailable(),
       (t) => safeStorage.encryptString(t));
     fs.writeFileSync(SECRET_FILE, blob, "utf-8");
     _tokenCache = null;
-  } catch {}
+    return null;
+  } catch (e) {
+    return String((e && e.message) || e);
+  }
 }
 function loadToken() {
   if (_tokenCache !== null) return _tokenCache;
@@ -628,9 +665,14 @@ ipcMain.handle("get-presets", async () => loadPresetsData());
 
 ipcMain.handle("save-presets", async (_e, data) => {
   const { hfToken, ...rest } = data;     // never persist the token in presets.json
-  saveToken(hfToken || "");
+  // L7 arch-audit: saveToken's own catch used to swallow a failed keychain/file
+  // write entirely — this handler always returned bare `true` regardless, so a
+  // user who just set an HF token had no way to learn it silently didn't
+  // persist. {ok, error} matches every other write-handler's contract in this file.
+  const tokenError = saveToken(hfToken || "");
+  if (tokenError) return { ok: false, error: "Не удалось сохранить HF-токен: " + tokenError };
   writeJsonAtomic(PRESETS_FILE, rest);
-  return true;
+  return { ok: true };
 });
 
 // Full app reset ("настроить заново"): writes a fresh presets.json (derived from the
@@ -679,19 +721,22 @@ ipcMain.handle("pick-out-dir", async () => {
 
 // recording: start — mic (python/pyaudio) + system audio (AudioTee), in parallel
 ipcMain.handle("start-recording", async (_e, opts) => {
-  if (recordProc || tee) return { ok: false, error: "Запись уже идёт" };
-  // A previous recording's mix (stop-recording) is still finishing in the background —
-  // starting now would reassign the module-level `session` out from under it. See
-  // mixInFlight's declaration above for the cross-link bug this closes.
-  if (mixInFlight) return { ok: false, error: "Дождитесь завершения обработки предыдущей записи" };
-  // Recording spawns pythonBin() too (mic capture) — a concurrent install-backend
-  // run can be actively overwriting that same interpreter file underneath it.
-  if (installBackendProc) return { ok: false, error: "Дождитесь окончания установки бэкенда" };
-  // An in-flight update swaps the whole .app bundle out from under the running
-  // process and finishes with app.exit(0) — which skips before-quit's graceful
-  // mic-finalize wait entirely. A recording started during that window would
-  // die unplayable at relaunch (WavWriter only patches its header in close()).
-  if (updateProc) return { ok: false, error: "Идёт обновление приложения — дождитесь завершения" };
+  const busy = busyVerdict([
+    [!!(recordProc || tee), "Запись уже идёт"],
+    // A previous recording's mix (stop-recording) is still finishing in the background —
+    // starting now would reassign the module-level `session` out from under it. See
+    // mixInFlight's declaration above for the cross-link bug this closes.
+    [mixInFlight, "Дождитесь завершения обработки предыдущей записи"],
+    // Recording spawns pythonBin() too (mic capture) — a concurrent install-backend
+    // run can be actively overwriting that same interpreter file underneath it.
+    [!!installBackendProc, "Дождитесь окончания установки бэкенда"],
+    // An in-flight update swaps the whole .app bundle out from under the running
+    // process and finishes with app.exit(0) — which skips before-quit's graceful
+    // mic-finalize wait entirely. A recording started during that window would
+    // die unplayable at relaunch (WavWriter only patches its header in close()).
+    [!!updateProc, "Идёт обновление приложения — дождитесь завершения"],
+  ]);
+  if (busy) return { ok: false, error: busy };
 
   // Disk guard: session dirs live under RECORDINGS_DIR (permanent — see PENDING_FILE
   // above) — check that volume's free space before committing to a recording. statfs
@@ -732,8 +777,8 @@ ipcMain.handle("start-recording", async (_e, opts) => {
   recordProc = runBackend(
     micArgs,
     (ev) => {
-      if (ev.event === "recorded") session.micRecorded = true;
-      if (ev.event === "error") session.micErrored = true;
+      if (ev.event === EVENTS.RECORDED) session.micRecorded = true;
+      if (ev.event === EVENTS.ERROR) session.micErrored = true;
       send("record-event", ev); // forwards elapsed/log → timer + logs
     },
     (code, stderr) => {
@@ -795,8 +840,8 @@ ipcMain.handle("stop-recording", async () => {
 
   // 1. stop system audio + finalize system.wav
   if (tee) {
-    try { await tee.stop(); } catch {}
-    try { if (sysWav) sysWav.close(); } catch {}
+    try { await tee.stop(); } catch {} /* best-effort */
+    try { if (sysWav) sysWav.close(); } catch {} /* best-effort */
     tee = null; sysWav = null;
   }
   // 2. stop mic gracefully and wait for the WAV to be finalized
@@ -808,7 +853,7 @@ ipcMain.handle("stop-recording", async () => {
     if (!session.micRecorded && !session.micErrored && recordProc !== null) {
       // pathological hang — force-stop so the user isn't stuck on "Свожу дорожки…"; mix proceeds with whatever exists
       send("record-event", { event: "log", msg: "⚠️ микрофон завис — принудительно завершаю, дорожка может быть неполной" });
-      try { recordProc.kill("SIGTERM"); } catch {}
+      try { recordProc.kill("SIGTERM"); } catch {} /* best-effort */
       await waitFor(() => recordProc === null, 3000);
     }
   }
@@ -837,7 +882,7 @@ ipcMain.handle("stop-recording", async () => {
   runBackend(
     args,
     (ev) => {
-      if (ev.event === "mixed") {
+      if (ev.event === EVENTS.MIXED) {
         // Recording finished capture — persist it to the pending-recordings manifest
         // (survives an app restart) before telling the renderer, so the queue and the
         // notification can never disagree about what's waiting to be processed.
@@ -860,7 +905,7 @@ ipcMain.handle("stop-recording", async () => {
           system: sysOk ? sess.sysPath : null,
           tracks: ev.tracks,
         });
-      } else if (ev.event === "error") {
+      } else if (ev.event === EVENTS.ERROR) {
         send("record-event", { event: "error", msg: ev.msg });
       } else {
         send("record-event", ev);
@@ -898,39 +943,98 @@ ipcMain.handle("list-pending-recordings", async () => {
 // manifest entry. Used both for an explicit user delete and after a pending
 // recording has been processed successfully.
 ipcMain.handle("remove-pending-recording", async (_e, id) => {
+  // Mirrors delete-history-note/delete-history-recording's own procProc guard: a
+  // reprocess run may be actively reading this very entry's mixed.wav (--in) when
+  // the user clicks remove — rmSync'ing entry.dir out from under it would corrupt
+  // an in-flight run instead of just refusing the removal upfront.
+  const busy = busyVerdict([[!!procProc, "Дождитесь окончания обработки"]]);
+  if (busy) return { ok: false, error: busy };
   const manifest = loadPendingManifest();
   const idx = manifest.findIndex((r) => r.id === id);
   if (idx < 0) return { ok: false, error: "Запись не найдена" };
   const [entry] = manifest.splice(idx, 1);
-  try { if (entry.dir) fs.rmSync(entry.dir, { recursive: true, force: true }); } catch {}
+  // L7 arch-audit: rmSync's own failure used to vanish into an empty catch while
+  // this handler still unconditionally returned {ok:true}. The manifest entry
+  // (and the renderer's optimistic row) still disappear either way — leaving the
+  // entry behind would resurrect a row the user already saw vanish, on the next
+  // list-pending-recordings reconcile — but the caller now learns honestly
+  // whether the on-disk files were actually removed, instead of a false success.
+  let rmError = null;
+  try {
+    if (entry.dir) fs.rmSync(entry.dir, { recursive: true, force: true });
+  } catch (e) {
+    rmError = String((e && e.message) || e);
+  }
   savePendingManifest(manifest);
+  if (rmError) {
+    return { ok: false, error: "Запись убрана из очереди, но файлы на диске не удалены: " + rmError };
+  }
   return { ok: true };
 });
 
-// Stable cache dir for an audio file (path+size+mtime) → resumable stages survive
-// a cancel/failed run, so a re-run reuses transcript/diarization instead of redoing them.
+// Stable cache dir for an audio file (path+size+mtime+content fingerprint) →
+// resumable stages survive a cancel/failed run, so a re-run reuses
+// transcript/diarization instead of redoing them.
+// H3b arch-audit: path+size+mtime ALONE can't tell an in-place rewrite that
+// preserves size and lands on a coarse/same-second mtime from the original file
+// — folding in contentFingerprint (lib/mainutil.js: sha1 of the first+last 64KB)
+// closes that gap. This DELIBERATELY changes every existing cache key once —
+// every cache computed before this fix is orphaned (never reused, never
+// cleaned up automatically — same as any other TMP_DIR/cache leftover pruneTemp
+// already sweeps on its own schedule).
 function cacheDirFor(audioFile) {
   let tag = audioFile;
   try {
     const st = fs.statSync(audioFile);
-    tag = `${audioFile}:${st.size}:${Math.round(st.mtimeMs)}`;
+    tag = `${audioFile}:${st.size}:${Math.round(st.mtimeMs)}:${contentFingerprint(audioFile)}`;
   } catch {}
   const dir = path.join(TMP_DIR, "cache", cacheKey(tag));
   fs.mkdirSync(dir, { recursive: true });
   return dir;
 }
 
+// H3a arch-audit: how long to wait between the two file-size samples in
+// process-audio's stability gate below. cmd_mix's ffmpeg subprocess.run is
+// synchronous (backend.py) — a genuine writer finishes well within this window;
+// this only needs to be long enough to CATCH an actively-growing file, not to
+// outlast a slow one.
+const FILE_STABILITY_WAIT_MS = 300;
+
 // processing pipeline
 ipcMain.handle("process-audio", async (_e, opts) => {
   const { audioFile, prompt, diarize, outDir, engine, hfToken, fresh, language, glossary, summarize, template, micFile, systemFile, authorName, origin, fastModel, mainModel, glossaryUsage, version } = opts;
-  if (procProc) return { ok: false, error: "Обработка уже идёт" };
-  if (modelDlProc) return { ok: false, error: "Дождитесь окончания скачивания моделей" };
-  // Same reasoning as start-recording's guard above: processing spawns pythonBin(),
-  // which an in-flight install may be actively replacing on disk.
-  if (installBackendProc) return { ok: false, error: "Дождитесь окончания установки бэкенда" };
-  // Same reasoning as start-recording's updateProc guard above.
-  if (updateProc) return { ok: false, error: "Идёт обновление приложения — дождитесь завершения" };
+  const busy = busyVerdict([
+    [!!procProc, "Обработка уже идёт"],
+    [!!modelDlProc, "Дождитесь окончания скачивания моделей"],
+    // Same reasoning as start-recording's guard above: processing spawns pythonBin(),
+    // which an in-flight install may be actively replacing on disk.
+    [!!installBackendProc, "Дождитесь окончания установки бэкенда"],
+    // Same reasoning as start-recording's updateProc guard above.
+    [!!updateProc, "Идёт обновление приложения — дождитесь завершения"],
+  ]);
+  if (busy) return { ok: false, error: busy };
   if (!backendAvailable()) return { ok: false, error: "Бэкенд не установлен — откройте Настройки → Бэкенд" };
+  // H3a arch-audit — file-stability gate (TODO.md incident: a 25-min recording was
+  // processed as 0.4s because mixed.wav was still being written when this handler's
+  // own mono-conversion cache snapshotted it mid-write, 12KB captured against an
+  // eventual 48MB file). Two checks, either one refuses:
+  //  1. Fast/zero-latency: audioFile IS the file stop-recording's own mix
+  //     (runBackend(["mix", ...])) is CURRENTLY writing — mixInFlight is set true
+  //     right before that call and cleared unconditionally in its onClose (see
+  //     mixInFlight's declaration above).
+  //  2. General safety net (a short real wait, ~300ms — negligible against a
+  //     multi-minute ML pipeline): the file's size must be unchanged across the
+  //     interval, catching ANY other still-writing source (an import mid-copy,
+  //     a sync tool), not just this app's own in-flight mix.
+  if (mixInFlight && session && audioFile === session.mixedPath) {
+    return { ok: false, error: "Дождитесь завершения сведения дорожек этой записи" };
+  }
+  const stable = await isFileStable(
+    audioFile, FILE_STABILITY_WAIT_MS,
+    (p) => { try { return fs.statSync(p).size; } catch { return null; } },
+    (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+  );
+  if (!stable) return { ok: false, error: "Файл ещё дописывается — подождите и повторите" };
   // Diarization is optional-by-design (not part of the setup-gate wall — see
   // appReadinessStatus's comment in lib/mainutil) but still needs its own
   // per-run guard: pyannote's repos are gated behind an HF token, so a run
@@ -1000,14 +1104,14 @@ ipcMain.handle("process-audio", async (_e, opts) => {
   procProc = runBackend(
     args,
     (ev) => {
-      if (ev.event === "done") doneNote = ev.note;
+      if (ev.event === EVENTS.DONE) doneNote = ev.note;
       send("process-event", ev);
     },
     (code, stderr) => {
       const canceled = procCanceled;
       send("process-event", { event: "process-closed", code, stderr, canceled });
-      try { fs.unlinkSync(promptFile); } catch {}
-      if (glossaryUsageFile) { try { fs.unlinkSync(glossaryUsageFile); } catch {} }
+      try { fs.unlinkSync(promptFile); } catch {} /* best-effort: TMP_DIR leftovers are swept by pruneTemp anyway */
+      if (glossaryUsageFile) { try { fs.unlinkSync(glossaryUsageFile); } catch {} } /* best-effort, same as promptFile above */
       procProc = null;
       procCanceled = false;
       // Fire-and-forget: resolves to the renderer above regardless; indexing runs after.
@@ -1042,7 +1146,7 @@ ipcMain.handle("models", async () => {
   const token = loadToken();
   const items = await new Promise((resolve) => {
     let out = [];
-    runBackend(["models"], (ev) => { if (ev.event === "models") out = ev.items; },
+    runBackend(["models"], (ev) => { if (ev.event === EVENTS.MODELS) out = ev.items; },
       () => resolve(out), token ? { HF_TOKEN: token } : {});
   });
   // On-disk footprint per model (settings "Модели" section: "добавить размер на
@@ -1068,14 +1172,17 @@ ipcMain.handle("models", async () => {
 // reason (busy/low disk), which would otherwise delete a working cache with no
 // download happening to replace it.
 async function runModelDownloadBatch(only, beforeStart) {
-  if (modelDlProc) return { ok: false, error: "Скачивание уже идёт" };
-  if (procProc) return { ok: false, error: "Дождитесь окончания обработки" };
-  if (recordProc || tee) return { ok: false, error: "Дождитесь окончания записи" };
-  // Model download also spawns pythonBin() (backend.py's download-models command) —
-  // same install-in-progress hazard as start-recording/process-audio above.
-  if (installBackendProc) return { ok: false, error: "Дождитесь окончания установки бэкенда" };
-  // Same reasoning as start-recording's updateProc guard above.
-  if (updateProc) return { ok: false, error: "Идёт обновление приложения — дождитесь завершения" };
+  const busy = busyVerdict([
+    [!!modelDlProc, "Скачивание уже идёт"],
+    [!!procProc, "Дождитесь окончания обработки"],
+    [!!(recordProc || tee), "Дождитесь окончания записи"],
+    // Model download also spawns pythonBin() (backend.py's download-models command) —
+    // same install-in-progress hazard as start-recording/process-audio above.
+    [!!installBackendProc, "Дождитесь окончания установки бэкенда"],
+    // Same reasoning as start-recording's updateProc guard above.
+    [!!updateProc, "Идёт обновление приложения — дождитесь завершения"],
+  ]);
+  if (busy) return { ok: false, error: busy };
 
   // Disk guard: models download into ~/.cache, not TMP_DIR — check that volume.
   let diskVerdict = { action: "ok", msg: null };
@@ -1102,8 +1209,8 @@ async function runModelDownloadBatch(only, beforeStart) {
   modelDlProc = runBackend(
     args,
     (ev) => {
-      if (ev.event === "stage") inFlightModelId = (ev.stage || "").replace(/^model:/, "") || null;
-      else if (ev.event === "stage_end") inFlightModelId = null;
+      if (ev.event === EVENTS.STAGE) inFlightModelId = (ev.stage || "").replace(/^model:/, "") || null;
+      else if (ev.event === EVENTS.STAGE_END) inFlightModelId = null;
       send("download-models-event", ev);
     },
     (code, stderr) => {
@@ -1354,13 +1461,16 @@ async function runInstallBackend() {
 }
 
 ipcMain.handle("install-backend", async () => {
-  if (installBackendProc) return { ok: false, error: "Установка уже идёт" };
-  if (recordProc || tee) return { ok: false, error: "Дождитесь окончания записи" };
-  if (procProc) return { ok: false, error: "Дождитесь окончания обработки" };
-  if (modelDlProc) return { ok: false, error: "Дождитесь окончания скачивания моделей" };
-  // Same reasoning as start-recording's updateProc guard above — install-backend
-  // wasn't previously mutually exclusive with the updater at all.
-  if (updateProc) return { ok: false, error: "Идёт обновление приложения — дождитесь завершения" };
+  const busy = busyVerdict([
+    [!!installBackendProc, "Установка уже идёт"],
+    [!!(recordProc || tee), "Дождитесь окончания записи"],
+    [!!procProc, "Дождитесь окончания обработки"],
+    [!!modelDlProc, "Дождитесь окончания скачивания моделей"],
+    // Same reasoning as start-recording's updateProc guard above — install-backend
+    // wasn't previously mutually exclusive with the updater at all.
+    [!!updateProc, "Идёт обновление приложения — дождитесь завершения"],
+  ]);
+  if (busy) return { ok: false, error: busy };
 
   let diskVerdict = { action: "ok", msg: null };
   try {
@@ -1650,11 +1760,14 @@ async function runUpdateInstall() {
 
 ipcMain.handle("download-and-install-update", async () => {
   if (!app.isPackaged) return { ok: false, error: "только в собранном приложении" };
-  if (updateProc) return { ok: false, error: "Обновление уже идёт" };
-  if (recordProc || tee) return { ok: false, error: "Дождитесь окончания записи" };
-  if (procProc) return { ok: false, error: "Дождитесь окончания обработки" };
-  if (modelDlProc) return { ok: false, error: "Дождитесь окончания скачивания моделей" };
-  if (installBackendProc) return { ok: false, error: "Дождитесь окончания установки бэкенда" };
+  const busy = busyVerdict([
+    [!!updateProc, "Обновление уже идёт"],
+    [!!(recordProc || tee), "Дождитесь окончания записи"],
+    [!!procProc, "Дождитесь окончания обработки"],
+    [!!modelDlProc, "Дождитесь окончания скачивания моделей"],
+    [!!installBackendProc, "Дождитесь окончания установки бэкенда"],
+  ]);
+  if (busy) return { ok: false, error: busy };
 
   updateCanceled = false;
   // Placeholder so a second call sees "busy" immediately — same pattern as
@@ -1683,29 +1796,27 @@ function cleanupUpdateLeftovers() {
   rmNoAsar(UPDATES_DIR, { recursive: true, force: true }); // may still hold an unpacked .app under extract/
 }
 
-// Past recordings: query the backend's SQLite index (reconciled against the notes dir),
-// merged with still-pending recordings (--pending-file) so the История rail can show them
-// at their real chronological position (option c — see HANDOFF/analyzer notes).
+// Past recordings: query the backend's SQLite index (reconciled against the notes dir).
+// Still-pending recordings are tracked separately (state.pendingRecordings, sourced
+// from list-pending-recordings) and merged into the rail client-side by
+// buildRecordings() — backend.py's OWN --pending-file merge (kind:"pending" synthetic
+// rows) was retired as dead code (L9 arch-audit): the renderer already filtered those
+// rows out everywhere (buildRecordings/nextVersionFor), never rendering them.
 ipcMain.handle("list-history", async (_e, outDir) => {
   const dir = expandHome(outDir) || DEFAULT_OUT;
   // PARA vault root (if configured) so a note moved out of out_dir by filing still shows
   // up in История instead of disappearing on the next reconcile — see readParaRoot below.
   const vaultRoot = readParaRoot();
-  const histArgs = ["history", "--out-dir", dir, "--db", DB_PATH, "--pending-file", PENDING_FILE];
+  const histArgs = ["history", "--out-dir", dir, "--db", DB_PATH];
   if (vaultRoot) histArgs.push("--vault-root", vaultRoot);
   const { items, audios } = await new Promise((resolve) => {
     let out = [];
     let auds = [];
     runBackend(histArgs,
-      (ev) => { if (ev.event === "history") { out = ev.items; auds = ev.audios || []; } },
+      (ev) => { if (ev.event === EVENTS.HISTORY) { out = ev.items; auds = ev.audios || []; } },
       () => resolve({ items: out, audios: auds }));
   });
-  const mapped = items.map((it) => it.kind === "pending" ? {
-    kind: "pending",
-    id: it.id,
-    name: it.name,
-    audio: it.audio,
-  } : {
+  const mapped = items.map((it) => ({
     name: it.stamp,
     title: it.title,
     template: it.template,
@@ -1722,7 +1833,7 @@ ipcMain.handle("list-history", async (_e, outDir) => {
     // addition — every note row is tagged with it) — pairs a note with the out_dir
     // audio inventory (see the renderer's recordingBaseStamp/buildRecordings).
     base_stamp: it.base_stamp,
-  });
+  }));
   // audios[] (the out_dir audio inventory — same PR) rides along as a plain extra
   // property on the returned ARRAY rather than changing list-history's return shape
   // to {items, audios}: dozens of existing renderer tests (and refreshParaInbox,
@@ -1737,12 +1848,23 @@ ipcMain.handle("list-history", async (_e, outDir) => {
 // Rewrite speaker labels in a saved note (**[old]** → **[new]**) and the
 // frontmatter speakers key, atomically.
 ipcMain.handle("rename-speakers", async (_e, { notePath, map }) => {
+  // Containment check (H2 arch-audit): notePath is renderer-supplied and this
+  // handler WRITES the note (tmp + rename) — same isPathInsideRoots primitive
+  // and roots (out_dir + PARA vault) delete-history-note validates against, and
+  // the same error wording for consistency.
+  const { outDir, vaultRoot } = currentOutDirAndVault();
+  const roots = [outDir, vaultRoot].filter(Boolean);
+  let resolved = null;
+  try { resolved = fs.realpathSync(notePath); } catch { resolved = null; }
+  if (!isPathInsideRoots(resolved, roots)) {
+    return { ok: false, error: "Заметка не найдена или находится вне рабочей папки" };
+  }
   try {
-    const text = fs.readFileSync(notePath, "utf-8");
+    const text = fs.readFileSync(resolved, "utf-8");
     const rewritten = rewriteNoteSpeakers(text, map || {});
-    const tmp = notePath + ".tmp";
+    const tmp = resolved + ".tmp";
     fs.writeFileSync(tmp, rewritten, "utf-8");
-    fs.renameSync(tmp, notePath);
+    fs.renameSync(tmp, resolved);
     return { ok: true };
   } catch (e) {
     return { ok: false, error: String((e && e.message) || e) };
@@ -1750,7 +1872,16 @@ ipcMain.handle("rename-speakers", async (_e, { notePath, map }) => {
 });
 
 ipcMain.handle("read-note", async (_e, notePath) => {
-  try { return fs.readFileSync(notePath, "utf-8"); } catch { return null; }
+  // Containment check (H2 arch-audit) — same roots/validator as rename-speakers
+  // above. Keeps read-note's existing null-on-failure contract (renderer already
+  // treats a null result as "couldn't load"), just extended to cover "outside the
+  // allowed roots" as another reason to fail closed.
+  const { outDir, vaultRoot } = currentOutDirAndVault();
+  const roots = [outDir, vaultRoot].filter(Boolean);
+  let resolved = null;
+  try { resolved = fs.realpathSync(notePath); } catch { resolved = null; }
+  if (!isPathInsideRoots(resolved, roots)) return null;
+  try { return fs.readFileSync(resolved, "utf-8"); } catch { return null; }
 });
 
 // Delete ONE История note (single .md version file) — moved into .trash/ (30-day
@@ -1901,9 +2032,23 @@ ipcMain.handle("para-tree", async (_e, root) => {
 });
 
 ipcMain.handle("para-classify", async (_e, arg) => {
+  // Guards the interpreter-overwrite-during-install race (see busyVerdict's comment
+  // in lib/mainutil.js): this handler spawns runBackend() (pythonBin()) just like
+  // process-audio/start-recording, but had no guard at all before.
+  const busy = busyVerdict([[!!installBackendProc, "Дождитесь окончания установки бэкенда"]]);
+  if (busy) return { error: busy };
   // arg may be a bare note path (legacy) or { note, root, folders, mainModel }
   const notePath = typeof arg === "string" ? arg : arg.note;
   const { root, folders, mainModel } = typeof arg === "string" ? {} : arg;
+  // Containment check (H2 arch-audit): notePath feeds into backend.py's --note
+  // (Path(note_path).read_text()) — same roots/validator as para-extract above.
+  const { outDir, vaultRoot } = currentOutDirAndVault();
+  const roots = [outDir, vaultRoot].filter(Boolean);
+  let resolvedNote = null;
+  try { resolvedNote = fs.realpathSync(notePath); } catch { resolvedNote = null; }
+  if (!isPathInsideRoots(resolvedNote, roots)) {
+    return { error: "Заметка не найдена или находится вне рабочей папки" };
+  }
   // gather existing accumulators per category so the LLM can reuse one (anti-fragmentation)
   let existing = "";
   if (root && folders) {
@@ -1918,7 +2063,7 @@ ipcMain.handle("para-classify", async (_e, arg) => {
     }
     existing = JSON.stringify(map);
   }
-  const args = ["classify", "--note", notePath];
+  const args = ["classify", "--note", resolvedNote];
   if (existing) args.push("--existing", existing);
   // Main model for this substantive task — same omit-when-empty contract as
   // process-audio's --main-model above.
@@ -1927,8 +2072,8 @@ ipcMain.handle("para-classify", async (_e, arg) => {
     let out = null;
     runBackend(args,
       (ev) => {
-        if (ev.event === "classified") out = { category: ev.category, project: ev.project };
-        else if (ev.event === "error") out = { error: ev.msg };
+        if (ev.event === EVENTS.CLASSIFIED) out = { category: ev.category, project: ev.project };
+        else if (ev.event === EVENTS.ERROR) out = { error: ev.msg };
       },
       () => resolve(out || { error: "нет ответа от backend" }));
   });
@@ -1940,6 +2085,10 @@ ipcMain.handle("para-classify", async (_e, arg) => {
 // file (same file-based plumbing as --prompt-file/--glossary-usage-file above —
 // avoids CLI arg length/escaping concerns), cleaned up on close either way.
 ipcMain.handle("classify-glossary-terms", async (_e, { terms, fastModel } = {}) => {
+  // Same interpreter-overwrite-during-install race as para-classify above — this
+  // handler spawns runBackend() (pythonBin()) too and had no guard at all before.
+  const busy = busyVerdict([[!!installBackendProc, "Дождитесь окончания установки бэкенда"]]);
+  if (busy) return { error: busy };
   const list = Array.isArray(terms) ? terms : [];
   if (!list.length) return { categories: {} };
   const termsFile = path.join(TMP_DIR, `glossary-terms-${Date.now()}.json`);
@@ -1950,23 +2099,36 @@ ipcMain.handle("classify-glossary-terms", async (_e, { terms, fastModel } = {}) 
     let out = null;
     runBackend(args,
       (ev) => {
-        if (ev.event === "classified-terms") out = { categories: ev.categories || {} };
-        else if (ev.event === "error") out = { error: ev.msg };
+        if (ev.event === EVENTS.CLASSIFIED_TERMS) out = { categories: ev.categories || {} };
+        else if (ev.event === EVENTS.ERROR) out = { error: ev.msg };
       },
       () => {
-        try { fs.unlinkSync(termsFile); } catch {}
+        try { fs.unlinkSync(termsFile); } catch {} /* best-effort: TMP_DIR leftovers are swept by pruneTemp anyway */
         resolve(out || { error: "нет ответа от backend" });
       });
   });
 });
 
 ipcMain.handle("para-extract", async (_e, notePath) => {
+  // Same interpreter-overwrite-during-install race as para-classify above — this
+  // handler spawns runBackend() (pythonBin()) too and had no guard at all before.
+  const busy = busyVerdict([[!!installBackendProc, "Дождитесь окончания установки бэкенда"]]);
+  if (busy) return { error: busy };
+  // Containment check (H2 arch-audit): notePath feeds straight into backend.py's
+  // --note (Path(note_path).read_text()) — same roots/validator as read-note above.
+  const { outDir, vaultRoot } = currentOutDirAndVault();
+  const roots = [outDir, vaultRoot].filter(Boolean);
+  let resolvedNote = null;
+  try { resolvedNote = fs.realpathSync(notePath); } catch { resolvedNote = null; }
+  if (!isPathInsideRoots(resolvedNote, roots)) {
+    return { error: "Заметка не найдена или находится вне рабочей папки" };
+  }
   return new Promise((resolve) => {
     let out = null;
-    runBackend(["extract", "--note", notePath],
+    runBackend(["extract", "--note", resolvedNote],
       (ev) => {
-        if (ev.event === "extracted") out = { content: ev.content };
-        else if (ev.event === "error") out = { error: ev.msg };
+        if (ev.event === EVENTS.EXTRACTED) out = { content: ev.content };
+        else if (ev.event === EVENTS.ERROR) out = { error: ev.msg };
       },
       () => resolve(out || { error: "нет ответа от backend" }));
   });
@@ -1976,10 +2138,42 @@ ipcMain.handle("para-extract", async (_e, notePath) => {
 // raw note. Appends the extracted sections (dated block) into root/<category>/<project>.md,
 // then files the raw note + audio into Archives so nothing is lost and the inbox clears.
 ipcMain.handle("para-file", async (_e, { note, audio, category, project, extracted, title, stamp, root, folders }) => {
+  // Unlike para-classify/para-extract/classify-glossary-terms, this handler never
+  // spawns runBackend() (no pythonBin() involved) — its actual race is a concurrent
+  // reprocess (procProc) rewriting the SAME note/audio path this handler is about to
+  // rename out from under it. Guarded the same way delete-history-note/
+  // delete-history-recording already guard their own note/audio moves.
+  const busy = busyVerdict([[!!procProc, "Дождитесь окончания обработки"]]);
+  if (busy) return { ok: false, error: busy };
+  // Containment checks (H2 arch-audit):
+  //  - `root` drives EVERY write destination below (accum/archiveDir) — must
+  //    resolve inside the server's OWN configured PARA vault root
+  //    (readParaRoot()), not whatever the renderer happened to send, or this
+  //    handler becomes a write-anywhere primitive for a compromised/buggy renderer.
+  //  - `note`/`audio` are the SOURCE files renamed into the archive — must
+  //    resolve inside out_dir or the vault root, same roots delete-history-note
+  //    validates against (both are optional — mv() below already tolerates a
+  //    falsy/missing src, so only present ones are checked).
+  const configuredVaultRoot = readParaRoot();
+  let resolvedRoot = null;
+  try { resolvedRoot = fs.realpathSync(root); } catch { resolvedRoot = null; }
+  if (!isPathInsideRoots(resolvedRoot, [configuredVaultRoot].filter(Boolean))) {
+    return { ok: false, error: "PARA-корень не найден или не совпадает с настроенным" };
+  }
+  const { outDir, vaultRoot } = currentOutDirAndVault();
+  const srcRoots = [outDir, vaultRoot].filter(Boolean);
+  for (const src of [note, audio]) {
+    if (!src) continue;
+    let resolvedSrc = null;
+    try { resolvedSrc = fs.realpathSync(src); } catch { resolvedSrc = null; }
+    if (!isPathInsideRoots(resolvedSrc, srcRoots)) {
+      return { ok: false, error: "Заметка или аудио не найдены либо вне рабочей папки" };
+    }
+  }
   try {
     const folder = (folders && folders[category]) || category;
     const proj = (project || "").trim().replace(/[/\\:]/g, "-") || "Без названия";
-    const accum = path.join(root, folder, proj + ".md");
+    const accum = path.join(resolvedRoot, folder, proj + ".md");
     fs.mkdirSync(path.dirname(accum), { recursive: true });
     if (!fs.existsSync(accum)) fs.writeFileSync(accum, `# ${proj}\n`);
     // heading date = the meeting date from the file stamp (meeting-YYYY-MM-DD-…),
@@ -1991,7 +2185,7 @@ ipcMain.handle("para-file", async (_e, { note, audio, category, project, extract
     fs.appendFileSync(accum, `\n\n${heading}\n\n${(extracted || "").trim()}\n`);
 
     // archive the raw source (note + audio) out of the Meetings inbox
-    const archiveDir = path.join(root, (folders && folders.archives) || "Archives", "Исходные встречи");
+    const archiveDir = path.join(resolvedRoot, (folders && folders.archives) || "Archives", "Исходные встречи");
     fs.mkdirSync(archiveDir, { recursive: true });
     const mv = (src) => {
       if (!src || !fs.existsSync(src)) return;
@@ -2005,8 +2199,25 @@ ipcMain.handle("para-file", async (_e, { note, audio, category, project, extract
 });
 
 ipcMain.handle("reveal", async (_e, p) => {
+  // Containment check (H2 arch-audit): reveal() is used for BOTH note and audio
+  // paths (renderer.js's nvOpen/nvAudio/ptvOpen/openNote/openAudio) — unlike
+  // isNoteDeletable/isAudioDeletable this only enforces containment, no
+  // extension requirement, since Finder-revealing an arbitrary file OUTSIDE
+  // out_dir/the PARA vault is the actual risk being closed here, not the file
+  // type. Every current reveal() target resolves inside out_dir: backend.py's
+  // "done"/history "audio" field is always vault_audio (the out_dir copy) —
+  // main.js never passes --keep-audio, so backend.py's own default
+  // (keep_audio_in_obsidian=True) is always in effect.
+  const { outDir, vaultRoot } = currentOutDirAndVault();
+  const roots = [outDir, vaultRoot].filter(Boolean);
+  let resolved = null;
+  try { resolved = fs.realpathSync(p); } catch { resolved = null; }
+  if (!isPathInsideRoots(resolved, roots)) {
+    return { ok: false, error: "Файл не найден или находится вне рабочей папки" };
+  }
   const { shell } = require("electron");
-  shell.showItemInFolder(p);
+  shell.showItemInFolder(resolved);
+  return { ok: true };
 });
 
 // Shared with the auto-index trigger below — one place defines what "run the indexer" means.
@@ -2038,7 +2249,7 @@ function readParaRoot() {
 function startAutoIndex(root) {
   autoIndexProc = runBackend(indexArgs(root),
     (ev) => {
-      if (ev.event === "log" || ev.event === "error") send("para-reindex-event", ev);
+      if (ev.event === EVENTS.LOG || ev.event === EVENTS.ERROR) send("para-reindex-event", ev);
     },
     () => {
       autoIndexProc = null;
@@ -2083,8 +2294,8 @@ ipcMain.handle("para-reindex", async (_e, { root }) => {
     let summary = null;
     runBackend(indexArgs(root),
       (ev) => {
-        if (ev.event === "indexed") summary = { indexed: ev.indexed, skipped: ev.skipped, removed: ev.removed };
-        else if (ev.event === "log" || ev.event === "error") send("para-reindex-event", ev);
+        if (ev.event === EVENTS.INDEXED) summary = { indexed: ev.indexed, skipped: ev.skipped, removed: ev.removed };
+        else if (ev.event === EVENTS.LOG || ev.event === EVENTS.ERROR) send("para-reindex-event", ev);
       },
       (_code, stderr) => {
         if (!summary) summary = { error: stderr || "нет ответа от backend" };
@@ -2120,9 +2331,9 @@ ipcMain.handle("para-search", async (_e, { root, messages, query, mainModel }) =
     let degraded = false;
     searchProc = runBackend(args,
       (ev) => {
-        if (ev.event === "search_result") result = { found: ev.found, answer: ev.answer, citations: ev.citations, degraded };
-        else if (ev.event === "error") result = { found: false, error: ev.msg };
-        else if (ev.event === "log" && ev.msg === DEGRADED_LOG_MSG) degraded = true;
+        if (ev.event === EVENTS.SEARCH_RESULT) result = { found: ev.found, answer: ev.answer, citations: ev.citations, degraded };
+        else if (ev.event === EVENTS.ERROR) result = { found: false, error: ev.msg };
+        else if (ev.event === EVENTS.LOG && ev.msg === DEGRADED_LOG_MSG) degraded = true;
       },
       (_code, stderr) => {
         const canceled = searchCanceled;
