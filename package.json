@@ -41,6 +41,10 @@
         "to": "backend.py"
       },
       {
+        "from": "backend_core.py",
+        "to": "backend_core.py"
+      },
+      {
         "from": "events.json",
         "to": "events.json"
       },
