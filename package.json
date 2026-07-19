@@ -8,6 +8,7 @@
     "test": "node --test tests/mainutil.test.js tests/renderer.test.js && ../venv/bin/python -m pytest tests/ -q",
     "test:js": "node --test tests/mainutil.test.js tests/renderer.test.js",
     "test:py": "../venv/bin/python -m pytest tests/ -q",
+    "test:e2e": "node --test e2e/boot.test.js",
     "dist:mac": "electron-builder --mac --arm64"
   },
   "author": "",
@@ -15,7 +16,8 @@
   "devDependencies": {
     "electron": "^33.0.0",
     "electron-builder": "26.15.3",
-    "jsdom": "^29.1.1"
+    "jsdom": "^29.1.1",
+    "playwright-core": "^1.61.1"
   },
   "dependencies": {
     "audiotee": "^0.0.7"

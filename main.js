@@ -46,6 +46,16 @@ function waitFor(cond, timeoutMs) {
 }
 
 // ── paths ────────────────────────────────────────────────────────────────
+// Test-only isolation: e2e/boot.test.js drives the PACKAGED app (playwright-core
+// _electron.launch) and must never read/write the developer's real userData
+// (presets.json, index.db, recordings, the backend-env install) — every
+// app.getPath("userData") call below resolves through this override once set.
+// Must run before app.whenReady() (Electron: setPath is only valid pre-ready);
+// unset in every normal dev/packaged run, so behaviour is unchanged unless a
+// caller opts in explicitly via this env var.
+if (process.env.MEETING_RECORDER_USER_DATA) {
+  app.setPath("userData", process.env.MEETING_RECORDER_USER_DATA);
+}
 const APP_DIR = __dirname;
 const PROJECT_DIR = path.dirname(APP_DIR); // MeetingRecorder/
 const VENV_PYTHON = path.join(PROJECT_DIR, "venv", "bin", "python");
