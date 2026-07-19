@@ -394,7 +394,7 @@ test("isOutsideRoot: no dir → false", () => {
 
 // ── isPathInsideRoots (general path containment, H2 arch-audit) ─────────────
 // General-purpose primitive behind isNoteDeletable/isAudioDeletable below —
-// main.js's read-note/rename-speakers/reveal/para-extract/para-classify/
+// main.js's read-note/rename-speakers/reveal/para-classify/
 // para-file handlers validate renderer-supplied paths against it directly
 // (no .md/audio-extension requirement, unlike the deletion-specific wrappers).
 test("isPathInsideRoots: path inside out_dir (single root) is inside", () => {

@@ -46,7 +46,6 @@ contextBridge.exposeInMainWorld("api", {
   // through as-is; see main.js's para-classify handler for the shape it destructures.
   paraClassify: (arg) => ipcRenderer.invoke("para-classify", arg),
   classifyGlossaryTerms: (terms, fastModel) => ipcRenderer.invoke("classify-glossary-terms", { terms, fastModel }),
-  paraExtract: (notePath) => ipcRenderer.invoke("para-extract", notePath),
   paraFile: (args) => ipcRenderer.invoke("para-file", args),
   paraReindex: (root) => ipcRenderer.invoke("para-reindex", { root }),
   paraSearch: (root, messages, mainModel) => ipcRenderer.invoke("para-search", { root, messages, mainModel }),

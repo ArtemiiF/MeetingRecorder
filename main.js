@@ -2163,7 +2163,7 @@ ipcMain.handle("para-classify", async (_e, arg) => {
   const notePath = typeof arg === "string" ? arg : arg.note;
   const { root, folders, mainModel, language } = typeof arg === "string" ? {} : arg;
   // Containment check (H2 arch-audit): notePath feeds into backend.py's --note
-  // (Path(note_path).read_text()) — same roots/validator as para-extract above.
+  // (Path(note_path).read_text()) — same roots/validator as read-note above.
   const { outDir, vaultRoot } = currentOutDirAndVault();
   const roots = [outDir, vaultRoot].filter(Boolean);
   let resolvedNote = null;
@@ -2235,31 +2235,6 @@ ipcMain.handle("classify-glossary-terms", async (_e, { terms, fastModel } = {}) 
   });
 });
 
-ipcMain.handle("para-extract", async (_e, notePath) => {
-  // Same interpreter-overwrite-during-install race as para-classify above — this
-  // handler spawns runBackend() (pythonBin()) too and had no guard at all before.
-  const busy = busyVerdict([[!!installBackendProc, "Дождитесь окончания установки бэкенда"]]);
-  if (busy) return { error: busy };
-  // Containment check (H2 arch-audit): notePath feeds straight into backend.py's
-  // --note (Path(note_path).read_text()) — same roots/validator as read-note above.
-  const { outDir, vaultRoot } = currentOutDirAndVault();
-  const roots = [outDir, vaultRoot].filter(Boolean);
-  let resolvedNote = null;
-  try { resolvedNote = fs.realpathSync(notePath); } catch { resolvedNote = null; }
-  if (!isPathInsideRoots(resolvedNote, roots)) {
-    return { error: "Заметка не найдена или находится вне рабочей папки" };
-  }
-  return new Promise((resolve) => {
-    let out = null;
-    runBackend(["extract", "--note", resolvedNote],
-      (ev) => {
-        if (ev.event === EVENTS.EXTRACTED) out = { content: ev.content };
-        else if (ev.event === EVENTS.ERROR) out = { error: ev.msg };
-      },
-      () => resolve(out || { error: "нет ответа от backend" }));
-  });
-});
-
 // "Разложить" = classify (category + kind/person/mission) and file the RAW note + its
 // audio into a folder-hierarchy destination (T4-T6, ux-para-batch): archives/areas/
 // resources → <CategoryFolder>/<год>/<месяц>; projects → a one_to_one/mission_daily/
@@ -2269,12 +2244,11 @@ ipcMain.handle("para-extract", async (_e, notePath) => {
 // old scheme (accumulate the LLM's distilled extract into one root/<category>/
 // <project>.md, archive the raw note separately into Archives/Исходные встречи) —
 // SEMANTIC CHANGE, see the commit/report: chronology now comes for free from the
-// stamp-sorted basenames, so no separate accumulator file is written anymore.
-// `extracted`/`title` are still sent by the renderer (computed via para-extract before
-// calling this) but are no longer used by this handler — kept out of the destructure
-// below since nothing here reads them.
+// stamp-sorted basenames, so no separate accumulator file is written anymore. The
+// LLM-выжимка step that fed the accumulator (para-extract IPC / backend cmd_extract)
+// was removed with it — filing is classify + move, no extract call.
 ipcMain.handle("para-file", async (_e, { note, audio, category, project, kind, person, mission, stamp, root, folders }) => {
-  // Unlike para-classify/para-extract/classify-glossary-terms, this handler never
+  // Unlike para-classify/classify-glossary-terms, this handler never
   // spawns runBackend() (no pythonBin() involved) — its actual race is a concurrent
   // reprocess (procProc) rewriting the SAME note/audio path this handler is about to
   // rename out from under it. Guarded the same way delete-history-note/
@@ -2282,11 +2256,11 @@ ipcMain.handle("para-file", async (_e, { note, audio, category, project, kind, p
   const busy = busyVerdict([[!!procProc, "Дождитесь окончания обработки"]]);
   if (busy) return { ok: false, error: busy };
   // Containment checks (H2 arch-audit):
-  //  - `root` drives EVERY write destination below (accum/archiveDir) — must
+  //  - `root` drives EVERY write destination below (destDir) — must
   //    resolve inside the server's OWN configured PARA vault root
   //    (readParaRoot()), not whatever the renderer happened to send, or this
   //    handler becomes a write-anywhere primitive for a compromised/buggy renderer.
-  //  - `note`/`audio` are the SOURCE files renamed into the archive — must
+  //  - `note`/`audio` are the SOURCE files renamed into the computed destination folder — must
   //    resolve inside out_dir or the vault root, same roots delete-history-note
   //    validates against (both are optional — mv() below already tolerates a
   //    falsy/missing src, so only present ones are checked).

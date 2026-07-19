@@ -75,7 +75,9 @@ async function boot(apiOverrides = {}) {
     }),
     downloadAndInstallUpdate: async () => ({ ok: true }),
     cancelAppUpdate: async () => ({ ok: true }),
-    paraExtract: async () => ({ content: "x" }),
+    // extract retired with the accumulator scheme — filing must never call it again.
+    // Throwing sentinel (not a removal): any resurrected call site fails loudly here.
+    paraExtract: async () => { throw new Error("paraExtract retired — filing must not call it"); },
     paraReindex: async () => ({ indexed: 0, skipped: 0, removed: 0 }),
     paraSearch: async (_root, _messages) => ({ found: false, answer: "Не нашёл по этому вопросу записей в заметках.", citations: [] }),
     cancelSearch: async () => ({ ok: true }),
@@ -996,7 +998,7 @@ test("PARA: classify fills rows, manual file marks row filed (grey, disabled, no
   await tick(window);
   const rows = $("paraInbox").querySelectorAll(".para-row");
   assert.equal(rows.length, 1);
-  // paraClassifyAll does classify → extract → file → markRowFiled (all in one pipeline).
+  // paraClassifyAll does classify → file → markRowFiled (extract retired with the accumulator).
   // Assert that classify filled category/project fields by setting them directly (same contract).
   const catSel = rows[0].querySelector(".para-cat");
   const projIn = rows[0].querySelector(".para-proj");
@@ -1004,8 +1006,9 @@ test("PARA: classify fills rows, manual file marks row filed (grey, disabled, no
   projIn.value = "Лендинг";
   assert.equal(catSel.value, "projects");
   assert.equal(projIn.value, "Лендинг");
-  // Now click file-btn: paraExtract → paraFile → markRowFiled (consistent with the bulk path —
-  // stays in place, greyed and disabled, not removed).
+  // Now click file-btn: paraFile → markRowFiled (consistent with the bulk path —
+  // stays in place, greyed and disabled, not removed). The default paraExtract mock throws,
+  // so this test also locks «filing works without any extract call».
   rows[0].querySelector(".para-file-btn").click(); await tick(window); await tick(window);
   assert.equal($("paraInbox").querySelectorAll(".para-row").length, 1);
   assert.ok(rows[0].classList.contains("filed"));
@@ -3323,10 +3326,9 @@ test("main.js: para-classify refuses while a backend install is in flight (spawn
   const paraClassify = mainSrc.match(/ipcMain\.handle\("para-classify"[\s\S]*?\n\}\);/)[0];
   assert.match(paraClassify, /\[!!installBackendProc, "Дождитесь окончания установки бэкенда"\]/);
 });
-test("main.js: para-extract refuses while a backend install is in flight (spawns runBackend())", () => {
+test("main.js: para-extract handler is fully removed (extract retired with the accumulator scheme)", () => {
   const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
-  const paraExtract = mainSrc.match(/ipcMain\.handle\("para-extract"[\s\S]*?\n\}\);/)[0];
-  assert.match(paraExtract, /\[!!installBackendProc, "Дождитесь окончания установки бэкенда"\]/);
+  assert.doesNotMatch(mainSrc, /ipcMain\.handle\("para-extract"/);
 });
 test("main.js: classify-glossary-terms refuses while a backend install is in flight (spawns runBackend())", () => {
   const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
@@ -3359,12 +3361,9 @@ test("main.js: reveal validates the path via isPathInsideRoots before shell.show
   assert.match(reveal, /isPathInsideRoots\(resolved, roots\)/);
   assert.match(reveal, /shell\.showItemInFolder\(resolved\)/);
 });
-test("main.js: para-extract/para-classify validate their --note arg via isPathInsideRoots before spawning the backend", () => {
+test("main.js: para-classify validates its --note arg via isPathInsideRoots before spawning the backend", () => {
   const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
-  const paraExtract = mainSrc.match(/ipcMain\.handle\("para-extract"[\s\S]*?\n\}\);/)[0];
   const paraClassify = mainSrc.match(/ipcMain\.handle\("para-classify"[\s\S]*?\n\}\);/)[0];
-  assert.match(paraExtract, /isPathInsideRoots\(resolvedNote, roots\)/);
-  assert.match(paraExtract, /"extract", "--note", resolvedNote/);
   assert.match(paraClassify, /isPathInsideRoots\(resolvedNote, roots\)/);
   assert.match(paraClassify, /"classify", "--note", resolvedNote/);
 });

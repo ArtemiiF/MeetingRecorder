@@ -3445,20 +3445,10 @@ $("paraClassifyAll").addEventListener("click", async () => {
       }
       row.querySelector(".para-cat").value = r.category;
       row.querySelector(".para-proj").value = r.project || "";
-      // distil a preview (still shown to the user via extract) — para-file itself now
-      // moves the raw note+audio into the classified folder (T4-T6), it no longer
-      // writes the extract anywhere.
-      const ex = await window.api.paraExtract(it.note);
-      if (!ex || ex.error || !ex.content) {
-        paraLog(`   ✗ ${r.category} подобрана, но выжимка не извлечена: ${(ex && ex.error) || "пусто"}`);
-        errors++;
-        setRowProcessing(row, false);
-        continue;
-      }
       const res = await window.api.paraFile({
         note: it.note, audio: it.audio, category: r.category, project: r.project || "",
         kind: r.kind, person: r.person, mission: r.mission,
-        extracted: ex.content, title: it.title || "", stamp: it.name,
+        stamp: it.name,
         root: state.para.root, folders: state.para.folders,
       });
       if (res && res.ok === false) {
@@ -3537,15 +3527,9 @@ async function fileParaRow(idx, row) {
       row.querySelector(".para-proj").value = project;
     }
   }
-  btn.textContent = "Извлекаю…";
-  const ex = await window.api.paraExtract(it.note);
-  if (!ex || ex.error || !ex.content) {
-    alert("Не удалось извлечь выжимку: " + ((ex && ex.error) || "пусто"));
-    btn.disabled = false; btn.textContent = prev; return;
-  }
   const res = await window.api.paraFile({
     note: it.note, audio: it.audio, category, project, kind, person, mission,
-    extracted: ex.content, title: it.title || "", stamp: it.name,
+    stamp: it.name,
     root: state.para.root, folders: state.para.folders,
   });
   if (res && res.ok === false) {

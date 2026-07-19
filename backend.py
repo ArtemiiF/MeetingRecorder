@@ -2051,67 +2051,6 @@ def cmd_classify_terms(terms_file, fast_model=""):
     emit("classified-terms", categories=result)
 
 
-def cmd_extract(note_path):
-    """Distil a meeting note into structured knowledge sections (темы / факты /
-    обсуждения / инсайты / договорённости / прочее). Historically this fed a living
-    per-project accumulator file (e.g. «1-1 с Имя.md») that main.js's para-file handler
-    appended it into; since the ux-para-batch folder-hierarchy filing change, para-file
-    moves the RAW note itself instead and no longer writes this extract anywhere — the
-    renderer still calls this first (para-extract IPC) and gates filing on it succeeding,
-    so it's kept as-is here (unaffected either way: the LLM is never told about an
-    accumulator, see the prompt below). Returns ready Markdown, no date heading. Reasoning
-    models burn the token budget on 'thinking' so content can come back empty → salvage
-    from reasoning_content."""
-    import requests
-    import re
-    try:
-        text = Path(note_path).read_text(encoding="utf-8", errors="ignore")
-    except Exception as e:
-        emit("error", msg=f"Не прочитал заметку: {e}")
-        return
-    # Strip noise that the model otherwise echoes verbatim instead of distilling:
-    # YAML frontmatter, the audio-link block, and any leaked "Thinking Process" preamble.
-    text = re.sub(r"^---\n.*?\n---\n", "", text, count=1, flags=re.S)
-    text = re.sub(r"##\s*🎵.*?(?=\n#|\Z)", "", text, flags=re.S)
-    text = re.sub(r"(?is)thinking process:.*?(?=\n#{1,3}\s|\Z)", "", text)
-    text = text.strip()[:8000]
-    try:
-        resp = requests.post("http://localhost:1234/v1/chat/completions", json={
-            "messages": [
-                {"role": "system", "content":
-                    "Ты извлекаешь из заметки встречи структурированную выжимку. "
-                    "Только Markdown с заданными секциями. Без вступлений и заключений. "
-                    "НЕ копируй заметку, её frontmatter или существующие заголовки — "
-                    "только перечисленные секции. Ничего не выдумывай."},
-                {"role": "user", "content":
-                    "Извлеки выжимку. Используй ТОЛЬКО эти секции третьего уровня "
-                    "(### …), пустые — пропускай целиком:\n"
-                    "### Темы\n### Факты\n### Обсуждения\n### Инсайты\n"
-                    "### Договорённости\n### Прочее\n"
-                    "Внутри секций — маркированные списки. Не повторяй текст заметки "
-                    "дословно, переформулируй кратко. Сохраняй имена и английские "
-                    "термины как есть.\n\nЗАМЕТКА:\n" + text},
-            ],
-            # reasoning model needs headroom for the full think-then-answer: a low cap
-            # truncates (finish=length) mid-thought and leaves content empty. Keep this
-            # >= the model's output cap configured in LM Studio.
-            "temperature": 0.2, "max_tokens": 16000,
-        }, timeout=300)
-        if resp.status_code == 200:
-            msg = (resp.json().get("choices") or [{}])[0].get("message", {})
-            content = (msg.get("content") or "").strip()
-            # normalize LaTeX arrows the model emits ($\rightarrow$, $\to$) → plain →
-            content = re.sub(r"\$\s*\\(?:rightarrow|to)\s*\$", "→", content)
-            # NEVER fall back to reasoning_content here: it is raw chain-of-thought and
-            # would pollute the accumulator. Empty content = failure, surface it.
-            if content:
-                emit("extracted", note=note_path, content=content)
-                return
-        emit("error", msg="LLM не вернул выжимку (пустой content — модель ушла в reasoning?)")
-    except Exception as e:
-        emit("error", msg=f"Извлечение не удалось: {e}")
-
-
 # ──────────────────────────────────────────────────────────────────────────
 # RAG helpers: index + search commands (local hybrid PARA/Obsidian search)
 # ──────────────────────────────────────────────────────────────────────────
@@ -2881,9 +2820,6 @@ def main():
     # generate_title's own ru/en pin (Pipeline.generate_title).
     p_cls.add_argument("--language", default="")
 
-    p_ext = sub.add_parser("extract")
-    p_ext.add_argument("--note", required=True)
-
     p_clst = sub.add_parser("classify-terms")
     p_clst.add_argument("--terms-file", dest="terms_file", required=True)
     p_clst.add_argument("--fast-model", dest="fast_model", default="")
@@ -2968,8 +2904,6 @@ def main():
         cmd_download_models(args.only)
     elif args.cmd == "classify":
         cmd_classify(args.note, args.existing, args.main_model, args.language)
-    elif args.cmd == "extract":
-        cmd_extract(args.note)
     elif args.cmd == "classify-terms":
         cmd_classify_terms(args.terms_file, args.fast_model)
     elif args.cmd == "history":
