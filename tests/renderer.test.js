@@ -5475,7 +5475,9 @@ test("История groups a multi-version recording into a collapsible block: 
   const header = group.querySelector(".rail-group-header");
   assert.match(header.textContent, /Планёрка/);
   assert.equal(header.querySelector(".glossary-caret").textContent, "▾", "expanded by default");
-  const labels = Array.from(group.querySelectorAll(".rail-version-row")).map((r) => r.textContent.trim());
+  // .rail-title only — the row itself now also carries a 🗑 delete button (T1 redesign,
+  // ux-para-batch) whose own text would otherwise pollute a whole-row textContent match.
+  const labels = Array.from(group.querySelectorAll(".rail-version-row .rail-title")).map((r) => r.textContent.trim());
   assert.deepEqual(labels, ["Митинг · v2 (latest)", "Митинг · v1", "Интервью · v1 (latest)"],
     "template stable order (first-seen), versions descending within a template, each template's own top marked latest");
 
@@ -5863,6 +5865,100 @@ test("recording ✕: excluded on pending rows — no .rec-trash-btn, existing re
   assert.ok(pendingRow, "pending row must render");
   assert.ok(!pendingRow.querySelector(".rec-trash-btn"), "pending keeps its own ✕ (remove-pending-recording) only — no trash button");
   assert.ok(pendingRow.querySelector(".pending-del-btn"), "the existing pending ✕ must still be present");
+});
+
+// ── T1+T2: История card action buttons redesign (design ref: history-buttons-a.html,
+// вариант A — explicit labeled actions instead of a bare ✕) + narrow-width overflow
+// fix (ux-para-batch). Structure/containment only — actual flex-wrap layout isn't
+// observable under jsdom (no real layout engine), so these assert the DOM shape the
+// CSS relies on: an .rail-actions row nested INSIDE the card container (never a sibling
+// appended after it, which is how a button could visually escape the card), holding the
+// labeled buttons, plus the text cells that carry the ellipsis classes. ───────────────
+test("История card redesign: a notes-bearing group's 🗑 В корзину lives in a labeled .rail-actions row nested inside .rail-group, not the old bare ✕", async () => {
+  const { window, $ } = await boot({
+    listHistory: async () => [{ name: "2026-07-11-100000", base_stamp: "2026-07-11-100000", title: "Планёрка", template: "Митинг", version: 1, note: "/o/a.md", audio: "/o/a.wav" }],
+  });
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  const group = $("historyList").querySelector(".rail-group");
+  const actions = group.querySelector(".rail-actions");
+  assert.ok(actions, "actions row must exist");
+  assert.ok(group.contains(actions), "actions row must be nested inside the card, not appended after it");
+  const trashBtn = actions.querySelector(".rec-trash-btn");
+  assert.ok(trashBtn, "trash button must live inside .rail-actions");
+  assert.match(trashBtn.textContent, /🗑 В корзину/, "labeled, not a bare ✕");
+  assert.ok(trashBtn.classList.contains("danger"), "danger-styled per design card A");
+  assert.ok(!group.querySelector(".rail-rec-meta .rec-trash-btn"), "the bare ✕ must no longer sit inside the meta line");
+});
+
+test("История card redesign: an orphan row's ▶ Обработать and 🗑 В корзину share one .rail-actions row, both nested inside the card", async () => {
+  const { window, $ } = await boot({
+    listHistory: async () => Object.assign([], {
+      audios: [{ base_stamp: "2026-07-14-140300", path: "/out/meeting-2026-07-14-140300.wav", size: 100, mtime: 1, duration_s: 120 }],
+    }),
+  });
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  const orphan = $("historyList").querySelector(".rail-item.orphan");
+  const actions = orphan.querySelector(".rail-actions");
+  assert.ok(actions, "actions row must exist");
+  assert.ok(orphan.contains(actions), "actions row must be nested inside the orphan card");
+  assert.ok(actions.querySelector(".process-orphan-btn"), "▶ Обработать must live in the actions row");
+  assert.ok(actions.querySelector(".rec-trash-btn.danger"), "🗑 В корзину must live in the actions row, danger-styled");
+});
+
+test("История card redesign (T2 overflow lock): actions row and meta text carry the wrap/ellipsis classes the narrow-width fix relies on", async () => {
+  const { window, $ } = await boot({
+    listHistory: async () => [{ name: "2026-07-11-100000", base_stamp: "2026-07-11-100000", title: "Планёрка", template: "Митинг", version: 1, note: "/o/a.md", audio: "/o/a.wav" }],
+  });
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  const group = $("historyList").querySelector(".rail-group");
+  assert.ok(group.querySelector(".rail-group-title"), "group-header title must be its own shrinkable/ellipsis cell, not raw text next to the caret");
+  assert.ok(group.querySelector(".rail-rec-meta-text"), "meta text must be its own shrinkable/ellipsis cell");
+  assert.ok(group.querySelector(".rail-actions"), "buttons must sit in a dedicated wrap-capable row");
+});
+
+test("История card redesign: version-row 🗑 deletes THAT note via the existing deleteHistoryNote flow, without selecting the row (stopPropagation)", async () => {
+  let deletedNote = null;
+  let selectNoteCalls = 0;
+  const { window, $ } = await boot({
+    listHistory: async () => [
+      { name: "2026-07-11-100000", base_stamp: "2026-07-11-100000", title: "Планёрка", template: "Митинг", version: 1, note: "/o/a.md", audio: "/o/a.wav" },
+      { name: "2026-07-11-100000-r1", base_stamp: "2026-07-11-100000", title: "Планёрка", template: "Митинг", version: 2, note: "/o/b.md", audio: "/o/a.wav" },
+    ],
+    deleteHistoryNote: async (notePath) => { deletedNote = notePath; return { ok: true }; },
+    readNote: async () => {
+      selectNoteCalls++;
+      return '---\ntitle: "T"\n---\n\ntext';
+    },
+  });
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  const callsBeforeDelete = selectNoteCalls;
+  const rows = Array.from($("historyList").querySelectorAll(".rail-version-row"));
+  assert.equal(rows.length, 2);
+  rows[1].querySelector(".rail-version-del").click();
+  await tick(window); await tick(window);
+  // rows are version-descending (v2 "latest" first, v1 second) — rows[1] is /o/a.md (v1).
+  assert.equal(deletedNote, "/o/a.md", "deletes the row's own note, not the auto-opened (latest) one");
+  assert.equal(selectNoteCalls, callsBeforeDelete, "clicking 🗑 must not also select/open the row (stopPropagation)");
+});
+
+test("История card redesign: deleting a version row that is NOT the currently open note leaves the open note view untouched", async () => {
+  const notes = [
+    { name: "2026-07-11-100000", base_stamp: "2026-07-11-100000", title: "Планёрка", template: "Митинг", version: 2, note: "/o/latest.md", audio: "/o/a.wav" },
+    { name: "2026-07-11-100000-r1", base_stamp: "2026-07-11-100000", title: "Планёрка", template: "Митинг", version: 1, note: "/o/old.md", audio: "/o/a.wav" },
+  ];
+  const { window, $ } = await boot({
+    listHistory: async () => notes,
+    deleteHistoryNote: async () => ({ ok: true }),
+  });
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  // auto-open picks the topmost (latest) row — /o/latest.md — as covered elsewhere;
+  // deleting the OTHER (older) row's note must not blank out the still-open latest note.
+  assert.ok(!$("noteView").querySelector(".history-placeholder"), "a note must already be open (auto-open)");
+  const rows = Array.from($("historyList").querySelectorAll(".rail-version-row"));
+  rows[1].querySelector(".rail-version-del").click();
+  await tick(window); await tick(window);
+  assert.ok(!$("noteView").querySelector(".history-placeholder"),
+    "noteView must NOT be cleared — the deleted note (/o/old.md) wasn't the one open (/o/latest.md)");
 });
 
 // main.js requires("electron") and can't be loaded headless under plain node --test
