@@ -41,6 +41,30 @@ jobs:
       # exist in CI).
       - run: python -m pytest tests/ -q
 
+  # Report-only mutation testing against backend_core.py's pure-logic core
+  # (setup.cfg's [mutmut] section scopes mutants to that one file and the
+  # runner to tests/test_backend_core.py's fast, mock-free suite — mutmut
+  # re-runs the WHOLE selected suite per mutant, so whole-suite-per-mutant is
+  # only tractable against that fast subset, not the full mocked test_backend.py).
+  # ~34s / 829 mutants locally — continue-on-error: true because the current
+  # score (~82%, see requirements-dev.txt/setup.cfg) is below the 85% Kalnitsky
+  # reference; this job is visibility, not a merge gate, until the owner
+  # decides to raise the bar and make it required.
+  mutation:
+    name: mutation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - run: python -m mutmut run
+        continue-on-error: true
+      - run: python -m mutmut results
+
   # Boot-smoke against the PACKAGED app (--dir build), not the dev checkout —
   # catches the whole "asar-packaging drops/misroutes a runtime path, main
   # process crashes at require-time before any window appears" bug class

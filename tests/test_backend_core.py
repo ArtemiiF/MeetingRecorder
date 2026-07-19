@@ -15,7 +15,6 @@ import pytest
 # import backend_core.py from the app dir
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import backend_core  # noqa: E402
-import backend  # noqa: E402  (only for the _XCORR_MIN_CONFIDENCE constant, still owned by backend.py)
 
 
 def seg(text, start=0.0, end=5.0):
@@ -91,7 +90,9 @@ def test_normalized_xcorr_peak_uncorrelated_below_threshold():
     a = rng.standard_normal(1500)
     b = rng.standard_normal(1500)
     _, conf = backend_core._normalized_xcorr_peak(a, b, max_lag=500)
-    assert conf < backend._XCORR_MIN_CONFIDENCE
+    assert conf < 0.15  # mirrors backend.py's _XCORR_MIN_CONFIDENCE (not imported —
+    # this test file must stay decoupled from backend.py so mutmut's isolated
+    # backend_core.py-only sandbox can import it without a sibling backend.py present)
 
 
 def test_normalized_xcorr_peak_all_zero_no_divide_by_zero():
@@ -470,6 +471,36 @@ def test_diff_term_hits_length_mismatch_returns_empty():
 
 def test_diff_term_hits_no_terms_returns_empty():
     assert backend_core._diff_term_hits(["a"], ["b"], []) == []
+
+
+# ── _segments_text_hash (cache-staleness fingerprint for the `correct` stage) ──
+def test_segments_text_hash_deterministic_for_same_input():
+    segs = [{"text": "привет"}, {"text": "как дела"}]
+    assert backend_core._segments_text_hash(segs) == backend_core._segments_text_hash(list(segs))
+
+
+def test_segments_text_hash_changes_when_any_segment_text_changes():
+    a = [{"text": "привет"}, {"text": "как дела"}]
+    b = [{"text": "привет"}, {"text": "пока"}]
+    assert backend_core._segments_text_hash(a) != backend_core._segments_text_hash(b)
+
+
+def test_segments_text_hash_sensitive_to_segment_order():
+    # same texts, different order — the join is positional, so order must matter
+    # (a cache key must not treat a reordering as the same transcript).
+    a = [{"text": "один"}, {"text": "два"}]
+    b = [{"text": "два"}, {"text": "один"}]
+    assert backend_core._segments_text_hash(a) != backend_core._segments_text_hash(b)
+
+
+def test_segments_text_hash_missing_text_key_treated_as_empty_string():
+    assert backend_core._segments_text_hash([{}]) == backend_core._segments_text_hash([{"text": ""}])
+
+
+def test_segments_text_hash_returns_twelve_char_hex_digest():
+    h = backend_core._segments_text_hash([{"text": "x"}])
+    assert len(h) == 12
+    assert all(c in "0123456789abcdef" for c in h)
 
 
 # ── critic follow-up fixes (fuzzy_correct/gate/_term_or_declined_form) ──────
