@@ -6341,3 +6341,23 @@ test("recording ✕: title is now passed through to deleteHistoryRecording (Ко
   $("historyList").querySelector(".rec-trash-btn").click(); await tick(window);
   assert.equal(gotTitle, "Планёрка");
 });
+
+// ── v1.4.10 overflow regressions (owner-reported: pending-row title collapsed into a
+// one-letter-per-line vertical strip in the 280px rail after the T1 labeled ▶-button;
+// note-view header buttons escaped the card at narrow widths). CSS source-text locks —
+// same idiom as the main.js-source checks above (jsdom doesn't compute layout). ──────
+test("style.css: pending rail row title ellipsizes instead of inheriting queue-name's word-break:break-all", () => {
+  const css = fs.readFileSync(path.join(__dirname, "../renderer/style.css"), "utf8");
+  const rule = css.match(/\.rail-item\.pending \.queue-name \{[^}]*\}/);
+  assert.ok(rule, "scoped .rail-item.pending .queue-name rule exists");
+  assert.match(rule[0], /text-overflow: ellipsis/);
+  assert.match(rule[0], /word-break: normal/);
+  assert.match(rule[0], /min-width: 0/);
+});
+test("style.css: rail badges don't wrap into two lines; note-view header actions wrap instead of overflowing", () => {
+  const css = fs.readFileSync(path.join(__dirname, "../renderer/style.css"), "utf8");
+  const badge = css.match(/\.rail-rec-badge \{[^}]*\}/);
+  assert.ok(badge && /white-space: nowrap/.test(badge[0]), ".rail-rec-badge is nowrap");
+  const actions = css.match(/\.note-actions \{[^}]*\}/);
+  assert.ok(actions && /flex-wrap: wrap/.test(actions[0]), ".note-actions wraps");
+});
