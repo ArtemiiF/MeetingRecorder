@@ -335,74 +335,70 @@ main:has(> #view-prompts:not(.hidden)) { max-width: 1200px; }
 .rail-pending-meta { display: inline-flex; align-items: center; gap: 6px; color: var(--muted);
   font-size: 11px; margin-left: 6px; flex: none; }
 
-/* История: collapsible per-recording group (audio-first rail, design "Вариант A" —
-   see buildRecordings/buildNotesRecordingRow in renderer.js). Every recording with ≥1
-   обработка renders this way, including a solitary one — обработки inside are ordered
-   by template (note versioning by template on reprocess — backend.py Pipeline.
-   process's version/-r<seq> scheme). Caret/hidden mechanics mirror the glossary "Мои"
-   category folders (.glossary-caret below, reused as-is) — same collapse discipline,
-   different section. */
+/* История: collapsible per-recording group — Вариант B (design ref: history-compact-
+   b.html, «карточка, но тише»): 2 visual floors instead of the old 4 — a one-row header
+   (caret + 🎙 title + optional count-pill + time + 🗑) and, when expanded, обработка
+   rows. The old separate meta line (time · duration + status badge) and actions row
+   (labeled buttons) are retired — see buildNotesRecordingRow/buildOrphanRow in
+   renderer.js. Caret/hidden mechanics still mirror the glossary «Мои» category folders
+   (.glossary-caret below, reused as-is) — same collapse discipline, different section. */
 .rail-group { margin-bottom: 2px; }
+/* Not a <button> — a real 🗑 <button> now lives inside it (nesting a <button> inside a
+   <button> is invalid HTML), so collapse/expand is wired via a click + keydown(Enter/
+   Space) listener in renderer.js instead of native button semantics; the shared
+   :focus-visible rule below still gives it a focus ring. */
 .rail-group-header {
-  display: flex; align-items: center; gap: 6px; width: 100%; text-align: left;
-  background: transparent; border: none; border-radius: 8px; padding: 8px 12px 2px;
-  cursor: pointer; color: var(--fg); font-family: inherit; font-size: 13px; font-weight: 500;
+  display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
+  background: transparent; border: none; border-radius: 8px; padding: 9px 10px;
+  cursor: pointer; color: var(--fg); font-family: inherit; font-size: 13px;
 }
 .rail-group-header:hover { background: var(--card2); }
-/* Group-header title text (T2 narrow-width overflow fix, ux-para-batch): a long meeting
-   title used to sit as raw text next to the caret with no shrink/ellipsis rule of its own
-   — inside the header's flex row it could force the whole card wider than the rail column.
-   flex:1+min-width:0 lets it shrink and ellipsis instead of escaping the card. */
-.rail-group-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Group-header title text (narrow-width overflow fix, carried from the old T2 pass): a
+   long meeting title has no shrink/ellipsis rule of its own — inside the header's flex
+   row it could force the whole card wider than the rail column. flex:1+min-width:0 lets
+   it shrink and ellipsis instead of escaping the card. */
+.rail-group-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; font-weight: 600; }
+.rail-group-time { flex: none; color: var(--muted); font-size: 11px; }
 .rail-group-versions { display: flex; flex-direction: column; }
 /* Version row (buildNotesRecordingRow): flex ROW override of .rail-item's column default
    — a title cell + its own 🗑 delete button now share the line (design ref:
    history-buttons-a.html вариант A, .vrow/.rowdel). */
 .rail-version-row { padding-left: 26px; display: flex; flex-direction: row; align-items: center; gap: 6px; }
 .rail-version-row .rail-title { flex: 1; min-width: 0; }
-/* Per-обработка delete (T1: "Version-row ✕ (delete note) → 🗑 glyph") — reuses the
-   existing deleteHistoryNote flow (same one nvDelete already calls), wired with
-   stopPropagation so clicking it doesn't also select the row (rail-version-row itself
-   carries the selectNote click listener, unchanged from before this redesign). */
-.rail-version-del {
+/* Per-обработка delete (.rail-version-del) and recording-level delete (.rec-trash-btn —
+   both the group-header's and the orphan row's) share one muted-by-default, danger-
+   fill-on-hover icon-button style (design ref history-compact-b.html .del) — reuses the
+   existing deleteHistoryNote/deleteRecording flows, wired with stopPropagation in
+   renderer.js so clicking either doesn't also fire its container's own click handler
+   (selectNote / collapse-toggle respectively). */
+.rail-version-del,
+.rec-trash-btn {
   flex: 0 0 auto; background: none; border: none; border-radius: 6px; padding: 2px 6px;
   color: var(--muted); font-size: 12px; cursor: pointer; font-family: inherit;
 }
-.rail-version-del:hover { color: #fff; background: var(--danger-fill); }
-.rail-latest { color: var(--muted); font-size: 11px; font-weight: 400; }
+.rail-version-del:hover,
+.rec-trash-btn:hover { color: #fff; background: var(--danger-fill); }
 
-/* Recording-level meta line (time + duration + status badge) — sits under a group's
-   header (buildNotesRecordingRow) or inside a flat orphan row (buildOrphanRow). Badge
-   tokens reused from the palette above (--rec-tint/--rec/--inactive/--muted) — no
-   hardcoded colors, mirrors the approved design card (history-audio-a.html). flex-wrap
-   (T2) lets the badge drop to its own line rather than push the row wider than the card. */
-.rail-rec-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 0 12px 6px 34px;
-  color: var(--muted); font-size: 11.5px; }
-.rail-rec-meta-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Recording-level count-pill («N обработок») — .rail-rec-badge tokens are shared with
+   the pending row's «ждёт обработки» wait badge (buildPendingRow, untouched by this
+   redesign); .count is rendered inline in the group header now (buildNotesRecordingRow),
+   only when the group actually has ≥2 обработки — see countPill there. */
 .rail-rec-badge { display: inline-flex; align-items: center; border-radius: 999px;
   padding: 1px 8px; font-size: 10.5px; font-weight: 600; line-height: 1.6; white-space: nowrap; }
 .rail-rec-badge.wait { background: var(--rec-tint); color: var(--rec); }
 .rail-rec-badge.empty { border: 1px dashed var(--inactive); color: var(--inactive); }
 .rail-rec-badge.count { background: var(--card2); border: 1px solid var(--line); color: var(--muted); font-weight: 500; }
 
-/* Card-level actions row (История redesign вариант A, design ref: history-buttons-a.html)
-   — explicit labeled buttons under the meta line, replacing the old bare ✕ pinned via
-   margin-left:auto. flex-wrap:wrap is the T2 fix: at a narrow rail width the buttons drop
-   to their own line instead of forcing the card wider than its column. */
-.rail-actions { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 12px 10px 34px; }
 .btn.small.rail-action-btn { padding: 4px 10px; font-size: 12px; }
-/* Danger variant (🗑 В корзину) — tinted fill at rest, solid danger fill + white text on
-   hover; border-color pinned to transparent on hover too so .btn:hover's generic
-   border-color:accent never shows through (matches the design card's .abtn.danger). */
-.btn.small.rail-action-btn.danger { background: var(--danger-tint); border-color: transparent; color: var(--danger); }
-.btn.small.rail-action-btn.danger:hover { background: var(--danger-fill); border-color: transparent; color: #fff; }
 
-/* «без обработок» orphan row (audios[] entry with zero surviving notes) — same flat,
-   non-clickable-row shape as a pending row (.rail-item.pending above), own modifier so
-   `.rail-item:not(.pending)` selectors elsewhere never accidentally match it. */
-.rail-item.orphan { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; cursor: default; }
-.rail-rec-head { display: flex; align-items: center; gap: 8px; }
-.rail-title-file { font-weight: 400; color: var(--muted); font-size: 12px; flex: 1; min-width: 0; }
+/* «без обработок» orphan row (audios[] entry with zero surviving notes) — Вариант B: one
+   flat line (icon + filename·duration + ▶ + 🗑), same non-clickable-row shape as a
+   pending row (.rail-item.pending above), own modifier so `.rail-item:not(.pending)`
+   selectors elsewhere never accidentally match it. */
+.rail-item.orphan { display: flex; flex-direction: row; align-items: center; gap: 8px; cursor: default; }
+.rail-title-file { font-weight: 400; color: var(--muted); font-size: 12px; flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .note-view {
   flex: 1; min-width: 0; background: var(--grad-card); box-shadow: var(--shadow-card); border: 1px solid var(--line);

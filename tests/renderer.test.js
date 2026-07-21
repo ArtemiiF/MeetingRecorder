@@ -5582,11 +5582,15 @@ test("История groups a multi-version recording into a collapsible block: 
   const header = group.querySelector(".rail-group-header");
   assert.match(header.textContent, /Планёрка/);
   assert.equal(header.querySelector(".glossary-caret").textContent, "▾", "expanded by default");
-  // .rail-title only — the row itself now also carries a 🗑 delete button (T1 redesign,
-  // ux-para-batch) whose own text would otherwise pollute a whole-row textContent match.
+  // .rail-title only — the row itself now also carries a 🗑 delete button whose own text
+  // would otherwise pollute a whole-row textContent match.
   const labels = Array.from(group.querySelectorAll(".rail-version-row .rail-title")).map((r) => r.textContent.trim());
-  assert.deepEqual(labels, ["Митинг · v2 (latest)", "Митинг · v1", "Интервью · v1 (latest)"],
-    "template stable order (first-seen), versions descending within a template, each template's own top marked latest");
+  assert.deepEqual(labels, ["Митинг · v2", "Митинг · v1", "Интервью"],
+    "template stable order (first-seen), versions descending within a template; a template " +
+    "with ≥2 versions shows '· vN' on every row (Вариант B drops '(latest)'), a template " +
+    "with exactly 1 version (Интервью) shows just its name — no '· v1'");
+  // 3 обработки total (≥2) — the header must carry the count-pill.
+  assert.match($("historyList").querySelector(".rail-group-header .rail-rec-badge.count").textContent, /^3 обработки$/);
 
   $("historyList").querySelector(".rail-group-header").click();
   await tick(window);
@@ -5614,8 +5618,8 @@ test("clicking a version row inside a История group highlights it with .a
   const rows = Array.from($("historyList").querySelectorAll(".rail-version-row"));
   assert.equal(rows.length, 2);
   // История auto-opens the topmost rendered note on entry (see the auto-open/empty-state
-  // commit) — that's rows[0] ("Митинг · v2 (latest)", rendered first), already active.
-  assert.ok(rows[0].classList.contains("active"), "auto-open marks the topmost (latest) version active");
+  // commit) — that's rows[0] ("Митинг · v2", rendered first, version-descending), already active.
+  assert.ok(rows[0].classList.contains("active"), "auto-open marks the topmost (highest-version) row active");
   assert.ok(!rows[1].classList.contains("active"));
 
   rows[1].click(); // "Митинг · v1"
@@ -5623,23 +5627,28 @@ test("clicking a version row inside a История group highlights it with .a
   assert.ok(!rows[0].classList.contains("active"), "active must move off the previously-selected row");
   assert.ok(rows[1].classList.contains("active"), "clicking a different version row selects it instead");
 
-  rows[0].click(); // back to "Митинг · v2 (latest)"
+  rows[0].click(); // back to "Митинг · v2"
   await tick(window);
   assert.ok(rows[0].classList.contains("active"), "clicking a different version row selects it instead");
   assert.ok(!rows[1].classList.contains("active"), "only the clicked row is active");
 });
 
-// Audio-first rail redesign (design "Вариант A"): EVERY notes-bearing recording is now
-// a collapsible group, including a solitary (single-обработка) one — there's no more
-// special-cased flat row (the old buildHistoryRow is retired).
-test("История: a single-обработка recording still renders as a collapsible group, badged '1 обработка'", async () => {
+// Audio-first rail redesign: EVERY notes-bearing recording is now a collapsible group,
+// including a solitary (single-обработка) one — there's no more special-cased flat row
+// (the old buildHistoryRow is retired). Вариант B (history-compact-b.html): a lone
+// обработка must NOT also show a "1 обработка" count-pill next to its own single row —
+// that duplication was the bug being fixed — and its row is just the template name,
+// with no "· v1" (nothing to disambiguate with only one version).
+test("История: a single-обработка recording renders as a collapsible group with NO count-pill and a plain template-name row", async () => {
   const { window, $ } = await boot({
     listHistory: async () => [{ name: "2026-01-01-100000", title: "Синк", template: "Митинг", note: "/o/a.md", audio: "/o/a.wav" }],
   });
   window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
   assert.equal($("historyList").querySelectorAll(".rail-group").length, 1);
   assert.ok($("historyList").querySelector(".rail-version-row"), "the note itself is the group's one обработка row");
-  assert.match($("historyList").querySelector(".rail-rec-badge.count").textContent, /^1 обработка$/);
+  assert.ok(!$("historyList").querySelector(".rail-rec-badge.count"), "a lone обработка must not duplicate a count-pill next to its own single row");
+  assert.equal($("historyList").querySelector(".rail-version-row .rail-title").textContent.trim(), "Митинг",
+    "single note in a single template — just the template name, no version suffix");
 });
 
 // ── audio-first История rail (design "Вариант A" — recording is the top level,
@@ -5658,7 +5667,7 @@ test("audio-first rail: groups note rows purely by the backend-provided base_sta
   assert.equal($("historyList").querySelectorAll(".rail-version-row").length, 2);
 });
 
-test("audio-first rail: an audios[] entry with no matching note renders as a «без обработок» orphan row with ▶ Обработать", async () => {
+test("audio-first rail: an audios[] entry with no matching note renders as a one-line orphan row (filename · duration + ▶ Обработать)", async () => {
   const { window, $ } = await boot({
     listHistory: async () => Object.assign(
       [{ name: "2026-07-08-190000", base_stamp: "2026-07-08-190000", title: "C", note: "/c.md", audio: "/c.wav" }],
@@ -5674,7 +5683,9 @@ test("audio-first rail: an audios[] entry with no matching note renders as a «�
   const orphan = $("historyList").querySelector(".rail-item.orphan");
   assert.ok(orphan, "the unpaired audio entry must render as its own orphan row");
   assert.match(orphan.textContent, /meeting-2026-07-14-140300\.wav/);
-  assert.match(orphan.textContent, /без обработок/);
+  assert.match(orphan.textContent, /41 мин/, "duration (2460s) is shown inline next to the filename");
+  // Вариант B drops the separate «без обработок» status badge/meta floor entirely.
+  assert.ok(!orphan.querySelector(".rail-rec-badge"), "no status badge — the meta floor is retired");
   assert.match(orphan.querySelector(".btn.primary").textContent, /▶ Обработать/);
   assert.equal($("historyList").querySelectorAll(".rail-group").length, 1, "the PAIRED audio entry must not also render as an orphan");
 });
@@ -5741,7 +5752,7 @@ test("history rail: date-group headers count RECORDINGS, not обработки 
   assert.equal(header.textContent, "11 июля · 2", "3 обработки total, but only 2 RECORDINGS (one multi-обработка group + one solitary)");
 });
 
-test("История note delete: after deleting the recording's last note, it stays visible as «без обработок» (audio inventory keeps it alive)", async () => {
+test("История note delete: after deleting the recording's last note, it stays visible as an orphan row (audio inventory keeps it alive)", async () => {
   let notes = [{ name: "2026-07-08-190000", base_stamp: "2026-07-08-190000", title: "Синк", note: "/o/meeting-x.md", audio: "/o/meeting-x.wav" }];
   const audios = [{ base_stamp: "2026-07-08-190000", path: "/o/meeting-x.wav", size: 1000, mtime: 1, duration_s: 900 }];
   const { window, $ } = await boot({
@@ -5759,8 +5770,8 @@ test("История note delete: after deleting the recording's last note, it s
   await tick(window); await tick(window);
   assert.equal($("historyList").querySelectorAll(".rail-group").length, 0, "no notes left — no more group");
   const orphan = $("historyList").querySelector(".rail-item.orphan");
-  assert.ok(orphan, "the audio inventory entry keeps the recording visible as «без обработок»");
-  assert.match(orphan.textContent, /без обработок/);
+  assert.ok(orphan, "the audio inventory entry keeps the recording visible after its last note is trashed");
+  assert.match(orphan.textContent, /meeting-x\.wav/);
 });
 
 // ── История note deletion ────────────────────────────────────────────────────
@@ -5974,30 +5985,27 @@ test("recording ✕: excluded on pending rows — no .rec-trash-btn, existing re
   assert.ok(pendingRow.querySelector(".pending-del-btn"), "the existing pending ✕ must still be present");
 });
 
-// ── T1+T2: История card action buttons redesign (design ref: history-buttons-a.html,
-// вариант A — explicit labeled actions instead of a bare ✕) + narrow-width overflow
-// fix (ux-para-batch). Structure/containment only — actual flex-wrap layout isn't
-// observable under jsdom (no real layout engine), so these assert the DOM shape the
-// CSS relies on: an .rail-actions row nested INSIDE the card container (never a sibling
-// appended after it, which is how a button could visually escape the card), holding the
-// labeled buttons, plus the text cells that carry the ellipsis classes. ───────────────
-test("История card redesign: a notes-bearing group's 🗑 В корзину lives in a labeled .rail-actions row nested inside .rail-group, not the old bare ✕", async () => {
+// ── Вариант B: История card redesign — «карточка, но тише» (design ref:
+// history-compact-b.html). The old labeled-actions row + separate meta line (T1/T2,
+// history-buttons-a.html вариант A) are retired: the header is now ONE row (caret + 🎙
+// title + optional count-pill + time + a muted 🗑 icon-button, danger-fill only on
+// hover), and an orphan row is ONE flat line (icon + filename·duration + ▶ + 🗑). ──────
+test("История card redesign (variant B): a notes-bearing group's 🗑 lives in the one-row header, icon-only, not a separate actions/meta floor", async () => {
   const { window, $ } = await boot({
     listHistory: async () => [{ name: "2026-07-11-100000", base_stamp: "2026-07-11-100000", title: "Планёрка", template: "Митинг", version: 1, note: "/o/a.md", audio: "/o/a.wav" }],
   });
   window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
   const group = $("historyList").querySelector(".rail-group");
-  const actions = group.querySelector(".rail-actions");
-  assert.ok(actions, "actions row must exist");
-  assert.ok(group.contains(actions), "actions row must be nested inside the card, not appended after it");
-  const trashBtn = actions.querySelector(".rec-trash-btn");
-  assert.ok(trashBtn, "trash button must live inside .rail-actions");
-  assert.match(trashBtn.textContent, /🗑 В корзину/, "labeled, not a bare ✕");
-  assert.ok(trashBtn.classList.contains("danger"), "danger-styled per design card A");
-  assert.ok(!group.querySelector(".rail-rec-meta .rec-trash-btn"), "the bare ✕ must no longer sit inside the meta line");
+  const header = group.querySelector(".rail-group-header");
+  assert.ok(header, "header must exist");
+  const trashBtn = header.querySelector(".rec-trash-btn");
+  assert.ok(trashBtn, "🗑 must live inside the one-row header");
+  assert.equal(trashBtn.textContent.trim(), "🗑", "icon-only — no '🗑 В корзину' label, Вариант B is quieter");
+  assert.ok(!group.querySelector(".rail-actions"), "the separate actions row is retired");
+  assert.ok(!group.querySelector(".rail-rec-meta"), "the separate meta line is retired");
 });
 
-test("История card redesign: an orphan row's ▶ Обработать and 🗑 В корзину share one .rail-actions row, both nested inside the card", async () => {
+test("История card redesign (variant B): an orphan row's ▶ Обработать and 🗑 share ONE flat line, no actions/meta floor", async () => {
   const { window, $ } = await boot({
     listHistory: async () => Object.assign([], {
       audios: [{ base_stamp: "2026-07-14-140300", path: "/out/meeting-2026-07-14-140300.wav", size: 100, mtime: 1, duration_s: 120 }],
@@ -6005,22 +6013,65 @@ test("История card redesign: an orphan row's ▶ Обработать and
   });
   window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
   const orphan = $("historyList").querySelector(".rail-item.orphan");
-  const actions = orphan.querySelector(".rail-actions");
-  assert.ok(actions, "actions row must exist");
-  assert.ok(orphan.contains(actions), "actions row must be nested inside the orphan card");
-  assert.ok(actions.querySelector(".process-orphan-btn"), "▶ Обработать must live in the actions row");
-  assert.ok(actions.querySelector(".rec-trash-btn.danger"), "🗑 В корзину must live in the actions row, danger-styled");
+  assert.ok(!orphan.querySelector(".rail-actions"), "the separate actions row is retired");
+  assert.ok(!orphan.querySelector(".rail-rec-meta"), "the separate meta line is retired");
+  assert.ok(orphan.querySelector(".process-orphan-btn"), "▶ Обработать still present, directly in the one-line row");
+  const trashBtn = orphan.querySelector(".rec-trash-btn");
+  assert.ok(trashBtn, "🗑 still present");
+  assert.equal(trashBtn.textContent.trim(), "🗑", "icon-only, same as the group-header's");
 });
 
-test("История card redesign (T2 overflow lock): actions row and meta text carry the wrap/ellipsis classes the narrow-width fix relies on", async () => {
+test("История card redesign (variant B, overflow lock): header title and time are their own cells; version/orphan title cells stay ellipsis-safe", async () => {
   const { window, $ } = await boot({
     listHistory: async () => [{ name: "2026-07-11-100000", base_stamp: "2026-07-11-100000", title: "Планёрка", template: "Митинг", version: 1, note: "/o/a.md", audio: "/o/a.wav" }],
   });
   window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
   const group = $("historyList").querySelector(".rail-group");
   assert.ok(group.querySelector(".rail-group-title"), "group-header title must be its own shrinkable/ellipsis cell, not raw text next to the caret");
-  assert.ok(group.querySelector(".rail-rec-meta-text"), "meta text must be its own shrinkable/ellipsis cell");
-  assert.ok(group.querySelector(".rail-actions"), "buttons must sit in a dedicated wrap-capable row");
+  assert.ok(group.querySelector(".rail-group-time"), "time must be its own fixed-width cell, not squeezed together with the title");
+});
+
+// CSS source-text lock (same idiom as the pending-row overflow guard below) — jsdom
+// doesn't compute real layout, so the narrow-width "no wrap into vertical letters"
+// guarantee for the header title and the orphan's combined filename·duration cell has
+// to be locked at the CSS-rule level.
+test("style.css: rail header title and orphan filename cell ellipsize instead of wrapping", () => {
+  const css = fs.readFileSync(path.join(__dirname, "../renderer/style.css"), "utf8");
+  const titleRule = css.match(/\.rail-group-title \{[^}]*\}/);
+  assert.ok(titleRule, ".rail-group-title rule exists");
+  assert.match(titleRule[0], /min-width: 0/);
+  assert.match(titleRule[0], /white-space: nowrap/);
+  const fileRule = css.match(/\.rail-title-file \{[^}]*\}/);
+  assert.ok(fileRule, ".rail-title-file rule exists");
+  assert.match(fileRule[0], /min-width: 0/);
+  assert.match(fileRule[0], /white-space: nowrap/);
+});
+
+test("История card redesign (variant B): clicking the header's 🗑 does not also toggle collapse (stopPropagation)", async () => {
+  const { window, $ } = await boot({
+    listHistory: async () => [{ name: "2026-07-11-100000", base_stamp: "2026-07-11-100000", title: "Планёрка", template: "Митинг", version: 1, note: "/o/a.md", audio: "/o/a.wav" }],
+  });
+  window.confirm = () => false; // decline the trash confirm — isolate collapse-toggle behaviour only
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  assert.equal($("historyList").querySelector(".rail-group-header .glossary-caret").textContent, "▾", "expanded by default");
+  $("historyList").querySelector(".rec-trash-btn").click(); await tick(window);
+  assert.equal($("historyList").querySelector(".rail-group-header .glossary-caret").textContent, "▾",
+    "declining the trash confirm must leave the group exactly as it was — the click must not also bubble to the header's own collapse-toggle listener");
+});
+
+// The header is no longer a native <button> (a real 🗑 <button> now lives inside it —
+// nesting <button>s is invalid HTML), so keyboard activation needs its own handler.
+test("История card redesign (variant B): header is keyboard-activatable (Enter toggles collapse, same as a click)", async () => {
+  const { window, $ } = await boot({
+    listHistory: async () => [{ name: "2026-07-11-100000", base_stamp: "2026-07-11-100000", title: "Планёрка", template: "Митинг", version: 1, note: "/o/a.md", audio: "/o/a.wav" }],
+  });
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  const header = $("historyList").querySelector(".rail-group-header");
+  assert.equal(header.getAttribute("tabindex"), "0", "must be keyboard-focusable");
+  assert.equal(header.getAttribute("role"), "button");
+  header.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  await tick(window);
+  assert.equal($("historyList").querySelector(".rail-group-header .glossary-caret").textContent, "▸", "Enter toggles collapse just like a click would");
 });
 
 test("История card redesign: version-row 🗑 deletes THAT note via the existing deleteHistoryNote flow, without selecting the row (stopPropagation)", async () => {
@@ -6043,8 +6094,8 @@ test("История card redesign: version-row 🗑 deletes THAT note via the e
   assert.equal(rows.length, 2);
   rows[1].querySelector(".rail-version-del").click();
   await tick(window); await tick(window);
-  // rows are version-descending (v2 "latest" first, v1 second) — rows[1] is /o/a.md (v1).
-  assert.equal(deletedNote, "/o/a.md", "deletes the row's own note, not the auto-opened (latest) one");
+  // rows are version-descending (v2 first, v1 second) — rows[1] is /o/a.md (v1).
+  assert.equal(deletedNote, "/o/a.md", "deletes the row's own note, not the auto-opened topmost-version one");
   assert.equal(selectNoteCalls, callsBeforeDelete, "clicking 🗑 must not also select/open the row (stopPropagation)");
 });
 
@@ -6058,8 +6109,8 @@ test("История card redesign: deleting a version row that is NOT the curre
     deleteHistoryNote: async () => ({ ok: true }),
   });
   window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
-  // auto-open picks the topmost (latest) row — /o/latest.md — as covered elsewhere;
-  // deleting the OTHER (older) row's note must not blank out the still-open latest note.
+  // auto-open picks the topmost (highest-version) row — /o/latest.md — as covered elsewhere;
+  // deleting the OTHER (older) row's note must not blank out the still-open note.
   assert.ok(!$("noteView").querySelector(".history-placeholder"), "a note must already be open (auto-open)");
   const rows = Array.from($("historyList").querySelectorAll(".rail-version-row"));
   rows[1].querySelector(".rail-version-del").click();
