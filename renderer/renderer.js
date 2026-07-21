@@ -2134,13 +2134,12 @@ function ruPlural(n, one, few, many) {
   return many;
 }
 
-// Recording-level status badge (design "Вариант A" reference, history-audio-a.html):
-// «ждёт обработки» (pending, --rec-tint), «без обработок» (orphan audio inventory entry
-// with zero surviving notes, dashed --inactive outline), «N обработок» (has notes,
-// neutral) — tokens only (style.css's .rail-rec-badge.* rules), no hardcoded colors.
+// Recording-level status badge: «ждёт обработки» (pending, --rec-tint) or the
+// «N обработок» count-pill (notes-bearing group, ≥2 only — see buildNotesRecordingRow) —
+// tokens only (style.css's .rail-rec-badge.* rules), no hardcoded colors. The orphan
+// «без обработок» badge is gone: Вариант B's one-line orphan row carries no badge.
 function recordingBadge(kind, count) {
   if (kind === "pending") return '<span class="rail-rec-badge wait">ждёт обработки</span>';
-  if (kind === "orphan") return '<span class="rail-rec-badge empty">без обработок</span>';
   return `<span class="rail-rec-badge count">${count} ${ruPlural(count, "обработка", "обработки", "обработок")}</span>`;
 }
 
@@ -2230,12 +2229,16 @@ function audiosForBaseStamp(baseStamp) {
 // One collapsible recording row for any base stamp with ≥1 (currently shown) note —
 // EVERY notes-bearing recording renders this way now (a solitary обработка is no
 // longer a special-cased flat row), organized by template (stable order = first-seen,
-// already backend stamp-DESC) and, within a template, ordered by version DESCENDING —
-// the highest version per template marked "(latest)". Caret/hidden-class/session-Set
-// collapse mechanics mirror renderGlossaryChips' "Мои" category folders (see
-// glossaryCategoryCollapsed) — same discipline: no user/LLM string (title, template
-// name) ever lands in an HTML attribute; rows wire via closure-by-index, not a data-*
-// attribute.
+// already backend stamp-DESC) and, within a template, ordered by version DESCENDING.
+// Вариант B (design ref: history-compact-b.html, "карточка, но тише") — 2 floors
+// instead of 4: a one-row header (caret + 🎙 title + optional count-pill + time + 🗑)
+// and the version rows. A template with exactly one surviving version renders just its
+// name (no "· v1" — nothing to disambiguate); ≥2 versions show "· vN" for every row,
+// version-descending, with no "(latest)" suffix (top-of-list already reads as latest).
+// Caret/hidden-class/session-Set collapse mechanics mirror renderGlossaryChips' "Мои"
+// category folders (see glossaryCategoryCollapsed) — same discipline: no user/LLM
+// string (title, template name) ever lands in an HTML attribute; rows wire via
+// closure-by-index, not a data-* attribute.
 function buildNotesRecordingRow(rec) {
   const notes = rec.shownNotes; // may be a subset of rec.allNotes — filters "shrink" the group
   const wrap = document.createElement("div");
@@ -2255,22 +2258,22 @@ function buildNotesRecordingRow(rec) {
   const rowOrder = [];
   const rowsHtml = templateOrder.map((tmpl) => {
     const versions = byTemplate.get(tmpl).slice().sort((a, b) => (b.version || 1) - (a.version || 1));
-    const maxV = versions[0] ? (versions[0].version || 1) : 1;
     return versions.map((it) => {
       rowOrder.push(it);
-      const v = it.version || 1;
-      const latest = v === maxV ? ' <span class="rail-latest">(latest)</span>' : "";
       // No source-origin badge here — sourceBadge/SOURCE_BADGE_* were removed as dead
       // code (L9 arch-audit): only the old solitary flat row, retired by the
-      // audio-first rail, ever called it. The design reference (history-audio-a.html)
-      // doesn't show a source icon on обработка rows either.
-      // T1 redesign (history-buttons-a.html вариант A): the row itself keeps the
-      // selectNote click listener (unchanged below — same element, same dataset.idx
-      // discipline), but now also carries a 🗑 delete button — deleteHistoryNote's
-      // existing flow (previously reachable only via the opened note's nvDelete),
-      // stopPropagation'd so it doesn't also fire selectNote on the same click.
+      // audio-first rail, ever called it. The design reference doesn't show a source
+      // icon on обработка rows either.
+      const label = versions.length > 1
+        ? `${escapeHtml(tmpl || "Без шаблона")} · v${it.version || 1}`
+        : escapeHtml(tmpl || "Без шаблона");
+      // The row itself keeps the selectNote click listener (unchanged below — same
+      // element, same dataset.idx discipline), but now also carries a 🗑 delete button
+      // — deleteHistoryNote's existing flow (previously reachable only via the opened
+      // note's nvDelete), stopPropagation'd so it doesn't also fire selectNote on the
+      // same click.
       return `<div class="rail-item rail-version-row">` +
-        `<span class="rail-title">${escapeHtml(tmpl || "Без шаблона")} · v${v}${latest}</span>` +
+        `<span class="rail-title">${label}</span>` +
         `<button type="button" class="rail-version-del" title="Удалить заметку (в корзину)">🗑</button></div>`;
     }).join("");
   }).join("");
@@ -2278,22 +2281,34 @@ function buildNotesRecordingRow(rec) {
   const collapsed = historyGroupCollapsed.has(rec.baseStamp);
   const title = notes[0].title || "Без темы";
   const time = formatStampTime(rec.baseStamp);
-  const dur = rec.audio ? formatDurationMin(rec.audio.duration_s) : "";
-  const metaText = [time, dur].filter(Boolean).join(" · ");
+  // Count-pill only when there's actually something to count — a lone обработка
+  // duplicating "1 обработка" next to its own single version row was the bug being
+  // fixed (owner decision). Reuses recordingBadge's exact markup/tokens (.rail-rec-
+  // badge.count) — same pill the pending "ждёт обработки" badge below is built from.
+  const countPill = notes.length >= 2 ? recordingBadge("notes", notes.length) : "";
+  // Duration is dropped from this card (design ref) — it stays visible in the opened
+  // note flow (.note-meta), not reinvented here.
   wrap.innerHTML =
-    `<button type="button" class="rail-group-header">` +
+    // Not a <button> — a real 🗑 <button> now lives inside it, and <button> can't
+    // nest another <button> — collapse/expand is wired via click + keydown(Enter/
+    // Space) below instead of native button semantics.
+    `<div class="rail-group-header" role="button" tabindex="0">` +
     `<span class="glossary-caret">${collapsed ? "▸" : "▾"}</span>` +
-    `<span class="rail-group-title">🎙 ${escapeHtml(title)}</span></button>` +
-    `<div class="rail-rec-meta"><span class="rail-rec-meta-text">${escapeHtml(metaText)}</span>${recordingBadge("notes", notes.length)}</div>` +
-    `<div class="rail-actions">` +
-    `<button type="button" class="btn small rail-action-btn danger rec-trash-btn" title="Удалить (в корзину)">🗑 В корзину</button>` +
-    `</div>` +
+    `<span class="rail-group-title">🎙 ${escapeHtml(title)}</span>` +
+    countPill +
+    `<span class="rail-group-time">${escapeHtml(time)}</span>` +
+    `<button type="button" class="rec-trash-btn" title="В корзину (аудио + заметки)">🗑</button></div>` +
     `<div class="rail-group-versions${collapsed ? " hidden" : ""}">${rowsHtml}</div>`;
 
-  wrap.querySelector(".rail-group-header").addEventListener("click", () => {
+  const header = wrap.querySelector(".rail-group-header");
+  const toggleCollapse = () => {
     if (historyGroupCollapsed.has(rec.baseStamp)) historyGroupCollapsed.delete(rec.baseStamp);
     else historyGroupCollapsed.add(rec.baseStamp);
     renderRail();
+  };
+  header.addEventListener("click", toggleCollapse);
+  header.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggleCollapse(); }
   });
   wrap.querySelectorAll(".rail-version-row").forEach((row, i) => {
     const idx = historyItems.indexOf(rowOrder[i]);
@@ -2305,37 +2320,36 @@ function buildNotesRecordingRow(rec) {
       deleteHistoryNote(rowOrder[i], delBtn);
     });
   });
-  const trashBtn = wrap.querySelector(".rec-trash-btn");
-  trashBtn.addEventListener("click", () => deleteRecording(rec, trashBtn));
+  const trashBtn = header.querySelector(".rec-trash-btn");
+  trashBtn.addEventListener("click", (e) => {
+    e.stopPropagation(); // don't also toggle collapse via the header's own listener
+    deleteRecording(rec, trashBtn);
+  });
   return wrap;
 }
 
 // «без обработок» row (an audios[] entry with zero surviving notes — see buildRecordings):
 // a flat, non-clickable row (same shape as buildPendingRow — no note to open, so clicking
-// the row itself is a no-op), with a prominent «▶ Обработать» that reuses the SAME
+// the row itself is a no-op), with a compact «▶ Обработать» that reuses the SAME
 // reprocess entry point a note's own ▶ uses (openReprocessPicker/reprocessHistory) —
 // there is no note metadata (template/language) to seed the picker with, so a synthetic
 // item carrying only base_stamp stands in for a real one. Recording-level ✕ (trash
-// feature) now applies here too — an orphan is just an audio-only recording, same as any
-// other; the histaudrail2x report's "deferred to the trash PR" note is resolved by this
-// one.
+// feature) applies here too — an orphan is just an audio-only recording, same as any
+// other. Вариант B (design ref: history-compact-b.html): one line — icon + filename ·
+// duration + ▶ + 🗑 — the separate meta/actions floors are retired (see .rail-item.orphan
+// in style.css).
 function buildOrphanRow(rec) {
   const el = document.createElement("div");
   el.className = "rail-item orphan";
-  const time = formatStampTime(rec.baseStamp);
   const dur = formatDurationMin(rec.audio.duration_s);
   const name = (rec.audio.path || "").split("/").pop();
-  // T1 redesign: the recording-level ✕ moves into a labeled .rail-actions row
-  // alongside the existing "▶ Обработать" action (unchanged behaviour/handler,
-  // .btn.primary kept so tests/CSS relying on that class still match — rail-action-btn
-  // only adds the row's compact sizing).
+  // .btn.primary kept on the process button so tests/CSS relying on that class still
+  // match; rail-action-btn only adds the compact sizing shared with pending's own ▶.
   el.innerHTML =
-    `<div class="rail-rec-head"><span>🎙</span><span class="rail-title rail-title-file">${escapeHtml(name)}</span></div>` +
-    `<div class="rail-rec-meta"><span class="rail-rec-meta-text">${escapeHtml([time, dur].filter(Boolean).join(" · "))}</span>${recordingBadge("orphan")}</div>` +
-    `<div class="rail-actions">` +
+    `<span>🎙</span>` +
+    `<span class="rail-title rail-title-file">${escapeHtml([name, dur].filter(Boolean).join(" · "))}</span>` +
     `<button type="button" class="btn small primary rail-action-btn process-orphan-btn">▶ Обработать</button>` +
-    `<button type="button" class="btn small rail-action-btn danger rec-trash-btn" title="Удалить (в корзину)">🗑 В корзину</button>` +
-    `</div>`;
+    `<button type="button" class="rec-trash-btn" title="В корзину (аудио + заметки)">🗑</button>`;
   el.querySelector(".process-orphan-btn").addEventListener("click", () => processOrphanAudio(rec.audio));
   const trashBtn = el.querySelector(".rec-trash-btn");
   trashBtn.addEventListener("click", () => deleteRecording(rec, trashBtn));
@@ -2487,7 +2501,7 @@ function updateNoteViewDefault() {
     return;
   }
   // "Most recent note" reuses the rail's own already-computed order (stamp-DESC across
-  // ALL recordings, version-DESC — "(latest)" first — within a recording) instead of
+  // ALL recordings, version-DESC — newest version first — within a recording) instead of
   // re-deriving that sort here: .rail-version-row only ever renders for a notes-bearing
   // recording, so the FIRST one in DOM order is, by construction, the most recent
   // recording that actually has a note — if the very top of the unified rail is a
