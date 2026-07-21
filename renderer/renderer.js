@@ -2134,13 +2134,12 @@ function ruPlural(n, one, few, many) {
   return many;
 }
 
-// Recording-level status badge (design "Вариант A" reference, history-audio-a.html):
-// «ждёт обработки» (pending, --rec-tint), «без обработок» (orphan audio inventory entry
-// with zero surviving notes, dashed --inactive outline), «N обработок» (has notes,
-// neutral) — tokens only (style.css's .rail-rec-badge.* rules), no hardcoded colors.
+// Recording-level status badge: «ждёт обработки» (pending, --rec-tint) or the
+// «N обработок» count-pill (notes-bearing group, ≥2 only — see buildNotesRecordingRow) —
+// tokens only (style.css's .rail-rec-badge.* rules), no hardcoded colors. The orphan
+// «без обработок» badge is gone: Вариант B's one-line orphan row carries no badge.
 function recordingBadge(kind, count) {
   if (kind === "pending") return '<span class="rail-rec-badge wait">ждёт обработки</span>';
-  if (kind === "orphan") return '<span class="rail-rec-badge empty">без обработок</span>';
   return `<span class="rail-rec-badge count">${count} ${ruPlural(count, "обработка", "обработки", "обработок")}</span>`;
 }
 
@@ -2502,7 +2501,7 @@ function updateNoteViewDefault() {
     return;
   }
   // "Most recent note" reuses the rail's own already-computed order (stamp-DESC across
-  // ALL recordings, version-DESC — "(latest)" first — within a recording) instead of
+  // ALL recordings, version-DESC — newest version first — within a recording) instead of
   // re-deriving that sort here: .rail-version-row only ever renders for a notes-bearing
   // recording, so the FIRST one in DOM order is, by construction, the most recent
   // recording that actually has a note — if the very top of the unified rail is a

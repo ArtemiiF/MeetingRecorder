@@ -5567,7 +5567,7 @@ test("retryBtn/freshBtn on an import-mode run never send a version field (regres
   assert.ok(!("version" in calls[1]), "retry must not carry a version — only a История reprocess computes one");
 });
 
-test("История groups a multi-version recording into a collapsible block: descending per-template versions, latest marked, collapses/expands", async () => {
+test("История groups a multi-version recording into a collapsible block: descending per-template versions, no '(latest)' marker, collapses/expands", async () => {
   const { window, $ } = await boot({
     listHistory: async () => [
       { name: "2026-07-11-100000", title: "Планёрка", template: "Митинг", version: 1, note: "/o/a.md", audio: "/o/a.wav" },
@@ -6072,6 +6072,13 @@ test("История card redesign (variant B): header is keyboard-activatable (
   header.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
   await tick(window);
   assert.equal($("historyList").querySelector(".rail-group-header .glossary-caret").textContent, "▸", "Enter toggles collapse just like a click would");
+  // Space is the other native-button activation key — and unlike Enter it scrolls the
+  // rail if the handler forgets preventDefault, so both branches get locked.
+  const spaceEv = new window.KeyboardEvent("keydown", { key: " ", bubbles: true, cancelable: true });
+  $("historyList").querySelector(".rail-group-header").dispatchEvent(spaceEv);
+  await tick(window);
+  assert.equal($("historyList").querySelector(".rail-group-header .glossary-caret").textContent, "▾", "Space toggles collapse back");
+  assert.ok(spaceEv.defaultPrevented, "Space must be preventDefault'ed — otherwise it scrolls the rail");
 });
 
 test("История card redesign: version-row 🗑 deletes THAT note via the existing deleteHistoryNote flow, without selecting the row (stopPropagation)", async () => {
