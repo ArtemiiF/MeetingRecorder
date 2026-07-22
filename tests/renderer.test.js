@@ -6569,6 +6569,27 @@ test("trash view: 'Очистить корзину' confirms with the itemized c
   assert.match(confirmMsg, /1 МБ/);
 });
 
+// Tail 2026-07-22 (owner decision: emoji must be COLOR): #27's Unbounded/Onest font
+// stack dropped "Apple Color Emoji", so every 🎙/🗑/✅/❌/etc. glyph rendered monochrome
+// (the OS falls back to whichever text-glyph font is next in the stack instead of the
+// color-emoji font). CSS source-text lock, same idiom as the other style.css checks
+// above — jsdom doesn't apply real font fallback, so this can only be locked at the
+// declared-stack level.
+test("style.css: heading/body font stacks and the log <pre> stack all keep Apple Color Emoji fallback (owner decision: emoji stay color)", () => {
+  const css = fs.readFileSync(path.join(__dirname, "../renderer/style.css"), "utf8");
+  const heading = css.match(/--font-heading:[^;]*;/);
+  assert.ok(heading, "--font-heading declaration exists");
+  assert.match(heading[0], /"Apple Color Emoji"/);
+  const body = css.match(/--font-body:[^;]*;/);
+  assert.ok(body, "--font-body declaration exists");
+  assert.match(body[0], /"Apple Color Emoji"/);
+  // #logs/#histLogs are <pre> elements fed emoji-prefixed lines by pushLog/appendLog —
+  // a separate monospace stack, not inherited from --font-body, so it needs its own fix.
+  const preRule = css.match(/^pre \{[^}]*\}/m);
+  assert.ok(preRule, "pre rule exists");
+  assert.match(preRule[0], /"Apple Color Emoji"/);
+});
+
 test("trash view: 'Очистить корзину' confirmed → emptyTrash called, list refreshed to empty", async () => {
   let called = false;
   let calls = 0;

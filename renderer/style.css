@@ -16,8 +16,8 @@
   --selection-text: #fff; --selection-muted: #cdd9ee;
   --inactive: #6b7480; --sidebar: #161b22;
   /* typography — same in every theme, not part of the theme override blocks below */
-  --font-heading: 'Unbounded', -apple-system, "SF Pro Text", system-ui, sans-serif;
-  --font-body: 'Onest', -apple-system, "SF Pro Text", system-ui, sans-serif;
+  --font-heading: 'Unbounded', -apple-system, "SF Pro Text", system-ui, "Apple Color Emoji", sans-serif;
+  --font-body: 'Onest', -apple-system, "SF Pro Text", system-ui, "Apple Color Emoji", sans-serif;
   /* decorative (A-1): --grad-card/--grad-primary/--shadow-primary/--act-glow depend
      on --card/--accent-fill/--accent, so they're re-declared per theme below (OKLCH-
      derived, see the commit report for the exact numbers). --shadow-card/
@@ -675,7 +675,9 @@ body.processing .queue-item button { opacity: .4; pointer-events: none; }
 pre {
   background: var(--pre-bg); border: 1px solid var(--line); border-radius: 8px;
   padding: 12px 16px; font-size: 13px; line-height: 1.5;
-  font-family: "SF Mono", ui-monospace, Menlo, monospace;
+  /* #logs/#histLogs (both <pre>) render pushLog/appendLog's emoji-prefixed lines
+     (✅/⏭/⚠️/❌/💾/⏹/▶) — needs the color-emoji fallback same as --font-body/heading. */
+  font-family: "SF Mono", ui-monospace, Menlo, "Apple Color Emoji", monospace;
   white-space: pre-wrap; word-break: break-word; max-height: 340px; overflow: auto;
   box-shadow: var(--shadow-inset);
 }
