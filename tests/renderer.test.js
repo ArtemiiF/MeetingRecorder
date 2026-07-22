@@ -217,6 +217,23 @@ test("processAudio busy → error logged, UI not stuck on Stop", async () => {
   assert.equal($("stopBtn").style.display, "none"); // restored, not stuck
 });
 
+// TODO 2026-07-06: the synchronous {ok:false} reject (desync main↔renderer, refused
+// before the backend even started) used to skip finishPendingItem entirely — the
+// pending row stayed at status:"running" forever, with neither reprocess (▶, gated on
+// pending/failed) nor delete (gated on !running) ever available again.
+test("processAudio sync reject unsticks the pending row from status:running — reprocess and delete become available again", async () => {
+  const { window, $, handlers } = await boot({ processAudio: async () => ({ ok: false, error: "Обработка уже идёт" }) });
+  handlers.record({ event: "recorded", id: "r1", name: "Запись 1", file: "/tmp/mixed.wav", mic: "/tmp/mic.wav", system: null, tracks: 1 });
+  $("historyList").querySelector(".pending-play-btn").click();
+  await tick(window);
+  const row = $("historyList").querySelector(".rail-item.pending");
+  assert.ok(row, "pending row must still be rendered");
+  assert.ok(row.className.includes("queue-failed"),
+    `row must fall back to status:"failed", not stay stuck on "running" — className=${row.className}`);
+  assert.ok(row.querySelector(".pending-play-btn"), "▶ (reprocess) must be available again");
+  assert.ok(row.querySelector(".pending-del-btn"), "✕ (delete) must be available again");
+});
+
 // ── history rendering ─────────────────────────────────────────────────────
 // Note: the История rail also renders the just-recorded item as an always-visible pending
 // row (see renderRail) — this test's r1 pending row and the mocked real note both land in
@@ -1291,12 +1308,45 @@ test("PARA: a failed first fetch doesn't set paraInboxLoaded, so the next tab en
   await tick(window);
   assert.equal(listHistoryCalls, 1);
   assert.equal($("paraInbox").querySelectorAll(".para-row").length, 0);
+  // TODO 2026-07-06: this catch used to be completely silent — surface the failure
+  // instead of leaving the inbox looking merely empty/stale with no explanation.
+  assert.match($("paraInbox").innerHTML, /Не удалось загрузить/);
+  assert.match($("paraInbox").innerHTML, /boom/);
 
   failNext = false;
   window.document.querySelector('.topbtn[data-view="para"]').click(); // re-entry after the failure
   await tick(window);
   assert.equal(listHistoryCalls, 2, "must retry — the failed fetch must not have set paraInboxLoaded");
   assert.equal($("paraInbox").querySelectorAll(".para-row").length, 1);
+});
+
+test("PARA inbox: a fast re-entry while the first fetch is still in flight does not fire a second concurrent listHistory() call", async () => {
+  let listHistoryCalls = 0;
+  let resolveFirst;
+  const { window, $ } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru",
+      para: { root: "/v", folders: { projects: "Projects", areas: "Areas", resources: "Resources", archives: "Archives" } },
+    }),
+    listHistory: async () => {
+      listHistoryCalls++;
+      if (listHistoryCalls === 1) {
+        // init()'s own refreshHistory() fetch — let it resolve immediately, only the
+        // PARA-tab-triggered fetch below is held open to simulate an in-flight fetch.
+        return [];
+      }
+      return new Promise((resolve) => { resolveFirst = () => resolve([{ name: "2026-01-01", title: "T", note: "/n.md", audio: null }]); });
+    },
+  });
+  window.document.querySelector('.topbtn[data-view="para"]').click(); // fetch #2 starts, stays pending
+  await tick(window);
+  // Re-entry while #2 is still unresolved (search→inbox, or a fast double-click on Обновить).
+  $("paraInboxRefresh").click();
+  await tick(window);
+  assert.equal(listHistoryCalls, 2, "the guard must have refused the concurrent 2nd fetch attempt — no 3rd listHistory() call");
+  resolveFirst();
+  await tick(window); await tick(window);
+  assert.equal($("paraInbox").querySelectorAll(".para-row").length, 1, "the original in-flight fetch must still complete and render normally");
 });
 
 test("PARA classify-all: every row's file-btn is disabled up front, including rows the loop hasn't reached yet", async () => {
@@ -1351,6 +1401,35 @@ test("PARA classify-all: canceling mid-batch re-enables the not-yet-reached row'
   assert.ok(rows[0].classList.contains("filed"));
   assert.ok(!rows[1].classList.contains("filed"), "row 2 was never reached — batch was canceled first");
   assert.equal(rows[1].querySelector(".para-file-btn").disabled, false, "must be re-enabled, not left disabled forever");
+});
+
+// TODO 2026-07-06: the compensating re-enable (batch button, Обновить, every row's
+// file-btn) used to sit AFTER the loop unconditionally — a throw OUTSIDE the inner
+// per-row try/catch (e.g. `it.title` on an undefined `it`, paraInboxItems having
+// shifted under the loop) skipped it entirely, leaving everything disabled until the
+// user re-entered the PARA view. Source-text check (not a live-throw simulation —
+// an uncaught throw inside an async DOM click handler surfaces as an unhandled
+// promise rejection in jsdom/node's test runner, which can misattribute to whatever
+// OTHER test happens to be running when it settles): asserts the loop lives inside a
+// try whose finally contains all three re-enables, so it can never be skipped again
+// regardless of where inside the loop a future change makes something throw.
+test("renderer.js: «Разобрать все» wraps its loop in try/finally so the compensating re-enable always runs", () => {
+  const startIdx = RENDERER.indexOf('$("paraClassifyAll").addEventListener("click", async () => {');
+  assert.ok(startIdx >= 0, "paraClassifyAll click handler not found (renamed?)");
+  const endIdx = RENDERER.indexOf("function setRowProcessing", startIdx);
+  assert.ok(endIdx > startIdx, "setRowProcessing anchor not found after the handler (moved?)");
+  const handler = RENDERER.slice(startIdx, endIdx);
+
+  const tryIdx = handler.indexOf("try {");
+  const loopIdx = handler.indexOf("for (const row of rows)");
+  const finallyIdx = handler.indexOf("} finally {");
+  assert.ok(tryIdx >= 0 && loopIdx > tryIdx, "the for-loop must live INSIDE a try block");
+  assert.ok(finallyIdx > loopIdx, "a finally block must follow the loop");
+
+  const finallyBody = handler.slice(finallyIdx);
+  assert.match(finallyBody, /btn\.disabled = false;/, "batch button re-enable must be in the finally block");
+  assert.match(finallyBody, /\$\("paraInboxRefresh"\)\.disabled = false;/, "Обновить re-enable must be in the finally block");
+  assert.match(finallyBody, /rows\.forEach\(\(row\) => \{/, "per-row file-btn re-enable loop must be in the finally block");
 });
 
 test("PARA search sub-tab is enabled and switching to it shows #para-pane-search", async () => {
@@ -2239,6 +2318,30 @@ test("removing a chip drops the term from state.glossary and persists", async ()
   assert.equal(saved.glossary, "Иван Петров, ClickHouse");
 });
 
+// TODO 2026-07-10: removeGlossaryTerm didn't prune glossaryCategories[low] of the
+// deleted term — orphans accumulated in presets.json unboundedly (rendering was fine,
+// only the persisted map grew). Lock: removing a categorized "Мои" term must drop its
+// category entry too, not just leave it stranded.
+test("removing a chip also prunes its glossaryCategories entry (no orphaned category left in presets.json)", async () => {
+  let saved = null;
+  const { $, window } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru",
+      glossary: "Иван Петров, Mindbox",
+      glossaryCategories: { "иван петров": "Люди", "mindbox": "Продукты и инструменты" },
+    }),
+    savePresets: async (data) => { saved = data; return true; },
+  });
+  await tick(window);
+  // "Mindbox" is the 2nd rendered chip (index 1: Иван Петров, Mindbox).
+  $("glossaryChips").querySelectorAll(".chip-remove")[1].click();
+  await tick(window);
+  assert.ok(saved, "savePresets was not called");
+  assert.equal(saved.glossary, "Иван Петров");
+  assert.deepEqual(saved.glossaryCategories, { "иван петров": "Люди" },
+    "mindbox's category entry must be pruned, not left orphaned");
+});
+
 test("a term containing a double quote does not break out of an HTML attribute and can still be removed (regression: attribute-injection via data-term)", async () => {
   let saved = null;
   const injected = 'x" onmouseover="alert(1)';
@@ -3008,6 +3111,29 @@ test("PARA chat degraded badge: backend.py's log wording matches main.js's exact
   );
 });
 
+// ── M4 arch-audit reverse cross-lock (critic-minor, PR #30) ─────────────────
+// tests/test_backend.py's own cross-lock test checks ONE direction: every EVENTS.*
+// constant main.js's dispatch references resolves to a name in events.json. The
+// runtime assert inside backend.py's own emit() (backend.py:87-91) checks the other
+// side, but only for code paths some test actually EXECUTES — an emit("typo", ...)
+// call site on a branch nothing exercises would ship silently, contract violation
+// and all. This closes that gap statically (no Python runtime, no code-path
+// coverage needed): every literal event-name argument passed to emit() anywhere in
+// backend.py's source is collected by regex and checked against events.json's
+// contract directly, mirroring the mainutil "source-text" test idiom above but
+// reading backend.py instead of main.js.
+test("backend.py: every emit() call-site's literal event name is a member of events.json's contract (M4 reverse cross-lock)", () => {
+  const backendSrc = fs.readFileSync(path.join(__dirname, "../backend.py"), "utf8");
+  const contract = new Set(JSON.parse(fs.readFileSync(path.join(__dirname, "../events.json"), "utf8")).events);
+
+  const calls = [...backendSrc.matchAll(/\bemit\("([a-z_-]+)"/g)].map((m) => m[1]);
+  assert.ok(calls.length > 0, "sanity check: backend.py should have at least one emit() call site");
+
+  const unknown = [...new Set(calls.filter((name) => !contract.has(name)))];
+  assert.deepEqual(unknown, [],
+    `backend.py's emit() calls a name outside events.json's contract: ${JSON.stringify(unknown)}`);
+});
+
 // ── settings "Бэкенд" section (installs the Python/ffmpeg env, see main.js) ──
 test("Бэкенд: not-installed status renders a bad dot and the install button's default label", async () => {
   const { window, $ } = await boot({
@@ -3213,6 +3339,23 @@ test("main.js: backend-status and uninstall-backend handlers exist", () => {
   assert.match(mainSrc, /ipcMain\.handle\("uninstall-backend"/);
 });
 
+// ── TODO 2026-07-07: stranded backend-env ".old" backup cleanup ─────────────
+// A crash mid-swap in runInstallBackend's atomic install leaves BACKEND_ENV+".old"
+// (~1.3GB) on disk; previously the only sweep was at the START of the NEXT install —
+// never on launch, never on uninstall. Locks both new call sites.
+test("main.js: uninstall-backend also reclaims a stranded backend-env \".old\" backup", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const handler = mainSrc.match(/ipcMain\.handle\("uninstall-backend"[\s\S]*?\n\}\);/)[0];
+  assert.match(handler, /fs\.rmSync\(BACKEND_ENV, \{ recursive: true, force: true \}\)/);
+  assert.match(handler, /cleanupStrandedBackendEnvOld\(\)/);
+});
+
+test("main.js: app.whenReady() sweeps a stranded backend-env \".old\" backup on every launch, best-effort like its sibling startup cleanups", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const ready = mainSrc.match(/app\.whenReady\(\)\.then\(\(\) => \{[\s\S]*?\n\}\);/)[0];
+  assert.match(ready, /try \{ cleanupStrandedBackendEnvOld\(\); \} catch \{\}/);
+});
+
 // ── richer backend-status payload (settings "Бэкенд" — "показать КАКОЙ именно
 // бэкенд"): env path + real ffmpeg version, both only once actually installed ──
 test("main.js: backend-status reports envPath/ffmpegVersion only when installed, null otherwise", () => {
@@ -3307,6 +3450,16 @@ test("main.js: para-classify forwards --main-model to the backend spawn only whe
   const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
   const paraClassify = mainSrc.match(/ipcMain\.handle\("para-classify"[\s\S]*?\n\}\);/)[0];
   assert.match(paraClassify, /if \(mainModel\) args\.push\("--main-model", mainModel\)/);
+});
+
+// ── critic-minor, PR #30: para-classify read root/folders without containment ──
+test("main.js: para-classify validates root against readParaRoot() before it ever drives a readdirSync (critic-minor, PR #30)", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const paraClassify = mainSrc.match(/ipcMain\.handle\("para-classify"[\s\S]*?\n\}\);/)[0];
+  assert.match(paraClassify, /isPathInsideRoots\(resolvedRoot, \[readParaRoot\(\)\]\.filter\(Boolean\)\)/,
+    "root must be checked against the server's OWN configured PARA vault, not trusted as sent by the renderer");
+  assert.match(paraClassify, /isPathInsideRoots\(dir, \[resolvedRoot\]\)/,
+    "the per-category dir (root + folders[cat]) must be re-checked too — folders[cat] can carry a '../' segment");
 });
 
 test("main.js: para-search forwards --main-model to the backend spawn only when mainModel is non-empty", () => {

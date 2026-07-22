@@ -416,6 +416,33 @@ def test_summarize_omits_model_field_when_main_model_empty(monkeypatch, pipe):
     assert "model" not in calls["json"]
 
 
+# ── summarize / language pinning ────────────────────────────────────────────
+# Mirrors generate_title's own ru/en pin (owner report there: Russian titles on
+# English-language meetings) — the summary must match the pipeline's transcription
+# language, not whatever language the LLM happens to answer in by default.
+def test_summarize_pins_russian_for_ru_pipeline(monkeypatch):
+    pipe = backend.Pipeline(out_dir="/tmp/mr-test-out", diarize=False, language="ru")
+    calls = install_fake_requests(monkeypatch, payload={"choices": [{"message": {"content": "СВОДКА"}}]})
+    pipe.summarize("транскрипт", "сделай сводку")
+    assert "на русском языке" in calls["json"]["messages"][0]["content"]
+
+
+def test_summarize_pins_english_for_en_pipeline(monkeypatch):
+    pipe = backend.Pipeline(out_dir="/tmp/mr-test-out", diarize=False, language="en")
+    calls = install_fake_requests(monkeypatch, payload={"choices": [{"message": {"content": "Summary"}}]})
+    pipe.summarize("транскрипт", "сделай сводку")
+    assert "Answer in English" in calls["json"]["messages"][0]["content"]
+
+
+def test_summarize_no_language_pin_for_auto_pipeline(monkeypatch):
+    pipe = backend.Pipeline(out_dir="/tmp/mr-test-out", diarize=False, language="auto")
+    calls = install_fake_requests(monkeypatch, payload={"choices": [{"message": {"content": "Summary"}}]})
+    pipe.summarize("транскрипт", "сделай сводку")
+    system_content = calls["json"]["messages"][0]["content"]
+    assert "на русском языке" not in system_content
+    assert "Answer in English" not in system_content
+
+
 # ── list_devices / find_device_index (mock pyaudio) ─────────────────────────
 class FakePyAudio:
     def __init__(self, devices, default_index=0):
@@ -2282,6 +2309,23 @@ def test_glossary_no_usage_data_initial_prompt_byte_identical(tmp_path):
     assert p_plain._build_initial_prompt() == p_empty_usage._build_initial_prompt()
     assert p_plain._build_initial_prompt() == (
         backend.Pipeline.CONTEXT_PROMPT_RU + " Термины: Иван Петров, Mindbox, ClickHouse.")
+
+
+def test_build_initial_prompt_delegates_to_glossary_prompt_not_a_duplicated_format_string(monkeypatch, tmp_path):
+    # DRY fix (TODO 2026-07-06): _build_initial_prompt used to inline its own copy of
+    # _glossary_prompt's exact "Термины: …" format string instead of calling it —
+    # _glossary_prompt was otherwise orphaned in the prod path (only this test's
+    # sibling below ever called it). Spies on the real bound method to prove
+    # delegation (with the correctly-truncated `kept` subset), not just
+    # byte-identical output by coincidence with a second copy of the format.
+    p = backend.Pipeline(out_dir=str(tmp_path / "v"), diarize=False, language="ru",
+                         glossary="Иван Петров, Mindbox")
+    calls = []
+    real = p._glossary_prompt
+    monkeypatch.setattr(p, "_glossary_prompt", lambda terms=None: (calls.append(terms), real(terms))[1])
+    result = p._build_initial_prompt()
+    assert calls == [["Иван Петров", "Mindbox"]], "_build_initial_prompt must call _glossary_prompt(kept), not re-format the string itself"
+    assert result == backend.Pipeline.CONTEXT_PROMPT_RU + " Термины: Иван Петров, Mindbox."
 
 
 def test_glossary_dropped_entirely_when_context_alone_meets_budget(monkeypatch, tmp_path):

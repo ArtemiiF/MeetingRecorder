@@ -54,10 +54,49 @@ def test_combine_unknown_when_no_overlap():
     assert "**[Неизвестно]**: hi" == out
 
 
+def test_combine_empty_segment_text_does_not_abort_remaining_segments():
+    segments = [seg("привет", 0.0, 1.0), seg("", 1.0, 2.0), seg("пока", 2.0, 3.0)]
+    timeline = [(0.0, 3.0, "SPEAKER_00")]
+    out, _label_map = backend_core.combine(segments, timeline)
+    assert out == "**[Спикер 1]**: привет пока"
+
+
+def test_combine_resolves_speaker_at_overlap_of_exactly_one():
+    # a 1.0-unit overlap is the smallest POSITIVE overlap possible here -- the
+    # running "best" comparison must start low enough to be beaten by it,
+    # or the segment falls back to "Unknown" despite a real, resolvable match.
+    segments = [seg("слово", 0.0, 1.0)]
+    timeline = [(0.0, 1.0, "SPEAKER_00")]
+    out, _label_map = backend_core.combine(segments, timeline)
+    assert out == "**[Спикер 1]**: слово"
+
+
+def test_combine_joins_final_buffered_turn_with_a_single_space():
+    # both segments belong to the SAME speaker throughout, so the buffer is
+    # only ever flushed once, AFTER the loop ends -- this exercises that
+    # tail-flush join specifically (the mid-loop flush is covered above).
+    segments = [seg("привет", 0.0, 2.0), seg("мир", 2.0, 4.0)]
+    timeline = [(0.0, 4.0, "SPEAKER_00")]
+    out, _label_map = backend_core.combine(segments, timeline)
+    assert out == "**[Спикер 1]**: привет мир"
+
+
+def test_combine_joins_multiple_speaker_turns_with_blank_line():
+    segments = [seg("привет", 0.0, 2.0), seg("пока", 4.0, 6.0)]
+    timeline = [(0.0, 2.0, "SPEAKER_00"), (4.0, 6.0, "SPEAKER_01")]
+    out, _label_map = backend_core.combine(segments, timeline)
+    assert out == "**[Спикер 1]**: привет\n\n**[Спикер 2]**: пока"
+
+
 # ── add_timestamps ──────────────────────────────────────────────────────────
 def test_add_timestamps_format():
     out = backend_core.add_timestamps([seg("первая", 0, 1), seg("вторая", 65, 70)])
     assert out == "[00:00] первая\n[01:05] вторая"
+
+
+def test_add_timestamps_minute_boundary_uses_60_second_minutes():
+    out = backend_core.add_timestamps([seg("текст", 120, 121)])
+    assert out == "[02:00] текст"
 
 
 # ── _normalized_xcorr_peak (pure helper, synthetic arrays) ─────────────────────
@@ -111,6 +150,46 @@ def test_normalized_xcorr_peak_shift_beyond_max_lag_stays_bounded():
     assert abs(lag) <= 100  # bounded to the search window, never crashes
 
 
+def test_normalized_xcorr_peak_single_sample_arrays_still_compute_a_real_peak():
+    # size-1 arrays are NOT the "empty" case -- they must still go through the
+    # real correlation math (and land on confidence 1.0 here), not get
+    # shunted into the empty-input early-return.
+    import numpy as np
+    lag, conf = backend_core._normalized_xcorr_peak(np.array([5.0]), np.array([5.0]), max_lag=10)
+    assert lag == 0
+    assert conf == pytest.approx(1.0)
+
+
+def test_normalized_xcorr_peak_empty_array_returns_exact_zero_zero():
+    import numpy as np
+    lag, conf = backend_core._normalized_xcorr_peak(np.array([]), np.array([1.0, 2.0]), max_lag=5)
+    assert lag == 0
+    assert conf == 0.0
+
+
+def test_normalized_xcorr_peak_lag_exactly_at_max_lag_boundary_is_included():
+    # the true shift sits exactly ON the max_lag boundary -- an off-by-one on
+    # the inclusive bound would mask out the actual peak lag entirely.
+    import numpy as np
+    rng = np.random.default_rng(11)
+    shared = rng.standard_normal(2000)
+    shift = 200
+    early, late = shared[:1500], shared[shift:shift + 1500]
+    lag, conf = backend_core._normalized_xcorr_peak(early, late, max_lag=200)
+    assert lag == 200
+    assert conf > 0.5
+
+
+def test_normalized_xcorr_peak_negative_max_lag_returns_exact_zero_zero():
+    # max_lag < 0 means no lag can ever satisfy the mask -- must fall through
+    # the "nothing in window" branch cleanly, not crash or fabricate a peak.
+    import numpy as np
+    lag, conf = backend_core._normalized_xcorr_peak(
+        np.array([1.0, 2.0, 3.0]), np.array([1.0, 2.0, 3.0]), max_lag=-1)
+    assert lag == 0
+    assert conf == 0.0
+
+
 # ── _shift_chunks (pure helper) ─────────────────────────────────────────────
 def test_shift_chunks_mid_track_shift():
     chunks = [{"start": 1000, "end": 2000}]
@@ -134,6 +213,34 @@ def test_shift_chunks_fully_out_of_range_dropped():
     chunks = [{"start": 0, "end": 50}]
     out = backend_core._shift_chunks(chunks, delay_ms=1000, rate=1000, max_len=10000)
     assert out == []
+
+
+# ── _track_rms (pure helper: RMS of a sample-index slice) ───────────────────
+def test_track_rms_start_at_time_zero_includes_the_first_sample():
+    import numpy as np
+    samples = np.array([10.0, 0.0, 0.0, 0.0])
+    rms = backend_core._track_rms(samples, start_s=0.0, end_s=4.0, rate=1)
+    assert rms == pytest.approx(5.0)
+
+
+def test_track_rms_end_at_time_zero_yields_empty_slice_not_one_sample():
+    import numpy as np
+    samples = np.array([7.0, 0.0, 0.0])
+    rms = backend_core._track_rms(samples, start_s=-5.0, end_s=0.0, rate=1)
+    assert rms == 0.0
+
+
+def test_track_rms_reversed_range_returns_exact_zero():
+    import numpy as np
+    samples = np.array([1.0, 2.0, 3.0])
+    assert backend_core._track_rms(samples, start_s=3.0, end_s=1.0, rate=1) == 0.0
+
+
+def test_track_rms_single_sample_segment_computes_its_own_value_not_zero():
+    import numpy as np
+    samples = np.array([0.0, 6.0, 0.0])
+    rms = backend_core._track_rms(samples, start_s=1.0, end_s=2.0, rate=1)
+    assert rms == pytest.approx(6.0)
 
 
 # ── compute_speaker_dominance (pure helper) ─────────────────────────────────
@@ -201,6 +308,69 @@ def test_compute_speaker_dominance_mic_share_survives_system_track_echo():
     assert scores["SPEAKER_00"]["mic_ratio"] == pytest.approx(0.5)  # would fail the old 0.65 gate
     assert scores["SPEAKER_00"]["mic_share"] == pytest.approx(1.0)  # mic_share gets it right anyway
     assert scores["SPEAKER_01"]["mic_share"] == pytest.approx(0.0)
+
+
+def test_compute_speaker_dominance_default_rate_is_16000():
+    # relies on the DEFAULT rate (no explicit rate= kwarg) -- a wrong default
+    # shifts the sample-index window just past a real amplitude jump placed
+    # exactly at the true 16000 Hz one-second mark.
+    import numpy as np
+    mic = np.concatenate([np.ones(16000) * 1.0, np.ones(16000) * 100.0])
+    sysd = np.zeros(32000)
+    scores = backend_core.compute_speaker_dominance([(0.0, 1.0, "SPEAKER_00")], mic, sysd)
+    assert scores["SPEAKER_00"]["mic_level"] == pytest.approx(1.0)
+
+
+def test_compute_speaker_dominance_zero_duration_segment_is_skipped_entirely():
+    import numpy as np
+    mic = np.ones(1000)
+    sysd = np.zeros(1000)
+    scores = backend_core.compute_speaker_dominance([(1.0, 1.0, "SPEAKER_00")], mic, sysd, rate=1000)
+    assert scores == {}
+
+
+def test_compute_speaker_dominance_zero_duration_segment_does_not_abort_remaining_segments():
+    import numpy as np
+    mic = np.ones(2000)
+    sysd = np.zeros(2000)
+    timeline = [(0.0, 0.0, "SPEAKER_00"), (0.0, 1.0, "SPEAKER_01")]
+    scores = backend_core.compute_speaker_dominance(timeline, mic, sysd, rate=1000)
+    assert "SPEAKER_01" in scores
+    assert scores["SPEAKER_01"]["duration_s"] == pytest.approx(1.0)
+
+
+def test_compute_speaker_dominance_energy_is_mic_rms_times_duration_not_divided():
+    import numpy as np
+    rate = 1000
+    # label A: 2s @ mic_rms=10; label B: 1s @ mic_rms=10 -- equal mic_rms, but
+    # A's LONGER duration must give it MORE energy share (energy=rms*dur),
+    # not less (which a mistaken rms/dur would produce).
+    mic = np.concatenate([np.ones(2000) * 10.0, np.ones(1000) * 10.0])
+    sysd = np.zeros(3000)
+    timeline = [(0.0, 2.0, "A"), (2.0, 3.0, "B")]
+    scores = backend_core.compute_speaker_dominance(timeline, mic, sysd, rate=rate)
+    assert scores["A"]["mic_share"] > scores["B"]["mic_share"]
+
+
+def test_compute_speaker_dominance_energy_accumulates_across_multiple_segments():
+    import numpy as np
+    rate = 1000
+    mic = np.concatenate([np.ones(1000) * 10.0, np.ones(1000) * 10.0, np.ones(1000) * 10.0])
+    sysd = np.zeros(3000)
+    timeline = [(0.0, 1.0, "A"), (1.0, 2.0, "A"), (2.0, 3.0, "B")]  # A has TWO segments, B has one
+    scores = backend_core.compute_speaker_dominance(timeline, mic, sysd, rate=rate)
+    # A's energy must be the SUM of both its segments (20), double B's (10) --
+    # an overwrite instead of accumulation would lose the first segment.
+    assert scores["A"]["mic_share"] == pytest.approx(2 / 3)
+
+
+def test_compute_speaker_dominance_small_positive_total_energy_is_not_treated_as_zero():
+    import numpy as np
+    rate = 1000
+    mic = np.ones(1000) * 0.5  # small mic_rms -> total energy 0.5 (strictly between 0 and 1)
+    sysd = np.zeros(1000)
+    scores = backend_core.compute_speaker_dominance([(0.0, 1.0, "SPEAKER_00")], mic, sysd, rate=rate)
+    assert scores["SPEAKER_00"]["mic_share"] == pytest.approx(1.0)
 
 
 # ── pick_author_label (pure helper) ─────────────────────────────────────────
@@ -296,6 +466,145 @@ def test_pick_author_label_single_speaker_too_short_returns_none():
     assert backend_core.pick_author_label(scores) is None
 
 
+def test_pick_author_label_duration_exactly_at_floor_is_accepted():
+    scores = {"SPEAKER_00": {"mic_share": 0.9, "mic_level": 800.0, "duration_s": 3.0},  # exactly the default floor
+              "SPEAKER_01": {"mic_share": 0.1, "mic_level": 50.0, "duration_s": 10.0}}
+    assert backend_core.pick_author_label(scores) == "SPEAKER_00"
+
+
+def test_pick_author_label_single_speaker_mic_level_exactly_at_floor_is_accepted():
+    scores = {"SPEAKER_00": {"mic_share": 1.0, "mic_level": 50.0, "duration_s": 10.0}}  # exactly the default floor
+    assert backend_core.pick_author_label(scores) == "SPEAKER_00"
+
+
+def test_pick_author_label_mic_share_exactly_at_floor_is_accepted():
+    scores = {"SPEAKER_00": {"mic_share": 0.40, "mic_level": 300.0, "duration_s": 10.0},  # exactly the default floor
+              "SPEAKER_01": {"mic_share": 0.1, "mic_level": 50.0, "duration_s": 10.0}}
+    assert backend_core.pick_author_label(scores) == "SPEAKER_00"
+
+
+def test_pick_author_label_margin_exactly_at_floor_is_accepted():
+    # 0.625/0.375 are exact binary fractions (5/8, 3/8) so their difference is
+    # bit-for-bit 0.25 -- "0.55 - 0.40" would land a hair ABOVE 0.15 under
+    # IEEE754 and silently miss the boundary this test needs to sit exactly on.
+    scores = {"SPEAKER_00": {"mic_share": 0.625, "mic_level": 400.0, "duration_s": 10.0},
+              "SPEAKER_01": {"mic_share": 0.375, "mic_level": 380.0, "duration_s": 10.0}}
+    assert backend_core.pick_author_label(scores, min_margin=0.25) == "SPEAKER_00"
+
+
+# ── _levenshtein (pure edit-distance helper) ────────────────────────────────
+def test_levenshtein_identical_strings_is_zero():
+    assert backend_core._levenshtein("test", "test") == 0
+
+
+def test_levenshtein_single_substitution_is_one():
+    assert backend_core._levenshtein("cat", "bat") == 1
+
+
+def test_levenshtein_single_insertion_is_one():
+    assert backend_core._levenshtein("cat", "cats") == 1
+
+
+def test_levenshtein_multiple_deletions():
+    # forces the DP to actually use the "delete from a" transition (prev[j]+1)
+    # more than once in a row -- a dropped/miscounted deletion term recovers
+    # the wrong (larger) distance here.
+    assert backend_core._levenshtein("abc", "a") == 2
+
+
+def test_levenshtein_classic_kitten_sitting():
+    assert backend_core._levenshtein("kitten", "sitting") == 3
+
+
+# ── _fuzzy_threshold (pure helper: fuzz budget by term length) ──────────────
+def test_fuzzy_threshold_three_chars_or_fewer_is_zero():
+    assert backend_core._fuzzy_threshold("abc") == 0
+    assert backend_core._fuzzy_threshold("a") == 0
+
+
+def test_fuzzy_threshold_four_to_five_chars_is_one():
+    assert backend_core._fuzzy_threshold("abcd") == 1
+    assert backend_core._fuzzy_threshold("abcde") == 1
+
+
+def test_fuzzy_threshold_six_or_more_chars_is_two():
+    assert backend_core._fuzzy_threshold("abcdef") == 2
+    assert backend_core._fuzzy_threshold("abcdefg") == 2
+
+
+# ── _closest_term (pure fuzzy term matcher) ─────────────────────────────────
+def test_closest_term_lenient_defaults_to_false():
+    # "Иваном" is both misrecognized-length AND declined relative to "Иван" --
+    # only reachable under lenient=True's prefix candidate. If the default
+    # silently flipped to True this would incorrectly match here too.
+    assert backend_core._closest_term("Иваном", ["Иван"]) is None
+
+
+def test_closest_term_strips_punctuation_before_matching():
+    assert backend_core._closest_term("Дан!", ["Дан"]) == "Дан"
+
+
+def test_closest_term_skips_falsy_terms_in_list():
+    assert backend_core._closest_term("XXXX", [None, "Антон"]) is None
+
+
+def test_closest_term_empty_term_entry_does_not_abort_remaining_terms():
+    assert backend_core._closest_term("Антон", ["", "Антон"]) == "Антон"
+
+
+def test_closest_term_lenient_prefix_boundary_three_extra_chars_included():
+    # core is 3 chars longer than the term (the lenient boundary, <=3) and its
+    # first 4 chars are an exact match -- only the lenient prefix candidate
+    # can resolve this (whole-string distance is 3, over threshold 1).
+    assert backend_core._closest_term("иванбвг", ["Иван"], lenient=True) == "Иван"
+
+
+def test_closest_term_lenient_prefix_more_than_three_extra_chars_excluded():
+    # one char past the lenient boundary (4 extra, not <=3) -- must NOT match.
+    assert backend_core._closest_term("иванбвгд", ["Иван"], lenient=True) is None
+
+
+# ── _term_specs (pure helper: dedupe + sort terms by word count desc) ───────
+def test_term_specs_skips_falsy_entries():
+    assert backend_core._term_specs([None, "Иван Петров"]) == [("Иван Петров", 2)]
+
+
+def test_term_specs_dedupes_repeated_terms():
+    assert backend_core._term_specs(["Антон", "Антон"]) == [("Антон", 1)]
+
+
+def test_term_specs_sorts_by_word_count_descending():
+    specs = backend_core._term_specs(["Антон", "Иван Петров"])
+    assert specs == [("Иван Петров", 2), ("Антон", 1)]
+
+
+# ── _fuzzy_correct_text (pure per-string worker behind fuzzy_correct) ───────
+def test_fuzzy_correct_text_none_text_is_noop_with_terms_present():
+    # "not text" must catch None too, not just "" -- a caller-side crash here
+    # (AttributeError from None.split()) is the observable failure mode.
+    assert backend_core._fuzzy_correct_text(None, ["Антон"]) == (None, [])
+
+
+def test_fuzzy_correct_text_multiword_term_window_never_overruns_remaining_tokens():
+    # a term-window bounds check must reject a multi-word term whose word
+    # count would extend past the END of the token stream -- otherwise a
+    # truncated 1-token window can still "fuzzy match" a 2-word term (when
+    # the dropped word is short enough to fit the term's own fuzz threshold)
+    # and splice in a word that was never in the original text at all.
+    text, reps = backend_core._fuzzy_correct_text("Позвал Иван", ["Иван П"])
+    assert text == "Позвал Иван"
+    assert reps == []
+
+
+def test_fuzzy_correct_text_oversized_leading_spec_does_not_block_shorter_spec_match():
+    # the longest-first spec ("Иван Петров", 2 words) doesn't fit at the tail
+    # position -- that must fall through to try the shorter spec ("Антон"),
+    # not abandon the whole position untried.
+    text, reps = backend_core._fuzzy_correct_text("Слово Онтон", ["Иван Петров", "Антон"])
+    assert text == "Слово Антон"
+    assert reps == [{"from": "Онтон", "to": "Антон"}]
+
+
 # ── fuzzy_correct — Stage 1 of glossary correction (deterministic, no LLM) ──
 def test_fuzzy_correct_replaces_close_cyrillic_misrecognition():
     text, reps = backend_core.fuzzy_correct("Слово Онтон тут", ["Антон"])
@@ -367,6 +676,27 @@ def test_fuzzy_correct_empty_terms_is_noop_passthrough():
     assert reps == []
 
 
+def test_fuzzy_correct_segment_missing_text_key_defaults_to_empty_string():
+    segs = [{"start": 0, "end": 1}]  # no "text" key at all
+    out, reps = backend_core.fuzzy_correct(segs, ["Антон"])
+    assert out == [{"start": 0, "end": 1, "text": ""}]
+    assert reps == []
+
+
+def test_fuzzy_correct_falsy_non_list_input_defaults_to_empty_string():
+    text, reps = backend_core.fuzzy_correct(None, ["Антон"])
+    assert text == ""
+    assert reps == []
+
+
+# ── _transplant_punctuation (keeps original punctuation, swaps only the core) ──
+def test_transplant_punctuation_pure_punctuation_old_token_no_duplicated_trail():
+    # old_tok is ENTIRELY punctuation -> old_core is empty/falsy, so trail
+    # must stay "" rather than re-deriving a (duplicated) trailing punctuation
+    # slice from an already-fully-stripped rstrip.
+    assert backend_core._transplant_punctuation("...", "Slack") == "...Slack"
+
+
 # ── gate_llm_correction — Stage 2 diff-gate over an LLM's proposed fix ──────
 def test_gate_accepts_close_replacement_matching_glossary_term():
     out = backend_core.gate_llm_correction(
@@ -421,11 +751,175 @@ def test_gate_empty_terms_is_noop_passthrough():
     assert backend_core.gate_llm_correction(original, "Позвал Антон на встречу", []) == original
 
 
+def test_gate_empty_terms_preserves_original_whitespace_verbatim():
+    # with terms=[] the function must short-circuit on the VERY FIRST guard
+    # and hand back `original` byte-for-byte -- falling through to the
+    # tokenize/rejoin path would silently normalize whitespace instead.
+    original = "  hello  world  "
+    out = backend_core.gate_llm_correction(original, "hello world", [])
+    assert out == original
+
+
+def test_gate_none_original_returns_none_without_crashing():
+    assert backend_core.gate_llm_correction(None, "Антон", ["Антон"]) is None
+
+
+def test_gate_accepts_correction_at_exact_twenty_percent_length_delta_boundary():
+    # len 10 -> len 8 is a delta of exactly 0.2 (the ">" boundary itself, not
+    # a hair past it) -- this must still be ACCEPTED, not gated away.
+    original = "1234567890"
+    corrected = "12345678"
+    out = backend_core.gate_llm_correction(original, corrected, ["12345678"])
+    assert out == "12345678"
+
+
+def test_gate_rejects_three_token_changes_above_the_floor_of_two():
+    # 5 tokens: 0.3*5=1.5, so the cap is the floor of 2, not the percentage.
+    # 3 changed tokens must be rejected wholesale (over the floor).
+    original = "Онтон Ивон Диман тут да"
+    corrected = "Антон Иван Дима тут да"
+    out = backend_core.gate_llm_correction(original, corrected, ["Антон", "Иван", "Дима"])
+    assert out == original
+
+
+def test_gate_accepts_three_changes_when_orig_is_long_enough_to_scale_the_cap():
+    # 10 tokens: 0.3*10=3, so the cap scales up to 3 (not pinned at the floor
+    # of 2) -- a long enough chunk must tolerate 3 legitimate term fixes.
+    original = "Онтон Ивон Диман тут да и там тоже было хорошо"
+    corrected = "Антон Иван Дима тут да и там тоже было хорошо"
+    out = backend_core.gate_llm_correction(original, corrected, ["Антон", "Иван", "Дима"])
+    assert out == corrected
+
+
+def test_gate_applies_swap_at_the_very_first_token_position():
+    # k starts at 0 and the swap loop must be able to apply AT k==0 (an
+    # off-by-one in the window's start/end arithmetic would miss position 0
+    # specifically while still working for later positions).
+    out = backend_core.gate_llm_correction("Онтон тут", "Антон тут", ["Антон"])
+    assert out == "Антон тут"
+
+
+def test_gate_applies_two_consecutive_single_word_swaps_in_one_chunk():
+    # forces the swap-application loop to advance k across TWO separate
+    # accepted single-word windows in the same replace span -- a broken
+    # advance (k left unmoved, or jumping past the second window) would
+    # apply only the first swap, or corrupt/skip the second one.
+    out = backend_core.gate_llm_correction(
+        "Онтон Ивон тут", "Антон Иван тут", ["Антон", "Иван"])
+    assert out == "Антон Иван тут"
+
+
+def test_gate_rejects_when_old_window_is_not_a_plausible_source_of_the_new_term():
+    # new_joined validates as the term "Антон", but the OLD window it would
+    # replace ("стол") is nowhere near "Антон" under _closest_term -- the old
+    # side of the swap must independently gate the new side matching alone.
+    original = "Взял стол на встречу"
+    corrected = "Взял Антон на встречу"
+    out = backend_core.gate_llm_correction(original, corrected, ["Антон"])
+    assert out == original
+
+
+def test_gate_rejects_length_delta_between_the_floor_and_a_much_looser_bound():
+    # delta ~0.36 -- well past the real 0.2 cap, but still far under a
+    # mistakenly loosened 1.2 cap. Whitespace padding makes a wrongly-let-
+    # through correction visibly diverge (it gets rebuilt via token rejoin,
+    # collapsing the padding) from the untouched original.
+    original = "  Онтон  тут  "
+    corrected = "Антон тут"
+    out = backend_core.gate_llm_correction(original, corrected, ["Антон"])
+    assert out == original
+
+
+def test_gate_tries_longest_term_first_within_a_replace_span():
+    # both "Иван Петров" and "Иван" are candidates for the same 2-token
+    # replace span -- trying the shorter one first would apply only a
+    # partial (wrong) correction to the first word and leave the second
+    # uncorrected.
+    original = "Ивана Петрова тут"
+    corrected = "Иван Петров тут"
+    out = backend_core.gate_llm_correction(original, corrected, ["Иван Петров", "Иван"])
+    assert out == "Иван Петров тут"
+
+
+def test_gate_rejects_replace_opcode_with_mismatched_span_lengths():
+    # the LLM's corrected text inserts an extra word alongside a term fix --
+    # a real length-mismatch on a "replace" opcode must reject the WHOLE
+    # span (never partially apply against a structurally different span).
+    # (kept long enough that the overall length-delta gate alone doesn't
+    # already reject it, so this actually isolates the tag/length guard.)
+    original = "Позвал Онтон тут вчера очень поздно"
+    corrected = "Позвал Антон и тут вчера очень поздно"
+    out = backend_core.gate_llm_correction(original, corrected, ["Антон"])
+    assert out == original
+
+
+def test_gate_swap_window_arithmetic_never_reads_past_the_token_list():
+    # a corrupted window-bounds computation reads past the end of the token
+    # lists for this input and crashes outright (IndexError) instead of
+    # producing "Петрова Иван" -- the crash itself is the observable defect.
+    original = "Петрова Ивон"
+    corrected = "Петрова Иван"
+    out = backend_core.gate_llm_correction(original, corrected, ["Иван Петров", "Иван"])
+    assert out == "Петрова Иван"
+
+
+def test_gate_strips_punctuation_from_new_window_before_matching():
+    original = "Ивана, Петрова тут"
+    corrected = "Иван, Петров тут"
+    out = backend_core.gate_llm_correction(original, corrected, ["Иван Петров"])
+    assert out == "Иван, Петров тут"
+
+
+def test_gate_strips_punctuation_from_old_window_before_matching():
+    original = "Ивана, Петрова тут"
+    corrected = "Иван Петров тут"
+    out = backend_core.gate_llm_correction(original, corrected, ["Иван Петров"])
+    assert out == "Иван, Петров тут"
+
+
+def test_gate_no_match_on_longest_word_count_still_tries_shorter_at_same_position():
+    # at the same span position, the 2-word term fails to validate on the
+    # NEW side -- must fall through to try the 1-word term next, not abandon
+    # the whole position.
+    original = "Онтон Ивон"
+    corrected = "Антон Иван"
+    out = backend_core.gate_llm_correction(original, corrected, ["Иван Петров", "Антон", "Иван"])
+    assert out == "Антон Иван"
+
+
+def test_gate_old_side_mismatch_on_longest_word_count_still_tries_shorter():
+    # the 2-word term validates on the NEW side but its OLD side is not a
+    # plausible source -- must fall through to try the 1-word term next
+    # (which IS plausible on both sides), not abandon the whole position.
+    original = "Ивона Дима"
+    corrected = "Иван Петров"
+    out = backend_core.gate_llm_correction(original, corrected, ["Иван Петров", "Иван"])
+    assert out == "Иван Дима"
+
+
+def test_gate_unmatched_position_advances_by_exactly_one():
+    # the first position doesn't resolve to any term -- the cursor must
+    # advance by exactly one, not skip past the second (real) match.
+    original = "стол Онтон"
+    corrected = "диван Антон"
+    out = backend_core.gate_llm_correction(original, corrected, ["Антон"])
+    assert out == "стол Антон"
+
+
 # ── _llm_correct_budget (adaptive max_tokens/timeout for correct_glossary_llm) ──
 def test_llm_correct_budget_known_value():
     max_tokens, timeout = backend_core._llm_correct_budget(300)
     assert max_tokens == 4000 + 100  # measured reasoning floor + ceil(300/3)
     assert timeout == pytest.approx(30 + 4100 / 15)
+
+
+def test_llm_correct_budget_ceils_non_multiple_of_three_as_exact_int():
+    # 100/3 does not divide evenly -> ceil(100/3)=34 via integer floordiv trick.
+    # A truediv-based miscount would yield a float (4033.33...) instead of the
+    # exact int 4034 the real "-(-chunk_len // 3)" ceil produces.
+    max_tokens, _timeout = backend_core._llm_correct_budget(100)
+    assert max_tokens == 4034
+    assert isinstance(max_tokens, int)
 
 
 def test_llm_correct_budget_floor_at_zero_chars():
@@ -473,6 +967,81 @@ def test_diff_term_hits_no_terms_returns_empty():
     assert backend_core._diff_term_hits(["a"], ["b"], []) == []
 
 
+def test_diff_term_hits_tries_longest_term_first():
+    # both "Иван Петров" and "Иван" are candidate terms -- the 2-word term
+    # must be tried before the 1-word one, or the swap gets misattributed to
+    # the shorter term instead of the full multi-word one.
+    orig = "Ивана Петрова вчера".split()
+    new = "Иван Петров вчера".split()
+    hits = backend_core._diff_term_hits(orig, new, ["Иван Петров", "Иван"])
+    assert hits == [{"from": "Ивана Петрова", "to": "Иван Петров"}]
+
+
+def test_diff_term_hits_detects_a_swap_at_the_very_first_token():
+    orig = "Онтон тут".split()
+    new = "Антон тут".split()
+    assert backend_core._diff_term_hits(orig, new, ["Антон"]) == [{"from": "Онтон", "to": "Антон"}]
+
+
+def test_diff_term_hits_multiword_window_that_exactly_reaches_the_end_is_allowed():
+    # the window ends EXACTLY at the last token (i+wc == n) -- this must be
+    # allowed, not off-by-one rejected as if it overran the token stream.
+    orig = "Позвал Ивана Петрова".split()
+    new = "Позвал Иван Петров".split()
+    hits = backend_core._diff_term_hits(orig, new, ["Иван Петров"])
+    assert hits == [{"from": "Ивана Петрова", "to": "Иван Петров"}]
+
+
+def test_diff_term_hits_oversized_leading_spec_does_not_block_shorter_spec():
+    orig = "Слово Онтон".split()
+    new = "Слово Антон".split()
+    hits = backend_core._diff_term_hits(orig, new, ["Иван Петров", "Антон"])
+    assert hits == [{"from": "Онтон", "to": "Антон"}]
+
+
+def test_diff_term_hits_strips_punctuation_from_new_window_before_matching():
+    orig = "Ивана, Петрова".split()
+    new = "Иван, Петров".split()
+    hits = backend_core._diff_term_hits(orig, new, ["Иван Петров"])
+    assert hits == [{"from": "Ивана Петрова", "to": "Иван Петров"}]
+
+
+def test_diff_term_hits_no_match_on_longest_spec_still_tries_shorter_spec():
+    orig = "Онтон тут".split()
+    new = "Антон тут".split()
+    hits = backend_core._diff_term_hits(orig, new, ["Иван Петров", "Антон"])
+    assert hits == [{"from": "Онтон", "to": "Антон"}]
+
+
+def test_diff_term_hits_strips_punctuation_from_the_from_side_attribution():
+    orig = "Онтон, тут".split()
+    new = "Антон тут".split()
+    hits = backend_core._diff_term_hits(orig, new, ["Антон"])
+    assert hits == [{"from": "Онтон", "to": "Антон"}]
+
+
+def test_diff_term_hits_advances_by_exactly_one_word_count_after_a_match():
+    # two consecutive single-word matches -- an over-advance after the first
+    # would skip past the second entirely.
+    orig = "Онтон Онтон".split()
+    new = "Антон Антон".split()
+    hits = backend_core._diff_term_hits(orig, new, ["Антон"])
+    assert hits == [{"from": "Онтон", "to": "Антон"}, {"from": "Онтон", "to": "Антон"}]
+
+
+def test_diff_term_hits_single_unmatched_token_terminates_cleanly():
+    assert backend_core._diff_term_hits(["стол"], ["диван"], ["Антон"]) == []
+
+
+def test_diff_term_hits_unmatched_token_advances_by_exactly_one():
+    # a differing-but-unmatched token must advance the cursor by exactly one
+    # position -- an over-advance would skip past a real match right after it.
+    orig = "стол Онтон".split()
+    new = "диван Антон".split()
+    hits = backend_core._diff_term_hits(orig, new, ["Антон"])
+    assert hits == [{"from": "Онтон", "to": "Антон"}]
+
+
 # ── _segments_text_hash (cache-staleness fingerprint for the `correct` stage) ──
 def test_segments_text_hash_deterministic_for_same_input():
     segs = [{"text": "привет"}, {"text": "как дела"}]
@@ -501,6 +1070,23 @@ def test_segments_text_hash_returns_twelve_char_hex_digest():
     h = backend_core._segments_text_hash([{"text": "x"}])
     assert len(h) == 12
     assert all(c in "0123456789abcdef" for c in h)
+
+
+def test_segments_text_hash_uses_bare_unit_separator_between_segments():
+    # pins the exact join (bare "\x1f" between texts, nothing else) against an
+    # independently-computed digest -- hashlib is stdlib, not a backend_core
+    # import, so this stays decoupled from backend.py.
+    import hashlib
+    segs = [{"text": "a"}, {"text": "b"}]
+    expected = hashlib.sha1("a\x1fb".encode("utf-8")).hexdigest()[:12]
+    assert backend_core._segments_text_hash(segs) == expected
+
+
+def test_segments_text_hash_empty_segment_text_joins_as_empty_string():
+    import hashlib
+    segs = [{"text": ""}, {"text": "b"}]
+    expected = hashlib.sha1("\x1fb".encode("utf-8")).hexdigest()[:12]
+    assert backend_core._segments_text_hash(segs) == expected
 
 
 # ── critic follow-up fixes (fuzzy_correct/gate/_term_or_declined_form) ──────
@@ -570,6 +1156,19 @@ def test_term_or_declined_form_accepts_whitelisted_case_endings():
 
 def test_term_or_declined_form_rejects_surname_forming_suffix():
     assert backend_core._term_or_declined_form("Антонов", ["Антон"]) is None
+
+
+def test_term_or_declined_form_strips_punctuation_before_matching():
+    assert backend_core._term_or_declined_form("Антон,", ["Антон"]) == "Антон"
+
+
+def test_term_or_declined_form_skips_falsy_terms_in_list():
+    # a None/"" entry must never become a literal matchable string
+    assert backend_core._term_or_declined_form("XXXX", [None, "Антон"]) is None
+
+
+def test_term_or_declined_form_empty_term_entry_does_not_abort_remaining_terms():
+    assert backend_core._term_or_declined_form("Антон", ["", "Антон"]) == "Антон"
 
 
 def test_gate_rejects_surname_like_suffix_not_a_real_declension():

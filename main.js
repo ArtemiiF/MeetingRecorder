@@ -356,6 +356,9 @@ app.whenReady().then(() => {
   try { pruneTemp(7 * 24 * 3600 * 1000); } catch {}
   try { cleanupUpdateLeftovers(); } catch {}
   try { purgeTrashOnStartup(); } catch {}
+  // TODO 2026-07-07: reclaim a stranded backend-env ".old" backup on launch too,
+  // not just at the start of the next install — see cleanupStrandedBackendEnvOld.
+  try { cleanupStrandedBackendEnvOld(); } catch {}
   createWindow();
   createTray();
 });
@@ -1472,6 +1475,16 @@ async function runInstallBackend() {
   }
 }
 
+// TODO 2026-07-07: a crash/kill between the two renames in the atomic swap-in above
+// (BACKEND_ENV -> .old, then BACKEND_ENV_STAGING -> BACKEND_ENV) can strand the
+// ~1.3GB ".old" backup on disk indefinitely — previously the ONLY place that swept
+// it away was the START of the next install (line ~1452 above), never on launch and
+// never when the user explicitly uninstalls. Shared so both call sites (app.whenReady
+// below and uninstall-backend) reclaim it, not just a future reinstall.
+function cleanupStrandedBackendEnvOld() {
+  fs.rmSync(BACKEND_ENV + ".old", { recursive: true, force: true });
+}
+
 ipcMain.handle("install-backend", async () => {
   const busy = busyVerdict([
     [!!installBackendProc, "Установка уже идёт"],
@@ -1549,6 +1562,10 @@ ipcMain.handle("uninstall-backend", async () => {
   if (recordProc || tee || procProc) return { ok: false, error: "Нельзя удалить бэкенд во время записи или обработки" };
   try {
     fs.rmSync(BACKEND_ENV, { recursive: true, force: true });
+    // TODO 2026-07-07: also reclaim a stranded ".old" backup (crashed install
+    // mid-swap) — "uninstall" should actually free the ~1.3GB it can, not just
+    // the live env, and previously left it behind entirely.
+    cleanupStrandedBackendEnvOld();
     return { ok: true };
   } catch (e) {
     return { ok: false, error: String((e && e.message) || e) };
@@ -2173,10 +2190,30 @@ ipcMain.handle("para-classify", async (_e, arg) => {
   }
   // gather existing accumulators per category so the LLM can reuse one (anti-fragmentation)
   let existing = "";
-  if (root && folders) {
+  // Containment check (critic-minor, PR #30): root/folders below only ever drive a
+  // readdirSync (not a write), but an unvalidated root is still a directory-listing-
+  // of-anywhere primitive for a compromised/buggy renderer — same class of issue H2
+  // closed for the note path above and para-file closes for its write destination.
+  // Mirrors para-file's own root check (against readParaRoot(), the server's
+  // configured vault), but degrades gracefully instead of failing the whole
+  // classify: the existing-accumulator lookup is a best-effort enrichment, not
+  // required for the note itself to be classified.
+  let resolvedRoot = null;
+  if (root) {
+    try { resolvedRoot = fs.realpathSync(root); } catch { resolvedRoot = null; }
+    if (!isPathInsideRoots(resolvedRoot, [readParaRoot()].filter(Boolean))) {
+      resolvedRoot = null;
+    }
+  }
+  if (resolvedRoot && folders) {
     const map = {};
     for (const cat of ["projects", "areas", "resources", "archives"]) {
-      const dir = path.join(root, folders[cat] || cat);
+      const dir = path.join(resolvedRoot, folders[cat] || cat);
+      // Re-check after join: folders[cat] comes from presets.json too, and a
+      // "../" segment there would otherwise escape resolvedRoot even though
+      // resolvedRoot itself is valid (same belt-and-suspenders as para-file's
+      // destDir re-check).
+      if (!isPathInsideRoots(dir, [resolvedRoot])) { map[cat] = []; continue; }
       try {
         map[cat] = fs.readdirSync(dir)
           .filter((f) => f.endsWith(".md"))

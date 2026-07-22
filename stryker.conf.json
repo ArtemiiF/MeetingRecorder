@@ -1,0 +1,21 @@
+{
+  "$schema": "./node_modules/@stryker-mutator/core/schema/stryker-schema.json",
+  "testRunner": "command",
+  "commandRunner": {
+    "command": "node --test tests/mainutil.test.js"
+  },
+  "mutate": [
+    "lib/mainutil.js"
+  ],
+  "ignorePatterns": [
+    "dist",
+    "mutants",
+    ".pytest_cache",
+    "__pycache__"
+  ],
+  "coverageAnalysis": "off",
+  "reporters": [
+    "clear-text",
+    "progress"
+  ]
+}
