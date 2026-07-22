@@ -3471,57 +3471,65 @@ $("paraClassifyAll").addEventListener("click", async () => {
   log.classList.remove("hidden");
   paraLog(`Старт: ${rows.length} заметок.`);
   let done = 0, errors = 0;
-  for (const row of rows) {
-    if (paraClassifyCancelled) { paraLog("Прервано пользователем."); break; }
-    const it = paraInboxItems[+row.dataset.idx];
-    const name = it.title || it.name;
-    paraLog(`→ ${name}`);
-    setRowProcessing(row, true);
-    try {
-      const r = await window.api.paraClassify({
-        note: it.note, root: state.para.root, folders: state.para.folders,
-        mainModel: state.mainModel, language: state.language,
-      });
-      if (!r || r.error || !r.category) {
-        paraLog(`   ✗ не классифицирована: ${(r && r.error) || "категория не определена"}`);
+  // TODO 2026-07-06: the compensating re-enable below used to sit AFTER this loop,
+  // unconditionally — a throw OUTSIDE the inner try/catch (e.g. `it.title` on an
+  // undefined `it`, paraInboxItems having shifted under the loop) skipped it
+  // entirely, leaving every row's button (and the batch button itself) disabled
+  // until the user re-entered the PARA view. finally guarantees it always runs.
+  try {
+    for (const row of rows) {
+      if (paraClassifyCancelled) { paraLog("Прервано пользователем."); break; }
+      const it = paraInboxItems[+row.dataset.idx];
+      const name = it.title || it.name;
+      paraLog(`→ ${name}`);
+      setRowProcessing(row, true);
+      try {
+        const r = await window.api.paraClassify({
+          note: it.note, root: state.para.root, folders: state.para.folders,
+          mainModel: state.mainModel, language: state.language,
+        });
+        if (!r || r.error || !r.category) {
+          paraLog(`   ✗ не классифицирована: ${(r && r.error) || "категория не определена"}`);
+          errors++;
+          setRowProcessing(row, false);
+          continue;
+        }
+        row.querySelector(".para-cat").value = r.category;
+        row.querySelector(".para-proj").value = r.project || "";
+        const res = await window.api.paraFile({
+          note: it.note, audio: it.audio, category: r.category, project: r.project || "",
+          kind: r.kind, person: r.person, mission: r.mission,
+          stamp: it.name,
+          root: state.para.root, folders: state.para.folders,
+        });
+        if (res && res.ok === false) {
+          paraLog(`   ✗ ${r.category} подобрана, но не разложена: ${res.error}`);
+          errors++;
+          setRowProcessing(row, false);
+        } else {
+          // setRowProcessing(false) first, markRowFiled last — markRowFiled's permanent
+          // disable must win over setRowProcessing's transient re-enable.
+          setRowProcessing(row, false);
+          markRowFiled(row);
+          paraLog(`   ✓ разложена → ${r.category}${r.project ? " / " + r.project : ""}`);
+          done++;
+        }
+      } catch (e) {
+        paraLog(`   ✗ исключение: ${e && e.message ? e.message : e}`);
         errors++;
         setRowProcessing(row, false);
-        continue;
       }
-      row.querySelector(".para-cat").value = r.category;
-      row.querySelector(".para-proj").value = r.project || "";
-      const res = await window.api.paraFile({
-        note: it.note, audio: it.audio, category: r.category, project: r.project || "",
-        kind: r.kind, person: r.person, mission: r.mission,
-        stamp: it.name,
-        root: state.para.root, folders: state.para.folders,
-      });
-      if (res && res.ok === false) {
-        paraLog(`   ✗ ${r.category} подобрана, но не разложена: ${res.error}`);
-        errors++;
-        setRowProcessing(row, false);
-      } else {
-        // setRowProcessing(false) first, markRowFiled last — markRowFiled's permanent
-        // disable must win over setRowProcessing's transient re-enable.
-        setRowProcessing(row, false);
-        markRowFiled(row);
-        paraLog(`   ✓ разложена → ${r.category}${r.project ? " / " + r.project : ""}`);
-        done++;
-      }
-    } catch (e) {
-      paraLog(`   ✗ исключение: ${e && e.message ? e.message : e}`);
-      errors++;
-      setRowProcessing(row, false);
     }
+    paraLog(`Готово: разобрано ${done}, ошибок ${errors}${paraClassifyCancelled ? ", прервано" : ""}.`);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "🗂 Разобрать все (LLM)";
+    cancelBtn.classList.add("hidden");
+    $("paraInboxRefresh").disabled = false;
+    rows.forEach((row) => {
+      if (!row.classList.contains("filed")) row.querySelector(".para-file-btn").disabled = false;
+    });
   }
-  paraLog(`Готово: разобрано ${done}, ошибок ${errors}${paraClassifyCancelled ? ", прервано" : ""}.`);
-  btn.disabled = false;
-  btn.textContent = "🗂 Разобрать все (LLM)";
-  cancelBtn.classList.add("hidden");
-  $("paraInboxRefresh").disabled = false;
-  rows.forEach((row) => {
-    if (!row.classList.contains("filed")) row.querySelector(".para-file-btn").disabled = false;
-  });
 });
 
 // Toggles the per-row spinner + a transient disable on this row's own controls while

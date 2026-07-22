@@ -1403,6 +1403,35 @@ test("PARA classify-all: canceling mid-batch re-enables the not-yet-reached row'
   assert.equal(rows[1].querySelector(".para-file-btn").disabled, false, "must be re-enabled, not left disabled forever");
 });
 
+// TODO 2026-07-06: the compensating re-enable (batch button, Обновить, every row's
+// file-btn) used to sit AFTER the loop unconditionally — a throw OUTSIDE the inner
+// per-row try/catch (e.g. `it.title` on an undefined `it`, paraInboxItems having
+// shifted under the loop) skipped it entirely, leaving everything disabled until the
+// user re-entered the PARA view. Source-text check (not a live-throw simulation —
+// an uncaught throw inside an async DOM click handler surfaces as an unhandled
+// promise rejection in jsdom/node's test runner, which can misattribute to whatever
+// OTHER test happens to be running when it settles): asserts the loop lives inside a
+// try whose finally contains all three re-enables, so it can never be skipped again
+// regardless of where inside the loop a future change makes something throw.
+test("renderer.js: «Разобрать все» wraps its loop in try/finally so the compensating re-enable always runs", () => {
+  const startIdx = RENDERER.indexOf('$("paraClassifyAll").addEventListener("click", async () => {');
+  assert.ok(startIdx >= 0, "paraClassifyAll click handler not found (renamed?)");
+  const endIdx = RENDERER.indexOf("function setRowProcessing", startIdx);
+  assert.ok(endIdx > startIdx, "setRowProcessing anchor not found after the handler (moved?)");
+  const handler = RENDERER.slice(startIdx, endIdx);
+
+  const tryIdx = handler.indexOf("try {");
+  const loopIdx = handler.indexOf("for (const row of rows)");
+  const finallyIdx = handler.indexOf("} finally {");
+  assert.ok(tryIdx >= 0 && loopIdx > tryIdx, "the for-loop must live INSIDE a try block");
+  assert.ok(finallyIdx > loopIdx, "a finally block must follow the loop");
+
+  const finallyBody = handler.slice(finallyIdx);
+  assert.match(finallyBody, /btn\.disabled = false;/, "batch button re-enable must be in the finally block");
+  assert.match(finallyBody, /\$\("paraInboxRefresh"\)\.disabled = false;/, "Обновить re-enable must be in the finally block");
+  assert.match(finallyBody, /rows\.forEach\(\(row\) => \{/, "per-row file-btn re-enable loop must be in the finally block");
+});
+
 test("PARA search sub-tab is enabled and switching to it shows #para-pane-search", async () => {
   const { window, $ } = await boot();
   window.document.querySelector('.topbtn[data-view="para"]').click();
