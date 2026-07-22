@@ -9,3 +9,4 @@ __pycache__/
 dist/
 mutants/
 .mutmut-cache
+.stryker-tmp/

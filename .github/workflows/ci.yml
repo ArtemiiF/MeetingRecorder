@@ -65,6 +65,27 @@ jobs:
         continue-on-error: true
       - run: python -m mutmut results
 
+  # Report-only mutation testing against lib/mainutil.js (deferred from PR
+  # #33 — see stryker.conf.json). No native node:test StrykerJS plugin exists,
+  # so this uses the command test runner invoking `node --test
+  # tests/mainutil.test.js` directly (NOT `npm run test:js`, which also runs
+  # the much larger tests/renderer.test.js and would make whole-suite-per-
+  # mutant mutation testing far slower). ~40s / 806 mutants locally, score
+  # ~86% — continue-on-error: true, same non-gating stance as the Python
+  # `mutation` job above, until the owner decides to raise the bar.
+  mutation-js:
+    name: mutation-js
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx stryker run
+        continue-on-error: true
+
   # Boot-smoke against the PACKAGED app (--dir build), not the dev checkout —
   # catches the whole "asar-packaging drops/misroutes a runtime path, main
   # process crashes at require-time before any window appears" bug class
