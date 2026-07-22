@@ -3309,6 +3309,16 @@ test("main.js: para-classify forwards --main-model to the backend spawn only whe
   assert.match(paraClassify, /if \(mainModel\) args\.push\("--main-model", mainModel\)/);
 });
 
+// ── critic-minor, PR #30: para-classify read root/folders without containment ──
+test("main.js: para-classify validates root against readParaRoot() before it ever drives a readdirSync (critic-minor, PR #30)", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const paraClassify = mainSrc.match(/ipcMain\.handle\("para-classify"[\s\S]*?\n\}\);/)[0];
+  assert.match(paraClassify, /isPathInsideRoots\(resolvedRoot, \[readParaRoot\(\)\]\.filter\(Boolean\)\)/,
+    "root must be checked against the server's OWN configured PARA vault, not trusted as sent by the renderer");
+  assert.match(paraClassify, /isPathInsideRoots\(dir, \[resolvedRoot\]\)/,
+    "the per-category dir (root + folders[cat]) must be re-checked too — folders[cat] can carry a '../' segment");
+});
+
 test("main.js: para-search forwards --main-model to the backend spawn only when mainModel is non-empty", () => {
   const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
   const paraSearch = mainSrc.match(/ipcMain\.handle\("para-search"[\s\S]*?\n\}\);/)[0];
