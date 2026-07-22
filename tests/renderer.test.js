@@ -1308,12 +1308,45 @@ test("PARA: a failed first fetch doesn't set paraInboxLoaded, so the next tab en
   await tick(window);
   assert.equal(listHistoryCalls, 1);
   assert.equal($("paraInbox").querySelectorAll(".para-row").length, 0);
+  // TODO 2026-07-06: this catch used to be completely silent — surface the failure
+  // instead of leaving the inbox looking merely empty/stale with no explanation.
+  assert.match($("paraInbox").innerHTML, /Не удалось загрузить/);
+  assert.match($("paraInbox").innerHTML, /boom/);
 
   failNext = false;
   window.document.querySelector('.topbtn[data-view="para"]').click(); // re-entry after the failure
   await tick(window);
   assert.equal(listHistoryCalls, 2, "must retry — the failed fetch must not have set paraInboxLoaded");
   assert.equal($("paraInbox").querySelectorAll(".para-row").length, 1);
+});
+
+test("PARA inbox: a fast re-entry while the first fetch is still in flight does not fire a second concurrent listHistory() call", async () => {
+  let listHistoryCalls = 0;
+  let resolveFirst;
+  const { window, $ } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru",
+      para: { root: "/v", folders: { projects: "Projects", areas: "Areas", resources: "Resources", archives: "Archives" } },
+    }),
+    listHistory: async () => {
+      listHistoryCalls++;
+      if (listHistoryCalls === 1) {
+        // init()'s own refreshHistory() fetch — let it resolve immediately, only the
+        // PARA-tab-triggered fetch below is held open to simulate an in-flight fetch.
+        return [];
+      }
+      return new Promise((resolve) => { resolveFirst = () => resolve([{ name: "2026-01-01", title: "T", note: "/n.md", audio: null }]); });
+    },
+  });
+  window.document.querySelector('.topbtn[data-view="para"]').click(); // fetch #2 starts, stays pending
+  await tick(window);
+  // Re-entry while #2 is still unresolved (search→inbox, or a fast double-click on Обновить).
+  $("paraInboxRefresh").click();
+  await tick(window);
+  assert.equal(listHistoryCalls, 2, "the guard must have refused the concurrent 2nd fetch attempt — no 3rd listHistory() call");
+  resolveFirst();
+  await tick(window); await tick(window);
+  assert.equal($("paraInbox").querySelectorAll(".para-row").length, 1, "the original in-flight fetch must still complete and render normally");
 });
 
 test("PARA classify-all: every row's file-btn is disabled up front, including rows the loop hasn't reached yet", async () => {

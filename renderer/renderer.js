@@ -3384,13 +3384,30 @@ $("paraChangeVault").addEventListener("click", () => {
 
 $("paraInboxRefresh").addEventListener("click", refreshParaInbox);
 
+// Guards refreshParaInbox against concurrent fetches (TODO 2026-07-06): a fast
+// re-entry (inbox→search→inbox, or a Обновить click while the first fetch is still
+// in flight) could otherwise fire a second concurrent listHistory() call — benign
+// (last-write-wins on paraInboxItems/innerHTML) but wasteful. Mirrors
+// appUpdateCheckInFlight's guard idiom above.
+let paraInboxFetchInFlight = false;
+
 async function refreshParaInbox() {
+  if (paraInboxFetchInFlight) return;
+  paraInboxFetchInFlight = true;
   let items;
   try {
     items = await window.api.listHistory(state.outDir); // unfiled = still in Meetings dir
   } catch (e) {
+    paraInboxFetchInFlight = false;
+    // TODO 2026-07-06: this catch used to be completely silent — the inbox stayed
+    // empty/stale with no explanation at all (a retry happens on the next tab entry,
+    // but the user sees nothing meanwhile). Surface it the same way the empty-inbox
+    // state already renders directly into #paraInbox.
+    $("paraInbox").innerHTML =
+      `<p class="hint">⚠️ Не удалось загрузить список заметок: ${escapeHtml(String((e && e.message) || e))}</p>`;
     return; // fetch failed — paraInboxLoaded stays false so the next tab entry retries
   }
+  paraInboxFetchInFlight = false;
   paraInboxItems = items;
   paraInboxLoaded = true;
   const box = $("paraInbox");
