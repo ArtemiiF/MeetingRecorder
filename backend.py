@@ -439,8 +439,13 @@ class Pipeline:
         import re
         return [t.strip() for t in re.split(r"[,\n]+", self.GLOSSARY) if t.strip()]
 
-    def _glossary_prompt(self):
-        terms = self._glossary_terms()
+    def _glossary_prompt(self, terms=None):
+        # terms=None (today's only prod-reachable call shape, via the one existing
+        # test) uses the full glossary; _build_initial_prompt below passes its own
+        # progressively-truncated `kept` subset instead of duplicating this exact
+        # "Термины: …" format string (DRY-drift fix, TODO 2026-07-06).
+        if terms is None:
+            terms = self._glossary_terms()
         if not terms:
             return None
         return "Термины: " + ", ".join(terms) + "."
@@ -482,7 +487,7 @@ class Pipeline:
             terms = sorted(terms, key=lambda t: -self.GLOSSARY_USAGE.get(t.lower(), 0))
         kept = list(terms)
         while kept:
-            glossary_prompt = "Термины: " + ", ".join(kept) + "."
+            glossary_prompt = self._glossary_prompt(kept)
             candidate = f"{context} {glossary_prompt}" if context else glossary_prompt
             if self._estimate_tokens(candidate) <= self._INITIAL_PROMPT_TOKEN_BUDGET:
                 return candidate

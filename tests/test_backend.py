@@ -2311,6 +2311,23 @@ def test_glossary_no_usage_data_initial_prompt_byte_identical(tmp_path):
         backend.Pipeline.CONTEXT_PROMPT_RU + " Термины: Иван Петров, Mindbox, ClickHouse.")
 
 
+def test_build_initial_prompt_delegates_to_glossary_prompt_not_a_duplicated_format_string(monkeypatch, tmp_path):
+    # DRY fix (TODO 2026-07-06): _build_initial_prompt used to inline its own copy of
+    # _glossary_prompt's exact "Термины: …" format string instead of calling it —
+    # _glossary_prompt was otherwise orphaned in the prod path (only this test's
+    # sibling below ever called it). Spies on the real bound method to prove
+    # delegation (with the correctly-truncated `kept` subset), not just
+    # byte-identical output by coincidence with a second copy of the format.
+    p = backend.Pipeline(out_dir=str(tmp_path / "v"), diarize=False, language="ru",
+                         glossary="Иван Петров, Mindbox")
+    calls = []
+    real = p._glossary_prompt
+    monkeypatch.setattr(p, "_glossary_prompt", lambda terms=None: (calls.append(terms), real(terms))[1])
+    result = p._build_initial_prompt()
+    assert calls == [["Иван Петров", "Mindbox"]], "_build_initial_prompt must call _glossary_prompt(kept), not re-format the string itself"
+    assert result == backend.Pipeline.CONTEXT_PROMPT_RU + " Термины: Иван Петров, Mindbox."
+
+
 def test_glossary_dropped_entirely_when_context_alone_meets_budget(monkeypatch, tmp_path):
     # If the context prompt alone already meets/exceeds the budget there is no
     # room left for glossary — keep the context untouched (never silently
