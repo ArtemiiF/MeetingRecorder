@@ -3260,6 +3260,23 @@ test("main.js: backend-status and uninstall-backend handlers exist", () => {
   assert.match(mainSrc, /ipcMain\.handle\("uninstall-backend"/);
 });
 
+// ── TODO 2026-07-07: stranded backend-env ".old" backup cleanup ─────────────
+// A crash mid-swap in runInstallBackend's atomic install leaves BACKEND_ENV+".old"
+// (~1.3GB) on disk; previously the only sweep was at the START of the NEXT install —
+// never on launch, never on uninstall. Locks both new call sites.
+test("main.js: uninstall-backend also reclaims a stranded backend-env \".old\" backup", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const handler = mainSrc.match(/ipcMain\.handle\("uninstall-backend"[\s\S]*?\n\}\);/)[0];
+  assert.match(handler, /fs\.rmSync\(BACKEND_ENV, \{ recursive: true, force: true \}\)/);
+  assert.match(handler, /cleanupStrandedBackendEnvOld\(\)/);
+});
+
+test("main.js: app.whenReady() sweeps a stranded backend-env \".old\" backup on every launch, best-effort like its sibling startup cleanups", () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const ready = mainSrc.match(/app\.whenReady\(\)\.then\(\(\) => \{[\s\S]*?\n\}\);/)[0];
+  assert.match(ready, /try \{ cleanupStrandedBackendEnvOld\(\); \} catch \{\}/);
+});
+
 // ── richer backend-status payload (settings "Бэкенд" — "показать КАКОЙ именно
 // бэкенд"): env path + real ffmpeg version, both only once actually installed ──
 test("main.js: backend-status reports envPath/ffmpegVersion only when installed, null otherwise", () => {
