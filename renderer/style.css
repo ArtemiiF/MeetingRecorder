@@ -16,8 +16,8 @@
   --selection-text: #fff; --selection-muted: #cdd9ee;
   --inactive: #6b7480; --sidebar: #161b22;
   /* typography — same in every theme, not part of the theme override blocks below */
-  --font-heading: 'Unbounded', -apple-system, "SF Pro Text", system-ui, sans-serif;
-  --font-body: 'Onest', -apple-system, "SF Pro Text", system-ui, sans-serif;
+  --font-heading: 'Unbounded', -apple-system, "SF Pro Text", system-ui, "Apple Color Emoji", sans-serif;
+  --font-body: 'Onest', -apple-system, "SF Pro Text", system-ui, "Apple Color Emoji", sans-serif;
   /* decorative (A-1): --grad-card/--grad-primary/--shadow-primary/--act-glow depend
      on --card/--accent-fill/--accent, so they're re-declared per theme below (OKLCH-
      derived, see the commit report for the exact numbers). --shadow-card/
@@ -343,16 +343,19 @@ main:has(> #view-prompts:not(.hidden)) { max-width: 1200px; }
    renderer.js. Caret/hidden mechanics still mirror the glossary «Мои» category folders
    (.glossary-caret below, reused as-is) — same collapse discipline, different section. */
 .rail-group { margin-bottom: 2px; }
-/* Not a <button> — a real 🗑 <button> now lives inside it (nesting a <button> inside a
-   <button> is invalid HTML), so collapse/expand is wired via a click + keydown(Enter/
-   Space) listener in renderer.js instead of native button semantics; the shared
-   :focus-visible rule below still gives it a focus ring. */
+/* Plain, non-interactive row — the real 🗑 <button> is a SIBLING of .rail-group-toggle
+   here, not its descendant: a <button> nested inside any role="button" element is
+   invalid ARIA (assistive tech has no guaranteed path to an interactive descendant of
+   something already exposed as a single button), even though a <button> literally
+   can't nest another <button>. Collapse/expand (click + keydown Enter/Space, native
+   button semantics substitute) lives on .rail-group-toggle instead. */
 .rail-group-header {
   display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
-  background: transparent; border: none; border-radius: 8px; padding: 9px 10px;
-  cursor: pointer; color: var(--fg); font-family: inherit; font-size: 13px;
+  background: transparent; border-radius: 8px; padding: 9px 10px;
+  color: var(--fg); font-family: inherit; font-size: 13px;
 }
 .rail-group-header:hover { background: var(--card2); }
+.rail-group-toggle { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; cursor: pointer; }
 /* Group-header title text (narrow-width overflow fix, carried from the old T2 pass): a
    long meeting title has no shrink/ellipsis rule of its own — inside the header's flex
    row it could force the whole card wider than the rail column. flex:1+min-width:0 lets
@@ -471,7 +474,7 @@ select:focus, input:focus, textarea:focus { outline: none; border-color: var(--a
 .btn.danger:hover { background: var(--danger-fill); border-color: var(--danger-fill); color: #fff; }
 
 .btn:focus-visible, .topbtn:focus-visible, .tab:focus-visible, .rtab:focus-visible,
-.subbtn:focus-visible, .rail-item:focus-visible, .rail-group-header:focus-visible,
+.subbtn:focus-visible, .rail-item:focus-visible, .rail-group-toggle:focus-visible,
 .settings-btn:focus-visible, .chip-remove:focus-visible, .chip-accept:focus-visible,
 .chip-category:focus-visible, .glossary-section-toggle:focus-visible,
 .glossary-category-header:focus-visible, .chat-copy-btn:focus-visible
@@ -672,7 +675,9 @@ body.processing .queue-item button { opacity: .4; pointer-events: none; }
 pre {
   background: var(--pre-bg); border: 1px solid var(--line); border-radius: 8px;
   padding: 12px 16px; font-size: 13px; line-height: 1.5;
-  font-family: "SF Mono", ui-monospace, Menlo, monospace;
+  /* #logs/#histLogs (both <pre>) render pushLog/appendLog's emoji-prefixed lines
+     (✅/⏭/⚠️/❌/💾/⏹/▶) — needs the color-emoji fallback same as --font-body/heading. */
+  font-family: "SF Mono", ui-monospace, Menlo, "Apple Color Emoji", monospace;
   white-space: pre-wrap; word-break: break-word; max-height: 340px; overflow: auto;
   box-shadow: var(--shadow-inset);
 }

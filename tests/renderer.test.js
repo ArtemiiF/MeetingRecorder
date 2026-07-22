@@ -234,6 +234,85 @@ test("processAudio sync reject unsticks the pending row from status:running — 
   assert.ok(row.querySelector(".pending-del-btn"), "✕ (delete) must be available again");
 });
 
+// Tail 2026-07-22: the sync-reject branch above calls finishPendingItem but — unlike
+// onProcessEvent's terminal branches (done/error/process-closed) — never chained to
+// continuePendingBatch(), so a mid-batch busy-reject stalled «Обработать все» entirely:
+// the row fell back to status:"failed" but nothing drove the queue forward, leaving it
+// for a manual ▶ retry.
+//
+// Critic-caught defect in the first fix attempt: chaining continuePendingBatch()
+// unconditionally (mirroring the async terminal branches) re-picks the SAME row —
+// nextPendingWork() always returns the earliest pending/failed row — and a sync-reject
+// fires from main.js's pre-spawn guards (backend not installed, diarize+cache miss,
+// etc.), which don't change between retries, so that would busy-loop forever on a
+// persistently-rejecting row. pendingBatchSkipIds fixes this: a row that hits a
+// sync-reject is skipped by nextPendingWork for the REST of this run, so the batch
+// advances to a genuinely different row instead of retrying — see the next test for
+// the "every row rejects" termination guarantee.
+test("pending recordings: «Обработать все» advances to a different row after a synchronous processAudio reject, instead of retrying the same one", async () => {
+  const calls = [];
+  const { window, $, handlers } = await boot({
+    processAudio: async (opts) => {
+      calls.push(opts.audioFile);
+      if (opts.audioFile === "/rec/r1/mixed.wav") return { ok: false, error: "Обработка уже идёт" };
+      return { ok: true };
+    },
+  });
+  handlers.record({ event: "recorded", id: "r1", name: "Запись 1", file: "/rec/r1/mixed.wav", mic: null, system: null, tracks: 1 });
+  handlers.record({ event: "recorded", id: "r2", name: "Запись 2", file: "/rec/r2/mixed.wav", mic: null, system: null, tracks: 1 });
+  await tick(window);
+  $("pendingProcessAll").click(); await tick(window);
+  assert.deepEqual(calls, ["/rec/r1/mixed.wav", "/rec/r2/mixed.wav"],
+    "r1's sync-reject must not stall the batch, and must not be retried within this run — r2 starts right away");
+  const rows = $("historyList").querySelectorAll(".queue-item");
+  assert.equal(rows.length, 2, "r1 stays in the queue as failed; r2 is now running");
+  const r1Row = [...rows].find((r) => r.textContent.includes("Запись 1"));
+  assert.ok(r1Row.className.includes("queue-failed"), "r1 falls back to failed, available for a manual ▶ retry");
+
+  // Finish r2 for real — the "done" chain must find no more eligible work (r1 is still
+  // skipped this run) and end the batch cleanly, not loop back onto r1.
+  handlers.process({ event: "done", note: "/n2.md", audio: "/rec/r2/mixed.wav", transcript: "t2", summary: "s2" });
+  await tick(window);
+  assert.deepEqual(calls, ["/rec/r1/mixed.wav", "/rec/r2/mixed.wav"], "no further processAudio calls — the batch ended, it did not loop back onto r1");
+});
+
+// Critic finding (CRITICAL, false-confidence lock): the test above only proves a
+// transient reject on ONE row doesn't stall the batch. It does NOT prove termination
+// when EVERY row hits a persistent sync-reject (e.g. the backend was never installed —
+// main.js's !backendAvailable() guard, identical for every row, forever). Without
+// pendingBatchSkipIds this would busy-loop: nextPendingWork always returns the earliest
+// pending/failed row, so a persistent reject on row 1 would re-drive row 1 forever
+// (unbounded renderRail churn + IPC calls), never reaching row 2 or 3 at all.
+test("pending recordings: «Обработать все» terminates (does not busy-loop) when every row hits a persistent synchronous processAudio reject", async () => {
+  const calls = [];
+  const { window, $, handlers } = await boot({
+    processAudio: async (opts) => {
+      calls.push(opts.audioFile);
+      return { ok: false, error: "Бэкенд не установлен — откройте Настройки → Бэкенд" };
+    },
+  });
+  handlers.record({ event: "recorded", id: "r1", name: "Запись 1", file: "/rec/r1/mixed.wav", mic: null, system: null, tracks: 1 });
+  handlers.record({ event: "recorded", id: "r2", name: "Запись 2", file: "/rec/r2/mixed.wav", mic: null, system: null, tracks: 1 });
+  handlers.record({ event: "recorded", id: "r3", name: "Запись 3", file: "/rec/r3/mixed.wav", mic: null, system: null, tracks: 1 });
+  await tick(window);
+  $("pendingProcessAll").click(); await tick(window);
+  assert.deepEqual(calls, ["/rec/r1/mixed.wav", "/rec/r2/mixed.wav", "/rec/r3/mixed.wav"],
+    "exactly one processAudio call per row, then the batch must stop — not an unbounded re-drive of any single row");
+  const rows = $("historyList").querySelectorAll(".queue-item");
+  assert.equal(rows.length, 3, "all three rows survive, each falling back to failed");
+  rows.forEach((r) => assert.ok(r.className.includes("queue-failed")));
+
+  // A further tick must not produce any more calls — the batch really has stopped, not
+  // just paused between microtasks.
+  await tick(window);
+  assert.equal(calls.length, 3, "still exactly 3 calls after settling — no residual loop");
+
+  // A fresh "Обработать все" click, though, must be able to retry all three — the skip
+  // set is scoped to the run that just ended, not a permanent ban.
+  $("pendingProcessAll").click(); await tick(window);
+  assert.equal(calls.length, 6, "a brand-new run retries every row once more (3 more calls)");
+});
+
 // ── history rendering ─────────────────────────────────────────────────────
 // Note: the История rail also renders the just-recorded item as an always-visible pending
 // row (see renderRail) — this test's r1 pending row and the mocked real note both land in
@@ -5745,12 +5824,14 @@ test("История groups a multi-version recording into a collapsible block: 
   // 3 обработки total (≥2) — the header must carry the count-pill.
   assert.match($("historyList").querySelector(".rail-group-header .rail-rec-badge.count").textContent, /^3 обработки$/);
 
-  $("historyList").querySelector(".rail-group-header").click();
+  // The click target is .rail-group-toggle (caret/title/time), not the outer plain
+  // .rail-group-header row — see the ARIA restructure comment in renderer.js.
+  $("historyList").querySelector(".rail-group-toggle").click();
   await tick(window);
   assert.ok($("historyList").querySelector(".rail-group-versions").classList.contains("hidden"), "collapses on click");
   assert.equal($("historyList").querySelector(".rail-group-header .glossary-caret").textContent, "▸");
 
-  $("historyList").querySelector(".rail-group-header").click();
+  $("historyList").querySelector(".rail-group-toggle").click();
   await tick(window);
   assert.ok(!$("historyList").querySelector(".rail-group-versions").classList.contains("hidden"), "re-expands on a second click");
 });
@@ -6200,7 +6281,7 @@ test("style.css: rail header title and orphan filename cell ellipsize instead of
   assert.match(fileRule[0], /white-space: nowrap/);
 });
 
-test("История card redesign (variant B): clicking the header's 🗑 does not also toggle collapse (stopPropagation)", async () => {
+test("История card redesign (variant B): clicking the header's 🗑 does not also toggle collapse", async () => {
   const { window, $ } = await boot({
     listHistory: async () => [{ name: "2026-07-11-100000", base_stamp: "2026-07-11-100000", title: "Планёрка", template: "Митинг", version: 1, note: "/o/a.md", audio: "/o/a.wav" }],
   });
@@ -6209,29 +6290,54 @@ test("История card redesign (variant B): clicking the header's 🗑 does 
   assert.equal($("historyList").querySelector(".rail-group-header .glossary-caret").textContent, "▾", "expanded by default");
   $("historyList").querySelector(".rec-trash-btn").click(); await tick(window);
   assert.equal($("historyList").querySelector(".rail-group-header .glossary-caret").textContent, "▾",
-    "declining the trash confirm must leave the group exactly as it was — the click must not also bubble to the header's own collapse-toggle listener");
+    "declining the trash confirm must leave the group exactly as it was — 🗑 is a sibling of .rail-group-toggle, not its descendant, so this click was never reachable by the toggle's own listener");
 });
 
 // The header is no longer a native <button> (a real 🗑 <button> now lives inside it —
 // nesting <button>s is invalid HTML), so keyboard activation needs its own handler.
-test("История card redesign (variant B): header is keyboard-activatable (Enter toggles collapse, same as a click)", async () => {
+// The role="button"/tabindex live on .rail-group-toggle, not the outer .rail-group-header
+// row — a real interactive <button> nested inside a role="button" element is invalid
+// ARIA regardless of the native-nesting rule, so the 🗑 was moved out to be a sibling
+// of the toggle (see the ARIA restructure comment above buildNotesRecordingRow).
+test("История card redesign (variant B): toggle is keyboard-activatable (Enter toggles collapse, same as a click)", async () => {
   const { window, $ } = await boot({
     listHistory: async () => [{ name: "2026-07-11-100000", base_stamp: "2026-07-11-100000", title: "Планёрка", template: "Митинг", version: 1, note: "/o/a.md", audio: "/o/a.wav" }],
   });
   window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
-  const header = $("historyList").querySelector(".rail-group-header");
-  assert.equal(header.getAttribute("tabindex"), "0", "must be keyboard-focusable");
-  assert.equal(header.getAttribute("role"), "button");
-  header.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  const toggle = $("historyList").querySelector(".rail-group-toggle");
+  assert.equal(toggle.getAttribute("tabindex"), "0", "must be keyboard-focusable");
+  assert.equal(toggle.getAttribute("role"), "button");
+  toggle.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
   await tick(window);
   assert.equal($("historyList").querySelector(".rail-group-header .glossary-caret").textContent, "▸", "Enter toggles collapse just like a click would");
   // Space is the other native-button activation key — and unlike Enter it scrolls the
   // rail if the handler forgets preventDefault, so both branches get locked.
   const spaceEv = new window.KeyboardEvent("keydown", { key: " ", bubbles: true, cancelable: true });
-  $("historyList").querySelector(".rail-group-header").dispatchEvent(spaceEv);
+  $("historyList").querySelector(".rail-group-toggle").dispatchEvent(spaceEv);
   await tick(window);
   assert.equal($("historyList").querySelector(".rail-group-header .glossary-caret").textContent, "▾", "Space toggles collapse back");
   assert.ok(spaceEv.defaultPrevented, "Space must be preventDefault'ed — otherwise it scrolls the rail");
+});
+
+// Tail 2026-07-22 (ARIA audit): the 🗑 <button> used to be a descendant of the
+// role="button" header — invalid ARIA even though <button> literally can't nest
+// another <button> (assistive tech has no guaranteed path to an interactive descendant
+// of an element already exposed as a single button). Lock the structural invariant at
+// the DOM level, not just visually: the toggle's role="button" subtree must contain no
+// nested <button>, and the real 🗑 <button> must sit outside it, inside the plain header.
+test("История card redesign (ARIA): the group header's role=\"button\" toggle contains no nested <button> — the 🗑 is a sibling, not a descendant", async () => {
+  const { window, $ } = await boot({
+    listHistory: async () => [{ name: "2026-07-11-100000", base_stamp: "2026-07-11-100000", title: "Планёрка", template: "Митинг", version: 1, note: "/o/a.md", audio: "/o/a.wav" }],
+  });
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  const header = $("historyList").querySelector(".rail-group-header");
+  const toggle = header.querySelector(".rail-group-toggle");
+  assert.equal(toggle.getAttribute("role"), "button");
+  assert.equal(toggle.querySelectorAll("button").length, 0, "no <button> must be nested inside the role=\"button\" toggle");
+  const trashBtn = header.querySelector(".rec-trash-btn");
+  assert.ok(trashBtn, "the 🗑 button must still exist in the header");
+  assert.ok(!toggle.contains(trashBtn), "the 🗑 button must not be a descendant of the role=\"button\" toggle");
+  assert.equal(trashBtn.parentElement, header, "the 🗑 button is a direct child of the plain header, a sibling of the toggle");
 });
 
 test("История card redesign: version-row 🗑 deletes THAT note via the existing deleteHistoryNote flow, without selecting the row (stopPropagation)", async () => {
@@ -6508,6 +6614,27 @@ test("trash view: 'Очистить корзину' confirms with the itemized c
   assert.equal(called, false);
   assert.match(confirmMsg, /1 запись/);
   assert.match(confirmMsg, /1 МБ/);
+});
+
+// Tail 2026-07-22 (owner decision: emoji must be COLOR): #27's Unbounded/Onest font
+// stack dropped "Apple Color Emoji", so every 🎙/🗑/✅/❌/etc. glyph rendered monochrome
+// (the OS falls back to whichever text-glyph font is next in the stack instead of the
+// color-emoji font). CSS source-text lock, same idiom as the other style.css checks
+// above — jsdom doesn't apply real font fallback, so this can only be locked at the
+// declared-stack level.
+test("style.css: heading/body font stacks and the log <pre> stack all keep Apple Color Emoji fallback (owner decision: emoji stay color)", () => {
+  const css = fs.readFileSync(path.join(__dirname, "../renderer/style.css"), "utf8");
+  const heading = css.match(/--font-heading:[^;]*;/);
+  assert.ok(heading, "--font-heading declaration exists");
+  assert.match(heading[0], /"Apple Color Emoji"/);
+  const body = css.match(/--font-body:[^;]*;/);
+  assert.ok(body, "--font-body declaration exists");
+  assert.match(body[0], /"Apple Color Emoji"/);
+  // #logs/#histLogs are <pre> elements fed emoji-prefixed lines by pushLog/appendLog —
+  // a separate monospace stack, not inherited from --font-body, so it needs its own fix.
+  const preRule = css.match(/^pre \{[^}]*\}/m);
+  assert.ok(preRule, "pre rule exists");
+  assert.match(preRule[0], /"Apple Color Emoji"/);
 });
 
 test("trash view: 'Очистить корзину' confirmed → emptyTrash called, list refreshed to empty", async () => {
