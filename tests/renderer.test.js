@@ -3008,6 +3008,29 @@ test("PARA chat degraded badge: backend.py's log wording matches main.js's exact
   );
 });
 
+// ── M4 arch-audit reverse cross-lock (critic-minor, PR #30) ─────────────────
+// tests/test_backend.py's own cross-lock test checks ONE direction: every EVENTS.*
+// constant main.js's dispatch references resolves to a name in events.json. The
+// runtime assert inside backend.py's own emit() (backend.py:87-91) checks the other
+// side, but only for code paths some test actually EXECUTES — an emit("typo", ...)
+// call site on a branch nothing exercises would ship silently, contract violation
+// and all. This closes that gap statically (no Python runtime, no code-path
+// coverage needed): every literal event-name argument passed to emit() anywhere in
+// backend.py's source is collected by regex and checked against events.json's
+// contract directly, mirroring the mainutil "source-text" test idiom above but
+// reading backend.py instead of main.js.
+test("backend.py: every emit() call-site's literal event name is a member of events.json's contract (M4 reverse cross-lock)", () => {
+  const backendSrc = fs.readFileSync(path.join(__dirname, "../backend.py"), "utf8");
+  const contract = new Set(JSON.parse(fs.readFileSync(path.join(__dirname, "../events.json"), "utf8")).events);
+
+  const calls = [...backendSrc.matchAll(/\bemit\("([a-z_-]+)"/g)].map((m) => m[1]);
+  assert.ok(calls.length > 0, "sanity check: backend.py should have at least one emit() call site");
+
+  const unknown = [...new Set(calls.filter((name) => !contract.has(name)))];
+  assert.deepEqual(unknown, [],
+    `backend.py's emit() calls a name outside events.json's contract: ${JSON.stringify(unknown)}`);
+});
+
 // ── settings "Бэкенд" section (installs the Python/ffmpeg env, see main.js) ──
 test("Бэкенд: not-installed status renders a bad dot and the install button's default label", async () => {
   const { window, $ } = await boot({
