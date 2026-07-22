@@ -1923,6 +1923,11 @@ async function startProcessing(fresh, item, override) {
   if (res && res.ok === false) {
     appendLog("❌ " + res.error);
     finishProcessing();
+    // TODO 2026-07-06: this synchronous reject (desync main↔renderer — main.js
+    // refused before the backend ever started) used to skip finishPendingItem
+    // entirely, leaving a pending-recording row stuck at status:"running" forever
+    // (no reprocess, no delete) since activePendingId was already set above.
+    finishPendingItem("failed");
   }
 }
 

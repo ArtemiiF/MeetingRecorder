@@ -217,6 +217,23 @@ test("processAudio busy → error logged, UI not stuck on Stop", async () => {
   assert.equal($("stopBtn").style.display, "none"); // restored, not stuck
 });
 
+// TODO 2026-07-06: the synchronous {ok:false} reject (desync main↔renderer, refused
+// before the backend even started) used to skip finishPendingItem entirely — the
+// pending row stayed at status:"running" forever, with neither reprocess (▶, gated on
+// pending/failed) nor delete (gated on !running) ever available again.
+test("processAudio sync reject unsticks the pending row from status:running — reprocess and delete become available again", async () => {
+  const { window, $, handlers } = await boot({ processAudio: async () => ({ ok: false, error: "Обработка уже идёт" }) });
+  handlers.record({ event: "recorded", id: "r1", name: "Запись 1", file: "/tmp/mixed.wav", mic: "/tmp/mic.wav", system: null, tracks: 1 });
+  $("historyList").querySelector(".pending-play-btn").click();
+  await tick(window);
+  const row = $("historyList").querySelector(".rail-item.pending");
+  assert.ok(row, "pending row must still be rendered");
+  assert.ok(row.className.includes("queue-failed"),
+    `row must fall back to status:"failed", not stay stuck on "running" — className=${row.className}`);
+  assert.ok(row.querySelector(".pending-play-btn"), "▶ (reprocess) must be available again");
+  assert.ok(row.querySelector(".pending-del-btn"), "✕ (delete) must be available again");
+});
+
 // ── history rendering ─────────────────────────────────────────────────────
 // Note: the История rail also renders the just-recorded item as an always-visible pending
 // row (see renderRail) — this test's r1 pending row and the mocked real note both land in
