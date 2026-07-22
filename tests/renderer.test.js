@@ -2239,6 +2239,30 @@ test("removing a chip drops the term from state.glossary and persists", async ()
   assert.equal(saved.glossary, "Иван Петров, ClickHouse");
 });
 
+// TODO 2026-07-10: removeGlossaryTerm didn't prune glossaryCategories[low] of the
+// deleted term — orphans accumulated in presets.json unboundedly (rendering was fine,
+// only the persisted map grew). Lock: removing a categorized "Мои" term must drop its
+// category entry too, not just leave it stranded.
+test("removing a chip also prunes its glossaryCategories entry (no orphaned category left in presets.json)", async () => {
+  let saved = null;
+  const { $, window } = await boot({
+    getPresets: async () => ({
+      presets: [], defaultOutDir: "/tmp", hfToken: "", language: "ru",
+      glossary: "Иван Петров, Mindbox",
+      glossaryCategories: { "иван петров": "Люди", "mindbox": "Продукты и инструменты" },
+    }),
+    savePresets: async (data) => { saved = data; return true; },
+  });
+  await tick(window);
+  // "Mindbox" is the 2nd rendered chip (index 1: Иван Петров, Mindbox).
+  $("glossaryChips").querySelectorAll(".chip-remove")[1].click();
+  await tick(window);
+  assert.ok(saved, "savePresets was not called");
+  assert.equal(saved.glossary, "Иван Петров");
+  assert.deepEqual(saved.glossaryCategories, { "иван петров": "Люди" },
+    "mindbox's category entry must be pruned, not left orphaned");
+});
+
 test("a term containing a double quote does not break out of an HTML attribute and can still be removed (regression: attribute-injection via data-term)", async () => {
   let saved = null;
   const injected = 'x" onmouseover="alert(1)';

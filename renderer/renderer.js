@@ -1104,6 +1104,15 @@ function addGlossaryTerm() {
 }
 
 function removeGlossaryTerm(term) {
+  // Clean up the term's category mapping too (TODO 2026-07-10) — otherwise
+  // glossaryCategories[low] orphans forever in presets.json, one entry per
+  // deleted "Мои" term, since nothing else ever prunes that map.
+  const low = term.toLowerCase();
+  if (state.glossaryCategories && Object.prototype.hasOwnProperty.call(state.glossaryCategories, low)) {
+    const categories = Object.assign({}, state.glossaryCategories);
+    delete categories[low];
+    state.glossaryCategories = categories;
+  }
   setGlossaryTerms(parseGlossaryTerms(state.glossary).filter((t) => t !== term));
 }
 
