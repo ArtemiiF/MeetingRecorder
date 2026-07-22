@@ -1,12 +1,21 @@
 {
   "$schema": "./node_modules/@stryker-mutator/core/schema/stryker-schema.json",
-  "_comment": "Report-only mutation testing scoped to lib/mainutil.js (deferred from PR #33). Uses the command test runner (no native node:test plugin exists) invoking node --test directly against ONLY tests/mainutil.test.js -- NOT `npm run test:js`, which also runs the much larger tests/renderer.test.js and would make whole-suite-per-mutant mutation testing too slow. ignorePatterns excludes dist/ (electron-builder --dir output, ~1.5GB) so Stryker's sandbox copy stays fast; node_modules/.git are always-ignored by Stryker itself. See CLAUDE.md / package.json scripts for the underlying test commands.",
   "testRunner": "command",
   "commandRunner": {
     "command": "node --test tests/mainutil.test.js"
   },
-  "mutate": ["lib/mainutil.js"],
-  "ignorePatterns": ["dist", "mutants", ".pytest_cache", "__pycache__"],
+  "mutate": [
+    "lib/mainutil.js"
+  ],
+  "ignorePatterns": [
+    "dist",
+    "mutants",
+    ".pytest_cache",
+    "__pycache__"
+  ],
   "coverageAnalysis": "off",
-  "reporters": ["clear-text", "progress"]
+  "reporters": [
+    "clear-text",
+    "progress"
+  ]
 }

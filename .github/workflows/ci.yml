@@ -46,10 +46,9 @@ jobs:
   # runner to tests/test_backend_core.py's fast, mock-free suite — mutmut
   # re-runs the WHOLE selected suite per mutant, so whole-suite-per-mutant is
   # only tractable against that fast subset, not the full mocked test_backend.py).
-  # ~34s / 829 mutants locally — continue-on-error: true because the current
-  # score (~82%, see requirements-dev.txt/setup.cfg) is below the 85% Kalnitsky
-  # reference; this job is visibility, not a merge gate, until the owner
-  # decides to raise the bar and make it required.
+  # ~34s / 829 mutants locally — continue-on-error: true — this job is
+  # visibility, not a merge gate (score ~93.6% as of chore/tails-batch, above
+  # the 85% Kalnitsky reference), until the owner decides to make it required.
   mutation:
     name: mutation
     runs-on: ubuntu-latest
@@ -73,6 +72,12 @@ jobs:
   # mutant mutation testing far slower). ~40s / 806 mutants locally, score
   # ~86% — continue-on-error: true, same non-gating stance as the Python
   # `mutation` job above, until the owner decides to raise the bar.
+  # JS-мутационка (StrykerJS, stryker.conf.json): scoped to lib/mainutil.js,
+  # command-runner `node --test tests/mainutil.test.js` ONLY — не npm run test:js,
+  # который тянет куда более тяжёлый renderer.test.js и делает whole-suite-per-mutant
+  # неподъёмным (native node:test-плагина у Stryker нет). ignorePatterns режет dist/
+  # (~1.5GB --dir-артефакт) из sandbox-копии. ~40s / 806 mutants, скор ~86% на
+  # первом замере. Report-only (continue-on-error, не в needs релиза) — как mutation.
   mutation-js:
     name: mutation-js
     runs-on: ubuntu-latest

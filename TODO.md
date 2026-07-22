@@ -1,5 +1,11 @@
 # TODO
 
+## Закрыто 2026-07-22 (tails-batch)
+ru/en-пин `Pipeline.summarize()` · para-classify containment root/folders · обратный контракт-лок emit-call-sites ∈ events.json · сироты `glossaryCategories` при удалении термина · чистка `BACKEND_ENV.old` на launch+uninstall · sync-reject → `finishPendingItem("failed")` · `_glossary_prompt` DRY · PARA inbox error surfacing + in-flight guard · «разобрать все» re-enable в finally · mutmut 82→93.6% · StrykerJS на mainutil (86%, report-only CI).
+
+## Не-блокеры критик-гейта tails-batch (2026-07-22)
+- Sync-reject мид-батча: `finishPendingItem("failed")` теперь вызывается, но `continuePendingBatch()`-чейнинг (как у терминальных веток onProcessEvent) не добавлен — батч не шагает на следующий элемент, строка ретраится ▶. Предсуществующая форма, low-reach.
+
 ## Закрыто 2026-07-18 (arch-audit fixes)
 гонка стоп-записи↔обработка (H3a: file-stability gate — isFileStable size-check + mixInFlight+audioFile===session.mixedPath refusal в process-audio, cache key дополнен contentFingerprint) · `classify-glossary-terms`/`para-classify`/`para-extract` IPC без guard'а на `installBackendProc` (H1: busyVerdict централизован).
 
