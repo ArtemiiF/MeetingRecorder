@@ -234,6 +234,38 @@ test("processAudio sync reject unsticks the pending row from status:running — 
   assert.ok(row.querySelector(".pending-del-btn"), "✕ (delete) must be available again");
 });
 
+// Tail 2026-07-22: the sync-reject branch above calls finishPendingItem but — unlike
+// onProcessEvent's terminal branches (done/error/process-closed) — never chained to
+// continuePendingBatch(), so a mid-batch busy-reject stalled «Обработать все» entirely:
+// the row fell back to status:"failed" but nothing drove the queue forward, leaving it
+// for a manual ▶ retry. nextPendingWork() picks the earliest pending-or-failed row, so
+// the immediate re-drive retries the same row first (identical to how a real backend
+// "error" event already behaves via the line-1982 chain) — the fix is "batch keeps
+// itself alive", not "skip to a different row".
+test("pending recordings: «Обработать все» keeps driving itself after a synchronous processAudio reject, without a manual retry", async () => {
+  const calls = [];
+  const { window, $, handlers } = await boot({
+    processAudio: async (opts) => {
+      calls.push(opts.audioFile);
+      if (calls.length === 1) return { ok: false, error: "Обработка уже идёт" };
+      return { ok: true };
+    },
+  });
+  handlers.record({ event: "recorded", id: "r1", name: "Запись 1", file: "/rec/r1/mixed.wav", mic: null, system: null, tracks: 1 });
+  handlers.record({ event: "recorded", id: "r2", name: "Запись 2", file: "/rec/r2/mixed.wav", mic: null, system: null, tracks: 1 });
+  await tick(window);
+  $("pendingProcessAll").click(); await tick(window);
+  assert.deepEqual(calls, ["/rec/r1/mixed.wav", "/rec/r1/mixed.wav"],
+    "the batch must auto-retry r1 right away — no manual ▶ click performed here, no stall");
+
+  // Let the auto-retried r1 finish for real, then the "done" chain must pick up r2 —
+  // proving pendingBatchRunning survived the sync-reject detour intact.
+  handlers.process({ event: "done", note: "/n1.md", audio: "/rec/r1/mixed.wav", transcript: "t1", summary: "s1" });
+  await tick(window);
+  assert.deepEqual(calls, ["/rec/r1/mixed.wav", "/rec/r1/mixed.wav", "/rec/r2/mixed.wav"],
+    "batch continues on to r2 once the retried r1 completes");
+});
+
 // ── history rendering ─────────────────────────────────────────────────────
 // Note: the История rail also renders the just-recorded item as an always-visible pending
 // row (see renderRail) — this test's r1 pending row and the mocked real note both land in

@@ -1927,7 +1927,10 @@ async function startProcessing(fresh, item, override) {
     // refused before the backend ever started) used to skip finishPendingItem
     // entirely, leaving a pending-recording row stuck at status:"running" forever
     // (no reprocess, no delete) since activePendingId was already set above.
-    finishPendingItem("failed");
+    // Tail 2026-07-22: finishPendingItem alone left «Обработать все» stalled on this
+    // row too — unlike the terminal onProcessEvent branches below, nothing chained to
+    // continuePendingBatch(), so a mid-batch busy-reject required a manual ▶ retry.
+    if (finishPendingItem("failed") && pendingBatchRunning) continuePendingBatch();
   }
 }
 
