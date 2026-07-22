@@ -823,6 +823,15 @@ class Pipeline:
         try:
             sys_msg = ("Ты помощник для обработки расшифровок встреч. "
                        "Отвечай в Markdown. Сохраняй английские термины как есть.")
+            # Pin the summary's language to the pipeline's transcription language — mirrors
+            # generate_title's own ru/en pin (see comment there): otherwise the model tends
+            # to answer in whatever language its own instructions are written in (Russian)
+            # regardless of the meeting's actual language. "auto" has no fixed language to
+            # pin to — leave the prompt as before.
+            if self.LANGUAGE == "ru":
+                sys_msg += " Отвечай на русском языке."
+            elif self.LANGUAGE == "en":
+                sys_msg += " Answer in English."
             user_msg = (
                 f"{user_prompt.strip()}\n\n"
                 f"Сегодняшняя дата: {datetime.now().strftime('%Y-%m-%d')}\n\n"

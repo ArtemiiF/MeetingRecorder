@@ -416,6 +416,33 @@ def test_summarize_omits_model_field_when_main_model_empty(monkeypatch, pipe):
     assert "model" not in calls["json"]
 
 
+# ── summarize / language pinning ────────────────────────────────────────────
+# Mirrors generate_title's own ru/en pin (owner report there: Russian titles on
+# English-language meetings) — the summary must match the pipeline's transcription
+# language, not whatever language the LLM happens to answer in by default.
+def test_summarize_pins_russian_for_ru_pipeline(monkeypatch):
+    pipe = backend.Pipeline(out_dir="/tmp/mr-test-out", diarize=False, language="ru")
+    calls = install_fake_requests(monkeypatch, payload={"choices": [{"message": {"content": "СВОДКА"}}]})
+    pipe.summarize("транскрипт", "сделай сводку")
+    assert "на русском языке" in calls["json"]["messages"][0]["content"]
+
+
+def test_summarize_pins_english_for_en_pipeline(monkeypatch):
+    pipe = backend.Pipeline(out_dir="/tmp/mr-test-out", diarize=False, language="en")
+    calls = install_fake_requests(monkeypatch, payload={"choices": [{"message": {"content": "Summary"}}]})
+    pipe.summarize("транскрипт", "сделай сводку")
+    assert "Answer in English" in calls["json"]["messages"][0]["content"]
+
+
+def test_summarize_no_language_pin_for_auto_pipeline(monkeypatch):
+    pipe = backend.Pipeline(out_dir="/tmp/mr-test-out", diarize=False, language="auto")
+    calls = install_fake_requests(monkeypatch, payload={"choices": [{"message": {"content": "Summary"}}]})
+    pipe.summarize("транскрипт", "сделай сводку")
+    system_content = calls["json"]["messages"][0]["content"]
+    assert "на русском языке" not in system_content
+    assert "Answer in English" not in system_content
+
+
 # ── list_devices / find_device_index (mock pyaudio) ─────────────────────────
 class FakePyAudio:
     def __init__(self, devices, default_index=0):
