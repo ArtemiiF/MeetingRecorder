@@ -2306,25 +2306,34 @@ function buildNotesRecordingRow(rec) {
   // Duration is dropped from this card (design ref) — it stays visible in the opened
   // note flow (.note-meta), not reinvented here.
   wrap.innerHTML =
-    // Not a <button> — a real 🗑 <button> now lives inside it, and <button> can't
-    // nest another <button> — collapse/expand is wired via click + keydown(Enter/
-    // Space) below instead of native button semantics.
-    `<div class="rail-group-header" role="button" tabindex="0">` +
+    // .rail-group-header is a plain, non-interactive container now — the real 🗑
+    // <button> is its SIBLING, not its descendant. Previously the 🗑 lived inside a
+    // role="button" header (a <button> can't nest another <button>, so that part was
+    // fine), but a real interactive <button> nested inside ANY role="button" element
+    // is invalid ARIA regardless — assistive tech has no guaranteed way to reach an
+    // interactive descendant of something already exposed as a single button. The
+    // collapse/expand toggle (role="button", tabindex, click + keydown Enter/Space)
+    // now lives on .rail-group-toggle, wrapping only caret/title/count/time; 🗑 sits
+    // next to it, both children of the plain .rail-group-header row.
+    `<div class="rail-group-header">` +
+    `<div class="rail-group-toggle" role="button" tabindex="0">` +
     `<span class="glossary-caret">${collapsed ? "▸" : "▾"}</span>` +
     `<span class="rail-group-title">🎙 ${escapeHtml(title)}</span>` +
     countPill +
     `<span class="rail-group-time">${escapeHtml(time)}</span>` +
+    `</div>` +
     `<button type="button" class="rec-trash-btn" title="В корзину (аудио + заметки)">🗑</button></div>` +
     `<div class="rail-group-versions${collapsed ? " hidden" : ""}">${rowsHtml}</div>`;
 
   const header = wrap.querySelector(".rail-group-header");
+  const toggle = wrap.querySelector(".rail-group-toggle");
   const toggleCollapse = () => {
     if (historyGroupCollapsed.has(rec.baseStamp)) historyGroupCollapsed.delete(rec.baseStamp);
     else historyGroupCollapsed.add(rec.baseStamp);
     renderRail();
   };
-  header.addEventListener("click", toggleCollapse);
-  header.addEventListener("keydown", (e) => {
+  toggle.addEventListener("click", toggleCollapse);
+  toggle.addEventListener("keydown", (e) => {
     if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggleCollapse(); }
   });
   wrap.querySelectorAll(".rail-version-row").forEach((row, i) => {
@@ -2338,8 +2347,12 @@ function buildNotesRecordingRow(rec) {
     });
   });
   const trashBtn = header.querySelector(".rec-trash-btn");
+  // trashBtn is now a sibling of .rail-group-toggle, not its descendant, so a click no
+  // longer bubbles into the toggle's own listener regardless — stopPropagation stays
+  // as a defensive no-op (harmless, keeps the pattern identical to the other 🗑 buttons
+  // in this file that DO still nest inside their clickable container).
   trashBtn.addEventListener("click", (e) => {
-    e.stopPropagation(); // don't also toggle collapse via the header's own listener
+    e.stopPropagation();
     deleteRecording(rec, trashBtn);
   });
   return wrap;

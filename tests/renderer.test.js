@@ -5777,12 +5777,14 @@ test("История groups a multi-version recording into a collapsible block: 
   // 3 обработки total (≥2) — the header must carry the count-pill.
   assert.match($("historyList").querySelector(".rail-group-header .rail-rec-badge.count").textContent, /^3 обработки$/);
 
-  $("historyList").querySelector(".rail-group-header").click();
+  // The click target is .rail-group-toggle (caret/title/time), not the outer plain
+  // .rail-group-header row — see the ARIA restructure comment in renderer.js.
+  $("historyList").querySelector(".rail-group-toggle").click();
   await tick(window);
   assert.ok($("historyList").querySelector(".rail-group-versions").classList.contains("hidden"), "collapses on click");
   assert.equal($("historyList").querySelector(".rail-group-header .glossary-caret").textContent, "▸");
 
-  $("historyList").querySelector(".rail-group-header").click();
+  $("historyList").querySelector(".rail-group-toggle").click();
   await tick(window);
   assert.ok(!$("historyList").querySelector(".rail-group-versions").classList.contains("hidden"), "re-expands on a second click");
 });
@@ -6246,24 +6248,49 @@ test("История card redesign (variant B): clicking the header's 🗑 does 
 
 // The header is no longer a native <button> (a real 🗑 <button> now lives inside it —
 // nesting <button>s is invalid HTML), so keyboard activation needs its own handler.
-test("История card redesign (variant B): header is keyboard-activatable (Enter toggles collapse, same as a click)", async () => {
+// The role="button"/tabindex live on .rail-group-toggle, not the outer .rail-group-header
+// row — a real interactive <button> nested inside a role="button" element is invalid
+// ARIA regardless of the native-nesting rule, so the 🗑 was moved out to be a sibling
+// of the toggle (see the ARIA restructure comment above buildNotesRecordingRow).
+test("История card redesign (variant B): toggle is keyboard-activatable (Enter toggles collapse, same as a click)", async () => {
   const { window, $ } = await boot({
     listHistory: async () => [{ name: "2026-07-11-100000", base_stamp: "2026-07-11-100000", title: "Планёрка", template: "Митинг", version: 1, note: "/o/a.md", audio: "/o/a.wav" }],
   });
   window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
-  const header = $("historyList").querySelector(".rail-group-header");
-  assert.equal(header.getAttribute("tabindex"), "0", "must be keyboard-focusable");
-  assert.equal(header.getAttribute("role"), "button");
-  header.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  const toggle = $("historyList").querySelector(".rail-group-toggle");
+  assert.equal(toggle.getAttribute("tabindex"), "0", "must be keyboard-focusable");
+  assert.equal(toggle.getAttribute("role"), "button");
+  toggle.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
   await tick(window);
   assert.equal($("historyList").querySelector(".rail-group-header .glossary-caret").textContent, "▸", "Enter toggles collapse just like a click would");
   // Space is the other native-button activation key — and unlike Enter it scrolls the
   // rail if the handler forgets preventDefault, so both branches get locked.
   const spaceEv = new window.KeyboardEvent("keydown", { key: " ", bubbles: true, cancelable: true });
-  $("historyList").querySelector(".rail-group-header").dispatchEvent(spaceEv);
+  $("historyList").querySelector(".rail-group-toggle").dispatchEvent(spaceEv);
   await tick(window);
   assert.equal($("historyList").querySelector(".rail-group-header .glossary-caret").textContent, "▾", "Space toggles collapse back");
   assert.ok(spaceEv.defaultPrevented, "Space must be preventDefault'ed — otherwise it scrolls the rail");
+});
+
+// Tail 2026-07-22 (ARIA audit): the 🗑 <button> used to be a descendant of the
+// role="button" header — invalid ARIA even though <button> literally can't nest
+// another <button> (assistive tech has no guaranteed path to an interactive descendant
+// of an element already exposed as a single button). Lock the structural invariant at
+// the DOM level, not just visually: the toggle's role="button" subtree must contain no
+// nested <button>, and the real 🗑 <button> must sit outside it, inside the plain header.
+test("История card redesign (ARIA): the group header's role=\"button\" toggle contains no nested <button> — the 🗑 is a sibling, not a descendant", async () => {
+  const { window, $ } = await boot({
+    listHistory: async () => [{ name: "2026-07-11-100000", base_stamp: "2026-07-11-100000", title: "Планёрка", template: "Митинг", version: 1, note: "/o/a.md", audio: "/o/a.wav" }],
+  });
+  window.document.querySelector('.topbtn[data-view="history"]').click(); await tick(window);
+  const header = $("historyList").querySelector(".rail-group-header");
+  const toggle = header.querySelector(".rail-group-toggle");
+  assert.equal(toggle.getAttribute("role"), "button");
+  assert.equal(toggle.querySelectorAll("button").length, 0, "no <button> must be nested inside the role=\"button\" toggle");
+  const trashBtn = header.querySelector(".rec-trash-btn");
+  assert.ok(trashBtn, "the 🗑 button must still exist in the header");
+  assert.ok(!toggle.contains(trashBtn), "the 🗑 button must not be a descendant of the role=\"button\" toggle");
+  assert.equal(trashBtn.parentElement, header, "the 🗑 button is a direct child of the plain header, a sibling of the toggle");
 });
 
 test("История card redesign: version-row 🗑 deletes THAT note via the existing deleteHistoryNote flow, without selecting the row (stopPropagation)", async () => {
