@@ -1345,6 +1345,14 @@ function renderImportQueue() {
 // processes it. There is no separate single-slot record flow.
 let activePendingId = null;   // id of the pending recording the in-flight run belongs to, if any
 let pendingBatchRunning = false; // true while "Обработать все" is driving the queue
+// Ids that already hit a synchronous processAudio reject during the CURRENT batch run
+// (main.js's pre-spawn guards — backend not installed, diarization cache miss, etc. —
+// reject before any real work starts, so nothing changes between immediate retries).
+// nextPendingWork() excludes these so continuePendingBatch advances past a row that
+// can't start, instead of re-picking the same row forever. Cleared on every fresh
+// startPendingBatch() — a new "Обработать все" click (or the row's own per-row ▶) can
+// still retry it.
+let pendingBatchSkipIds = new Set();
 
 // Builds one pending-recording row (icon + name + time + status badge + ▶/✕) for the
 // История rail — the single render path for a pending recording (owner decision: no
@@ -1389,7 +1397,8 @@ function buildPendingRow(item, idx) {
 }
 
 function nextPendingWork() {
-  return (state.pendingRecordings || []).find((it) => it.status === "pending" || it.status === "failed");
+  return (state.pendingRecordings || []).find((it) =>
+    (it.status === "pending" || it.status === "failed") && !pendingBatchSkipIds.has(it.id));
 }
 
 function runPendingItem(item) {
@@ -1477,6 +1486,7 @@ function deletePendingRecording(idx) {
 function startPendingBatch() {
   if (state.recording || state.processing) return;
   pendingBatchRunning = true;
+  pendingBatchSkipIds.clear(); // fresh run — give a row skipped in a prior run one more try
   continuePendingBatch();
 }
 function continuePendingBatch() {
@@ -1929,7 +1939,17 @@ async function startProcessing(fresh, item, override) {
     // (no reprocess, no delete) since activePendingId was already set above.
     // Tail 2026-07-22: finishPendingItem alone left «Обработать все» stalled on this
     // row too — unlike the terminal onProcessEvent branches below, nothing chained to
-    // continuePendingBatch(), so a mid-batch busy-reject required a manual ▶ retry.
+    // continuePendingBatch(). Critic-caught defect in a first pass at this fix: naively
+    // mirroring those branches (chain unconditionally) is NOT safe here — this reject
+    // fires from main.js's own pre-spawn guards (busy/backend-not-installed/diarize-
+    // cache-miss — see the ipcMain.handle("process-audio",...) checks in main.js), none
+    // of which change on their own between immediate retries. nextPendingWork() always
+    // returns the earliest pending/failed row, so an unconditional chain would re-pick
+    // THIS SAME row over and over — a busy-loop with no real backoff (unlike a genuine
+    // backend "error" event, which only ever happens after the process actually ran for
+    // some real wall-clock time, and so can't hit these pre-spawn causes at all).
+    // Record the id first so nextPendingWork advances past it instead of retrying it.
+    if (item) pendingBatchSkipIds.add(item.id);
     if (finishPendingItem("failed") && pendingBatchRunning) continuePendingBatch();
   }
 }
@@ -2346,15 +2366,12 @@ function buildNotesRecordingRow(rec) {
       deleteHistoryNote(rowOrder[i], delBtn);
     });
   });
+  // trashBtn is a sibling of .rail-group-toggle (not its descendant, see the ARIA
+  // comment above), so a click here never reaches the toggle's own listener in the
+  // first place — no stopPropagation needed, unlike the version-row 🗑 above and the
+  // orphan row's 🗑 below, which still nest inside their clickable row.
   const trashBtn = header.querySelector(".rec-trash-btn");
-  // trashBtn is now a sibling of .rail-group-toggle, not its descendant, so a click no
-  // longer bubbles into the toggle's own listener regardless — stopPropagation stays
-  // as a defensive no-op (harmless, keeps the pattern identical to the other 🗑 buttons
-  // in this file that DO still nest inside their clickable container).
-  trashBtn.addEventListener("click", (e) => {
-    e.stopPropagation();
-    deleteRecording(rec, trashBtn);
-  });
+  trashBtn.addEventListener("click", () => deleteRecording(rec, trashBtn));
   return wrap;
 }
 
