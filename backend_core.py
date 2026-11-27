@@ -621,6 +621,17 @@ def pick_author_label(scores, min_mic_share=_AUTHOR_MIN_MIC_SHARE, min_margin=_A
 # ──────────────────────────────────────────────────────────────────────────
 # Misc pure helpers
 # ──────────────────────────────────────────────────────────────────────────
+def head_tail(text, limit, head):
+    """Cut text to about `limit` chars: the first `head` chars, a gap marker, and
+    the last `limit - head` chars. Text within `limit` comes back unchanged;
+    head >= limit leaves no room for a tail and cuts to the first `limit` chars."""
+    if len(text) <= limit:
+        return text
+    if head >= limit:
+        return text[:limit]
+    return text[:head] + "\n\n[…]\n\n" + text[-(limit - head):]
+
+
 def str2bool(v):
     return str(v).lower() in ("1", "true", "yes", "on")
 
