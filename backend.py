@@ -831,6 +831,29 @@ class Pipeline:
     # delegate keeps `pipe.add_timestamps(...)` call sites unchanged.
     add_timestamps = staticmethod(add_timestamps)
 
+    @staticmethod
+    def _release_models():
+        """Free Whisper and pyannote memory before the LLM stages. mlx_whisper keeps
+        its model in a class attribute for the life of the process; MLX and torch's
+        MPS allocator keep freed buffers cached. Measured on the old code: the backend
+        held ~12 GB through the LLM calls while LM Studio loaded its model. Libraries
+        that were never imported are left alone."""
+        import gc
+        try:
+            holder = getattr(sys.modules.get("mlx_whisper.transcribe"), "ModelHolder", None)
+            if holder is not None:
+                holder.model = None
+                holder.model_path = None
+            gc.collect()
+            mx = sys.modules.get("mlx.core")
+            if mx is not None:
+                mx.clear_cache()
+            torch = sys.modules.get("torch")
+            if torch is not None and torch.backends.mps.is_available():
+                torch.mps.empty_cache()
+        except Exception as e:
+            log(f"⚠️ Не освободил память моделей: {e}")
+
     # ── LLM summary with the user's custom prompt ─────────────────────────
     def summarize(self, transcript, user_prompt):
         import requests
@@ -1190,6 +1213,8 @@ class Pipeline:
                 log("⚠️ Сегментов нет — транскрипция пустая/неудачная")
                 stage_end("transcribe", "fail", "нет сегментов после фильтрации")
 
+        self._release_models()
+
         # ── 2b. correct (cache: correct-<lang><glossary-suffix>.json) ─────
         # Own cache file rather than folding into transcribe's — mirrors the
         # diarize stage right below (own stage, own cache, consumes the prior
@@ -1276,6 +1301,7 @@ class Pipeline:
         if not formatted and segments:
             formatted = self.add_timestamps(segments)
         transcript_for_llm = formatted or transcript
+        self._release_models()
 
         # ── 4. LLM summary ────────────────────────────────────────────────
         stage("llm", "Сводка через LLM")
