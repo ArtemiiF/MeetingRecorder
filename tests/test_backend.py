@@ -1478,6 +1478,18 @@ def test_infer_speaker_names_no_labels_no_call(pipe):
     assert pipe.infer_speaker_names("обычный текст без меток") == {}
 
 
+def test_infer_speaker_names_ignores_reasoning_when_content_empty(monkeypatch, pipe):
+    # Seen on a real note (vault meeting of 2026-09-22, gemma-4-26b, LM Studio log):
+    # finish=length, content empty, the reasoning quoted the prompt's own example —
+    # the note got speakers: "Алексей", a name nobody in the meeting had.
+    install_fake_requests(monkeypatch, payload={"choices": [{"finish_reason": "length", "message": {
+        "content": "",
+        "reasoning_content": 'Формат ответа: {"Спикер 1": "Алексей", "Спикер 2": ""}. '
+                             'Смотрю транскрипт, Спикер 1 говорит про деплой...'}}]})
+    t = "**[Спикер 1]**: привет\n\n**[Спикер 2]**: пока"
+    assert pipe.infer_speaker_names(t) == {}
+
+
 # ── infer_speaker_names / main-model override (substantive LLM call) ───────
 def test_infer_speaker_names_includes_model_field_when_main_model_set(monkeypatch):
     pipe = backend.Pipeline(out_dir="/tmp/mr-test-out", diarize=False, main_model="qwen/qwen3.5-9b")
@@ -1522,6 +1534,20 @@ def test_extract_actions_wrapped_in_prose_and_fence(monkeypatch, pipe):
     install_fake_requests(monkeypatch, payload={"choices": [{"message": {"content": content}}]})
     out = pipe.extract_actions("транскрипт")
     assert out == {"items": [{"what": "созвониться с клиентом", "who": "", "due": ""}], "decisions": []}
+
+
+def test_extract_actions_long_transcript_sends_head_and_tail(monkeypatch, pipe):
+    # Agreements usually land at the end of a meeting; a head-only cut never showed
+    # the model the last part of anything longer than 8000 chars.
+    calls = install_fake_requests(monkeypatch, payload={"choices": [{"message": {
+        "content": '{"items":[],"decisions":[]}'}}]})
+    t = "НАЧАЛО " + "а" * 20000 + " ДОГОВОРИЛИСЬ_В_КОНЦЕ"
+    pipe.extract_actions(t)
+    sent = calls["json"]["messages"][1]["content"]
+    assert "НАЧАЛО" in sent
+    assert "ДОГОВОРИЛИСЬ_В_КОНЦЕ" in sent
+    assert "[…]" in sent
+    assert len(sent) < 9000
 
 
 def test_extract_actions_empty_lists_returns_empty_dict_shape(monkeypatch, pipe):
