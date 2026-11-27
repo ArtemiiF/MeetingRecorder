@@ -3342,6 +3342,59 @@ def test_process_no_diarization_omits_speakers_key(monkeypatch, tmp_path):
     assert "speakers:" not in note_text
 
 
+def test_process_releases_models_after_transcribe_and_before_llm(monkeypatch, tmp_path):
+    # Old code, measured: the backend held ~12 GB through the LLM calls while
+    # LM Studio loaded its model. Release once before the correction LLM pass and
+    # once before the summary.
+    order = []
+    pipe = _mock_pipe_diarized(monkeypatch, str(tmp_path / "v"), "**[Спикер 1]**: hi", {})
+    pipe.GLOSSARY = "Kubernetes"
+    monkeypatch.setattr(pipe, "correct_glossary_llm", lambda segs, terms: (None, 0))
+    for name in ("transcribe", "correct_glossary_llm", "diarize", "summarize"):
+        fn = getattr(pipe, name)
+        monkeypatch.setattr(pipe, name, lambda *a, _fn=fn, _n=name: (order.append(_n), _fn(*a))[1])
+    monkeypatch.setattr(pipe, "_release_models", lambda: order.append("release"))
+    src = tmp_path / "in.wav"; src.write_bytes(b"x")
+    capture(pipe.process, str(src), "prompt")
+    assert order == ["transcribe", "release", "correct_glossary_llm", "diarize", "release", "summarize"]
+
+
+def test_release_models_drops_whisper_and_clears_caches(monkeypatch):
+    calls = []
+    holder = type("ModelHolder", (), {"model": object(), "model_path": "repo"})
+    mlx_transcribe = types.ModuleType("mlx_whisper.transcribe")
+    mlx_transcribe.ModelHolder = holder
+    mx = types.ModuleType("mlx.core")
+    mx.clear_cache = lambda: calls.append("mx")
+    torch = types.ModuleType("torch")
+    torch.backends = types.SimpleNamespace(mps=types.SimpleNamespace(is_available=lambda: True))
+    torch.mps = types.SimpleNamespace(empty_cache=lambda: calls.append("mps"))
+    monkeypatch.setitem(sys.modules, "mlx_whisper.transcribe", mlx_transcribe)
+    monkeypatch.setitem(sys.modules, "mlx.core", mx)
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    assert capture(backend.Pipeline._release_models) == []
+    assert holder.model is None and holder.model_path is None
+    assert calls == ["mx", "mps"]
+
+
+def test_release_models_does_not_import_unloaded_libraries(monkeypatch):
+    # CI has neither torch nor mlx: an import attempt would fail into the except
+    # branch, so both the import spy and the empty log guard it.
+    for name in ("mlx_whisper.transcribe", "mlx.core", "torch"):
+        monkeypatch.delitem(sys.modules, name, raising=False)
+    tried = []
+    real_import = __import__
+
+    def spy(name, *a, **k):
+        if name.split(".")[0] in ("torch", "mlx", "mlx_whisper"):
+            tried.append(name)
+        return real_import(name, *a, **k)
+
+    monkeypatch.setattr("builtins.__import__", spy)
+    assert capture(backend.Pipeline._release_models) == []
+    assert tried == []
+
+
 # ── process() → `source` frontmatter (note-origin typing, owner decision: three types) ──
 def test_process_source_is_recording_when_mic_file_given(monkeypatch, tmp_path):
     src = tmp_path / "in.wav"; src.write_bytes(b"x")
