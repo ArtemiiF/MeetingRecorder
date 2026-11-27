@@ -50,6 +50,7 @@ from backend_core import (
     pick_author_label,
     _normalized_xcorr_peak,
     str2bool,
+    head_tail,
     combine,
     add_timestamps,
 )
@@ -951,7 +952,9 @@ class Pipeline:
             resp = requests.post(self.LMSTUDIO_API, json=payload, timeout=120)
             if resp.status_code == 200:
                 msg = (resp.json().get("choices") or [{}])[0].get("message", {})
-                c = (msg.get("content") or "") or (msg.get("reasoning_content") or "")
+                # Content only: a truncated reasoning trace quotes the prompt's own
+                # example ("Алексей") and that name landed in a real note.
+                c = msg.get("content") or ""
                 m = re.search(r"\{[^{}]*\}", c, re.S)
                 if m:
                     data = json.loads(m.group(0))
@@ -994,11 +997,10 @@ class Pipeline:
 
     def extract_actions(self, transcript):
         """Extract action items / decisions / follow-ups from the meeting transcript
-        via one structured JSON LLM call. Same JSON-snippet contract as
-        infer_speaker_names/cmd_classify (content, falling back to reasoning_content —
-        safe here because the result is schema-validated, not echoed verbatim like
-        summarize()'s note body). Malformed/empty output degrades to {} — no note
-        section, no crash."""
+        via one structured JSON LLM call. Parses content, falling back to
+        reasoning_content; only objects with the items/decisions shape survive. A long
+        transcript is cut to its head and tail: agreements tend to come at the end.
+        Malformed/empty output degrades to {} — no note section, no crash."""
         import requests
         try:
             payload = {
@@ -1013,7 +1015,7 @@ class Pipeline:
                         '"who":"кто (или пустая строка)","due":"срок (или пустая строка)"}],'
                         '"decisions":["принятое решение", ...]}. '
                         "Если пунктов нет — пустые списки.\n\n"
-                        f"ТРАНСКРИПТ:\n{transcript[:8000]}"},
+                        f"ТРАНСКРИПТ:\n{head_tail(transcript, 8000, 2000)}"},
                 ],
                 "temperature": 0.1, "max_tokens": 4000,
             }

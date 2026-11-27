@@ -21,6 +21,31 @@ def seg(text, start=0.0, end=5.0):
     return {"text": text, "start": start, "end": end}
 
 
+# ── head_tail ───────────────────────────────────────────────────────────────
+def test_head_tail_short_text_unchanged():
+    assert backend_core.head_tail("короткий текст", 8000, 2000) == "короткий текст"
+
+
+def test_head_tail_exactly_at_limit_unchanged():
+    t = "x" * 8000
+    assert backend_core.head_tail(t, 8000, 2000) == t
+
+
+def test_head_tail_long_text_keeps_head_and_tail():
+    t = "H" * 2000 + "m" * 10000 + "T" * 6000
+    out = backend_core.head_tail(t, 8000, 2000)
+    assert out.startswith("H" * 2000)
+    assert out.endswith("T" * 6000)
+    assert "m" not in out
+    assert "[…]" in out
+
+
+@pytest.mark.parametrize("head", [8000, 9000])
+def test_head_tail_head_not_below_limit_cuts_to_limit(head):
+    t = "a" * 8000 + "b" * 12000
+    assert backend_core.head_tail(t, 8000, head) == "a" * 8000
+
+
 # ── str2bool ────────────────────────────────────────────────────────────────
 @pytest.mark.parametrize("v,exp", [
     ("true", True), ("True", True), ("1", True), ("yes", True), ("on", True),
