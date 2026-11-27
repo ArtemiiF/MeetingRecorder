@@ -57,6 +57,14 @@ from backend_core import (
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
+# pyannote.audio 4 counts model and pipeline loads and exports them to
+# otel.pyannote.ai through the OpenTelemetry SDK. PYANNOTE_METRICS_ENABLED=false
+# stops pyannote's counters; OTEL_SDK_DISABLED=true turns the SDK's meter provider
+# into a no-op, so its own collection metrics are not exported either. Values the
+# user set stay.
+os.environ.setdefault("PYANNOTE_METRICS_ENABLED", "false")
+os.environ.setdefault("OTEL_SDK_DISABLED", "true")
+
 
 # ──────────────────────────────────────────────────────────────────────────
 # Event-name contract (M4 arch-audit) — single source of truth shared with
@@ -374,7 +382,7 @@ class Pipeline:
             import torch
             log("🔇 Удаляю тишину (Silero VAD)...")
             model, utils = torch.hub.load(
-                repo_or_dir="snakers4/silero-vad", model="silero_vad", force_reload=False
+                repo_or_dir=_VAD_HUB_REPO, model="silero_vad", force_reload=False
             )
             (get_speech_timestamps, save_audio, read_audio, _, collect_chunks) = utils
             wav = read_audio(audio_file, sampling_rate=16000)
@@ -1432,6 +1440,14 @@ class Pipeline:
 
 
 def cmd_process(args):
+    # With the models cached, huggingface_hub still asks huggingface.co for the
+    # latest revision on every run (mlx_whisper's snapshot_download, pyannote's
+    # from_pretrained). Offline mode reads the cache only. Set before the first
+    # huggingface_hub import; a value the user set stays. An incomplete snapshot
+    # keeps the run online, so the download can finish as before.
+    repos = [_WHISPER_REPO_ID] + (_PYANNOTE_REPO_IDS if args.diarize else [])
+    if all(_hf_snapshot_ready(r) for r in repos):
+        os.environ.setdefault("HF_HUB_OFFLINE", "1")
     prompt = Path(args.prompt_file).read_text(encoding="utf-8") if args.prompt_file else ""
     if not prompt.strip():
         prompt = "Сделай краткую структурированную сводку этой встречи в Markdown."
@@ -2589,6 +2605,9 @@ _WHISPER_REPO_ID = "mlx-community/whisper-large-v3-turbo"
 _WHISPER_MODEL_DIR = Path.home() / ".cache/huggingface/hub/models--mlx-community--whisper-large-v3-turbo"
 _VAD_JIT_PATH = Path.home() / ".cache/torch/hub/snakers4_silero-vad_master/src/silero_vad/data/silero_vad.jit"
 _VAD_REPO_DIR = Path.home() / ".cache/torch/hub/snakers4_silero-vad_master"
+# Explicit branch: without it torch.hub asks github.com whether "main" exists on
+# every load, cache or not. "master" is the branch the cache dir above is named for.
+_VAD_HUB_REPO = "snakers4/silero-vad:master"
 # All three must be present for diarization to actually work — pyannote's own
 # config.yaml (read directly on this machine) declares the segmentation +
 # wespeaker sub-models the top pipeline repo pulls in.
@@ -2601,6 +2620,28 @@ _PYANNOTE_REPO_IDS = [
 
 def _hf_cache_dir(repo_id):
     return Path.home() / ".cache/huggingface/hub" / ("models--" + repo_id.replace("/", "--"))
+
+
+# Files a processing run reads from each repo's snapshot (mlx_whisper's load_model;
+# pyannote's pipeline config and the two sub-models).
+_HF_RUN_FILES = {
+    _WHISPER_REPO_ID: ("config.json", "weights.safetensors"),
+    "pyannote/speaker-diarization-3.1": ("config.yaml",),
+    "pyannote/segmentation-3.0": ("pytorch_model.bin",),
+    "pyannote/wespeaker-voxceleb-resnet34-LM": ("pytorch_model.bin",),
+}
+
+
+def _hf_snapshot_ready(repo_id):
+    """True when the cached snapshot that refs/main points at holds every file a
+    run reads. A repo dir alone can be left over from an interrupted download."""
+    d = _hf_cache_dir(repo_id)
+    try:
+        rev = (d / "refs" / "main").read_text(encoding="utf-8").strip()
+    except OSError:
+        return False
+    snap = d / "snapshots" / rev
+    return bool(rev) and all((snap / f).is_file() for f in _HF_RUN_FILES[repo_id])
 
 
 # needs_token is a structural property of the model (pyannote's repos require
@@ -2762,7 +2803,7 @@ def _download_model(model_id):
         if _VAD_REPO_DIR.exists() and not _VAD_JIT_PATH.exists():
             import shutil
             shutil.rmtree(_VAD_REPO_DIR, ignore_errors=True)
-        torch.hub.load(repo_or_dir="snakers4/silero-vad", model="silero_vad", force_reload=False)
+        torch.hub.load(repo_or_dir=_VAD_HUB_REPO, model="silero_vad", force_reload=False)
     elif model_id == "diarization":
         from huggingface_hub import snapshot_download
         hf_token = os.environ.get("HF_TOKEN")

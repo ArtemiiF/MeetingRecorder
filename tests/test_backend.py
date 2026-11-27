@@ -1083,8 +1083,43 @@ def test_cmd_download_models_success_downloads_everything_missing(monkeypatch, t
     assert [c["repo_id"] for c in hf_calls["snapshot"]] == [
         backend._WHISPER_REPO_ID, *backend._PYANNOTE_REPO_IDS
     ]
-    assert torch_calls["load"][0]["repo_or_dir"] == "snakers4/silero-vad"
+    assert torch_calls["load"][0]["repo_or_dir"] == "snakers4/silero-vad:master"
 
+
+
+def test_remove_silence_vad_pins_silero_branch(monkeypatch, pipe):
+    # Without a branch torch.hub asks github.com whether "main" exists on every run,
+    # even with the repo cached. The cache dir is already snakers4_silero-vad_master.
+    torch_calls = install_fake_torch_hub(monkeypatch)
+    pipe.remove_silence_vad("x.wav")
+    assert torch_calls["load"][0]["repo_or_dir"] == "snakers4/silero-vad:master"
+    branch = backend._VAD_HUB_REPO.split(":")[1]
+    assert backend._VAD_REPO_DIR.name == f"snakers4_silero-vad_{branch}"
+
+
+_TELEMETRY_PROBE = ("import os, sys, backend; print(os.environ['PYANNOTE_METRICS_ENABLED'], "
+                    "os.environ['OTEL_SDK_DISABLED'], 'huggingface_hub' in sys.modules)")
+
+
+def _import_backend_env(env):
+    import subprocess
+    out = subprocess.run([sys.executable, "-c", _TELEMETRY_PROBE],
+                         cwd=str(Path(backend.__file__).parent), env=env, capture_output=True, text=True)
+    return out.stdout.split(), out.stderr
+
+
+def test_import_disables_pyannote_telemetry_by_default():
+    # Also locks the import order HF_HUB_OFFLINE relies on: huggingface_hub reads
+    # it once on import, so backend must not import it at module level.
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("PYANNOTE_METRICS_ENABLED", "OTEL_SDK_DISABLED")}
+    out, err = _import_backend_env(env)
+    assert out == ["false", "true", "False"], err
+
+
+def test_import_keeps_user_choice_for_pyannote_telemetry():
+    out, err = _import_backend_env({**os.environ, "PYANNOTE_METRICS_ENABLED": "true", "OTEL_SDK_DISABLED": "false"})
+    assert out == ["true", "false", "False"], err
 
 def test_cmd_download_models_skips_already_cached_model(monkeypatch, tmp_path):
     _set_model_paths(monkeypatch, tmp_path, whisper=True)
@@ -2096,6 +2131,86 @@ def test_cmd_process_forwards_user_prompt(monkeypatch, tmp_path):
     backend.cmd_process(args)
     assert captured["p"] == "МОЙ КАСТОМНЫЙ ПРОМПТ"
 
+
+
+def _make_snapshot(repo_id, files=None):
+    """A cached HF snapshot the way huggingface_hub lays it out: refs/main → hash,
+    snapshots/<hash>/<files>. files=None → every file a run reads."""
+    d = backend._hf_cache_dir(repo_id)
+    (d / "refs").mkdir(parents=True, exist_ok=True)
+    (d / "refs" / "main").write_text("abc123")
+    snap = d / "snapshots" / "abc123"
+    snap.mkdir(parents=True, exist_ok=True)
+    for f in backend._HF_RUN_FILES[repo_id] if files is None else files:
+        (snap / f).write_bytes(b"x")
+
+
+def _offline_seen(monkeypatch, tmp_path, *, diarize, preset=None, repos=(), partial=None):
+    """Run cmd_process with a stub Pipeline.process and return HF_HUB_OFFLINE as the
+    pipeline saw it. setenv-then-delenv makes monkeypatch restore the variable even
+    though cmd_process itself writes os.environ. repos: complete snapshots;
+    partial: {repo_id: files} snapshots missing something."""
+    monkeypatch.setenv("HF_HUB_OFFLINE", "placeholder")
+    monkeypatch.delenv("HF_HUB_OFFLINE")
+    if preset is not None:
+        monkeypatch.setenv("HF_HUB_OFFLINE", preset)
+    _set_model_paths(monkeypatch, tmp_path)
+    for r in repos:
+        _make_snapshot(r)
+    for r, files in (partial or {}).items():
+        _make_snapshot(r, files)
+    seen = {}
+    monkeypatch.setattr(backend.Pipeline, "process",
+                        lambda self, *a, **k: seen.update(offline=os.environ.get("HF_HUB_OFFLINE")))
+    args = types.SimpleNamespace(
+        prompt_file=None, out_dir=str(tmp_path), engine="mlx",
+        diarize=diarize, infile="x.wav", keep_audio=False, cache_dir=None,
+        language="ru", glossary="", summarize=True, template="", db=None,
+        mic=None, system=None, author_name="Автор", origin=None, fast_model="", main_model="",
+        glossary_usage_file=None, version=None)
+    backend.cmd_process(args)
+    return seen["offline"]
+
+
+W = backend._WHISPER_REPO_ID
+
+
+def test_cmd_process_offline_when_all_models_cached(monkeypatch, tmp_path):
+    assert _offline_seen(monkeypatch, tmp_path, diarize=True,
+                         repos=[W, *backend._PYANNOTE_REPO_IDS]) == "1"
+
+
+def test_cmd_process_offline_without_diarization_needs_only_whisper(monkeypatch, tmp_path):
+    assert _offline_seen(monkeypatch, tmp_path, diarize=False, repos=[W]) == "1"
+
+
+def test_cmd_process_stays_online_when_whisper_missing(monkeypatch, tmp_path):
+    assert _offline_seen(monkeypatch, tmp_path, diarize=False) is None
+
+
+def test_cmd_process_stays_online_when_diarization_missing(monkeypatch, tmp_path):
+    assert _offline_seen(monkeypatch, tmp_path, diarize=True, repos=[W]) is None
+
+
+def test_cmd_process_stays_online_on_interrupted_whisper_download(monkeypatch, tmp_path):
+    # repo dir and refs/main exist, the weights never arrived: offline mode would
+    # hand mlx_whisper a broken snapshot with no way to finish the download.
+    assert _offline_seen(monkeypatch, tmp_path, diarize=False,
+                         partial={W: ["config.json"]}) is None
+
+
+def test_cmd_process_stays_online_on_interrupted_pyannote_download(monkeypatch, tmp_path):
+    first, *rest = backend._PYANNOTE_REPO_IDS
+    assert _offline_seen(monkeypatch, tmp_path, diarize=True, repos=[W, *rest],
+                         partial={first: []}) is None
+
+
+def test_cmd_process_keeps_user_hf_offline_value(monkeypatch, tmp_path):
+    assert _offline_seen(monkeypatch, tmp_path, diarize=False, repos=[W], preset="0") == "0"
+
+
+def test_hf_run_files_cover_every_repo_a_run_reads():
+    assert set(backend._HF_RUN_FILES) == {backend._WHISPER_REPO_ID, *backend._PYANNOTE_REPO_IDS}
 
 # ── diarization HF_TOKEN guard (critic CRITICAL fix) ────────────────────────
 def test_diarize_skipped_without_hf_token(pipe):
